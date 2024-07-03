@@ -17,4 +17,6 @@ fastapi run src/main.py
 
 ## Running the scraper
 
-TODO
+```sh
+poetry run scraper
+```

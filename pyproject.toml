@@ -1,14 +1,17 @@
 [tool.poetry]
-name = "api"
+name = "courses-api"
 version = "0.1.0"
 description = ""
 authors = ["CS Club Open Source Team <dev@csclub.org.au>"]
 readme = "README.md"
+packages = [{include = "src"}]
 
 [tool.poetry.dependencies]
 python = "^3.11"
 fastapi = "^0.111.0"
 
+[tool.poetry.scripts]
+scraper = "src.scraper:main"
 
 [build-system]
 requires = ["poetry-core"]
