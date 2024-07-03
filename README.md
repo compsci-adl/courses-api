@@ -6,13 +6,12 @@ Ensure that dependencies are installed.
 poetry install
 ```
 
-
 ## Running the API Server
 
 Run the FastAPI server
 
 ```sh
-fastapi run src/main.py
+fastapi run src/server.py
 ```
 
 ## Running the scraper
