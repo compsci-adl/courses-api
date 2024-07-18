@@ -23,8 +23,8 @@ class DataFetcher:
         if resp["status"] != "success":
             return {}
 
-        self.data = resp["data"]["query"]["rows"]
-        return {"data": self.data}
+        self.data = {"data": resp["data"]["query"]["rows"]}
+        return self.data
 
 
 # As an example
