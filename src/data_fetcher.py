@@ -18,7 +18,7 @@ class DataFetcher:
         if self.data is not None:
             return self.data
 
-        resp = requests.get(self.url)
+        resp = requests.get(self.url).json()
 
         if resp["status"] != "success":
             return {}
