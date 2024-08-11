@@ -16,10 +16,10 @@ integration:
 	poetry run python -m unittest discover -s tests/integration
 
 test-scraper:
-	SHOW_DATA=true poetry run python -m unittest tests.unit.test_CourseScraper
+	SHOW_DATA=true poetry run python -m unittest tests.test_CourseScraper
 
 test-fetcher:
-	SHOW_DATA=true poetry run python -m unittest tests.integration.test_DataFetcher
+	SHOW_DATA=true poetry run python -m unittest tests.test_DataFetcher
 
 scrape:
 	poetry run python src/scraper/CourseScraper.py
