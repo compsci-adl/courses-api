@@ -1,34 +1,60 @@
 import re
-import requests
 from datetime import datetime
+from typing import Union
+
+import requests
 from fastapi import FastAPI
+
+from .data_fetcher import DataFetcher
 
 # Gets the current year, needed explicitly for the COURSE_DTL CoursePlanner API endpoint as other years break the response
 def current_year() -> str:
+    """Gets the current year, needed explicitly for the COURSE_DTL CoursePlanner API endpoint as other years break the response"""
     return datetime.now().year
 
 # Gets the current semester, to be used as a simple default for /courses/
 def current_sem() -> str:
+    """Gets the current semester, to be used as a simple default for /courses/  """
     return "Semester 1" if datetime.now().month <= 6 else "Semester 2" # Not the most bulletproof logic lol
 
-# Converts the date format given in the meetings to "MM-DD"
+# Converts the date format given in the meetings from "DD {3-char weekday} - DD {3-char weekday}" to "MM-DD"
 def meeting_date_convert(raw_date: str) -> dict[str]:
+    """Converts the date format given in the meetings to "MM-DD"
+
+    Args:
+        raw_date (str): The given meeting date in the format of "DD {3-char weekday} - DD {3-char weekday}"
+
+    Returns:
+        formatted_date (dict[str]): The formatted meeting date in the format of "MM-DD" in a dict containing 
+        the "start" and "end" keys and their corresponding dates
+    """
+    
     months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
     start, end = raw_date.split(" - ")
     
-    start_d, start_m = start.split(" ")
+    start_d, start_m = start.split()
     start_m = str(months.index(start_m) + 1).zfill(2)
     
-    end_d, end_m = end.split(" ")
+    end_d, end_m = end.split()
     end_m = str(months.index(end_m) + 1).zfill(2)
     
-    return {
+    formatted_date = {
         "start": f"{start_m}-{start_d.zfill(2)}",
         "end": f"{end_m}-{end_d.zfill(2)}"
     }
+    return formatted_date
 
-# Converts the time given in meetings to "HH:mm"
+# Converts the time given in meetings from "H{am/pm}" to "HH:mm"
 def meeting_time_convert(raw_time: str) -> str:
+    """Converts the time given in meetings to "HH:mm"
+
+    Args:
+        raw_time (str): The given meeting time in the format of "H{am/pm}"
+
+    Returns:
+        formatted_time (str): The formatted meeting time in the format of "HH:mm"
+    """
+    
     period = raw_time[-2:]
     hour = int(raw_time.replace(period, ""))
     
@@ -36,10 +62,22 @@ def meeting_time_convert(raw_time: str) -> str:
         hour += 12
     
     hour = str(hour).zfill(2)
-    return f"{hour}:00"
+    formatted_time = f"{hour}:00"
+    return formatted_time
 
 # Takes in a string of -requisites and returns a dict containing the original string, and a list of the parsed-out subjects
-def parse_requisites(raw_requisites):
+def parse_requisites(raw_requisites: str) -> Union[dict[str], None]:
+    """Takes in a string of -requisites and returns a dict containing the original string, and a list of the parsed-out subjects
+
+    Args:
+        raw_requisites (str): The raw string containing a list of -requisites, usually in the format of 
+        "COMP SCI 1103, COMP SCI 2202, COMP SCI 2202B" as an example
+
+    Returns:
+        parsed_requisites (Union[dict[str], None]): Either a dict with "desc"s value being the original -requisites string and 
+        "subjects" being a list of the parsed -requisites, or None if raw_requisites is None
+    """
+    
     if not raw_requisites:
         return None
     
@@ -47,16 +85,30 @@ def parse_requisites(raw_requisites):
     pattern = r'\b([A-Z]+(?:\s+[A-Z]+)*)\s+(\d{4}\w*)\b'
     matched_subjects = [" ".join(match) for match in re.findall(pattern, raw_requisites)]
     
+    parsed_requisites = None
     if len(matched_subjects) > 0:
-        return {
+        parsed_requisites = {
             "desc": raw_requisites,
             "subjects": matched_subjects
         }
-    else:
-        return raw_requisites
+    
+    return parsed_requisites
 
 # Converts a year and term string to the courseplanner term number
 def get_term_number(year: int, term: str) -> int:
+    """Converts a year and term string to the courseplanner term number
+
+    Args:
+        year (int): The term's year
+        term (str): The term as a full string, for example "Semester 1" or "Semester 2", or as one of "sem1" or "sem2"
+
+    Raises:
+        Exception: Throws an exception on an invalid term
+
+    Returns:
+        int: The term number used in the CoursePlanner API
+    """
+    
     # Make sure year and term are of the correct format
     year = str(year)
     term = {
@@ -64,7 +116,8 @@ def get_term_number(year: int, term: str) -> int:
         "sem2": "Semester 2"
     }.get(term, term)
     
-    terms_raw = requests.get(f"https://courseplanner-api.adelaide.edu.au/api/course-planner-query/v1/?target=/system/TERMS/queryx&virtual=Y&year_from=0&year_to=9999").json()["data"]["query"]["rows"]
+    #terms_raw = requests.get(f"https://courseplanner-api.adelaide.edu.au/api/course-planner-query/v1/?target=/system/TERMS/queryx&virtual=Y&year_from=0&year_to=9999").json()["data"]["query"]["rows"]
+    terms_raw = DataFetcher(f"https://courseplanner-api.adelaide.edu.au/api/course-planner-query/v1/?target=/system/TERMS/queryx&virtual=Y&year_from=0&year_to=9999").get()["data"]
     
     # Find and return the chosen term number
     for cur_term in terms_raw:
@@ -72,15 +125,29 @@ def get_term_number(year: int, term: str) -> int:
             return cur_term["TERM"]
         
     # Syntax error on invalid term
-    raise SyntaxError(f"Invalid term: {term}")
+    raise Exception(f"Invalid term: {term}")
 
 
-def get_course_info(id: int, year: int, term: str) -> dict:
+# Gets the course info given an ID, year and term, and returns a dict as described in the spec
+def get_course_info(course_id: int, year: int, term: str) -> dict:
+    """Gets the course info given an ID, year and term, and returns a dict as described in the spec
+
+    Args:
+        course_id (int): The ID of the course as used in the CoursePlanner API
+        year (int): The year the course takes place in
+        term (str): The term the course takes place in, either as "sem1", "sem2", "Semester 1", "Semester 2", or the ID of that term
+
+    Returns:
+        dict: A dict containing the course info per the spec, see issue #3 for more info
+    """
+    
     course_info = dict()
     
     term_number = get_term_number(year, term)
-    details = requests.get(f"https://courseplanner-api.adelaide.edu.au/api/course-planner-query/v1/?target=/system/COURSE_DTL/queryx&virtual=Y&year={year}&courseid={id}&term={term_number}").json()["data"]["query"]["rows"][0]
-    classes = requests.get(f"https://courseplanner-api.adelaide.edu.au/api/course-planner-query/v1/?target=/system/COURSE_CLASS_LIST/queryx&virtual=Y&crseid={id}&term={term_number}&offer=1&session=1").json()["data"]["query"]["rows"][0]
+    #details = requests.get(f"https://courseplanner-api.adelaide.edu.au/api/course-planner-query/v1/?target=/system/COURSE_DTL/queryx&virtual=Y&year={year}&courseid={course_id}&term={term_number}").json()["data"]["query"]["rows"][0]
+    details = DataFetcher(f"https://courseplanner-api.adelaide.edu.au/api/course-planner-query/v1/?target=/system/COURSE_DTL/queryx&virtual=Y&year={year}&courseid={course_id}&term={term_number}").get()["data"][0]
+    #classes = requests.get(f"https://courseplanner-api.adelaide.edu.au/api/course-planner-query/v1/?target=/system/COURSE_CLASS_LIST/queryx&virtual=Y&crseid={course_id}&term={term_number}&offer=1&session=1").json()["data"]["query"]["rows"][0]
+    classes = DataFetcher(f"https://courseplanner-api.adelaide.edu.au/api/course-planner-query/v1/?target=/system/COURSE_CLASS_LIST/queryx&virtual=Y&crseid={course_id}&term={term_number}&offer=1&session=1").get()["data"][0]
     
     # Format the classes properly
     classes_formatted = []
@@ -123,7 +190,7 @@ def get_course_info(id: int, year: int, term: str) -> dict:
         classes_formatted.append(cur_class_details)
     
     course_info = {
-        "id": id,
+        "course_id": course_id,
         "name": {
             "subject": details["SUBJECT"],
             "code": details["CATALOG_NBR"],
@@ -161,19 +228,34 @@ def get_course_info(id: int, year: int, term: str) -> dict:
     
     return course_info
 
+# Takes in a year and term, and returns a list of all courses in that year and term as dicts described in the spec
 def get_courses(year: int, term: str) -> list[dict]:
+    """Takes in a year and term, and returns a list of all courses in that year and term as dicts described in the spec
+
+    Args:
+        year (int): The year of the courses from 2006 to the current year
+        term (str): The term as either an ID or a string
+
+    Raises:
+        Exception: Raises exception on an invalid year
+
+    Returns:
+        list[dict]: A list of courses as dicts described in the spec in issue #3
+    """
+    
     # Make sure year is within bounds
     if year < 2006 or year > current_year():
-        raise SyntaxError(f"Invalid year: {year}")
+        raise Exception(f"Invalid year: {year}")
     
     MAX_RESULTS = 5000
-    term_url = "&term=" + get_term_number(year, term) if term != None else ""
-    courses_raw = requests.get(f"https://courseplanner-api.adelaide.edu.au/api/course-planner-query/v1/?target=/system/COURSE_SEARCH/queryx&virtual=Y&year={year}&pagenbr=1&pagesize={MAX_RESULTS}" + term_url).json()["data"]["query"]["rows"]
-    
+    term_url = "&term=" + get_term_number(year, term) if term is not None else ""
+    #courses_raw = requests.get(f"https://courseplanner-api.adelaide.edu.au/api/course-planner-query/v1/?target=/system/COURSE_SEARCH/queryx&virtual=Y&year={year}&pagenbr=1&pagesize={MAX_RESULTS}" + term_url).json()["data"]["query"]["rows"]
+    courses_raw = DataFetcher(f"https://courseplanner-api.adelaide.edu.au/api/course-planner-query/v1/?target=/system/COURSE_SEARCH/queryx&virtual=Y&year={year}&pagenbr=1&pagesize={MAX_RESULTS}" + term_url).get()["data"]
+    print(courses_raw)
     courses = []
     for course in courses_raw:
         courses.append({
-            "id": course["COURSE_ID"],
+            "course_id": course["COURSE_ID"],
             "name": course["SUBJECT"] + " " + course["CATALOG_NBR"],
             # Below info was not specified, but I feel it could be useful
             "title": course["COURSE_TITLE"],
@@ -193,22 +275,22 @@ app = FastAPI()
 
 # Course details, takes in just a course ID and returns all course info and it's class times and such
 # Also optionally takes in a year and semester as query params, but both default to the current ones
-@app.get("/course/{id}")
-async def course_info_route(id, year: int = None, term: str = None):
-    id = int(id)
+@app.get("/course/{course_id}")
+async def course_info_route(course_id, year: int = None, term: str = None):
+    course_id = int(course_id)
     
-    if year == None:
+    if year is None:
         year = current_year()
-    if term == None:
+    if term is None:
         term = current_sem()
     
-    return get_course_info(id, year, term)
+    return get_course_info(course_id, year, term)
 
 # List of courses given (year, term)
 @app.get("/courses/")
 async def courses_route(year: int = None, term: str = None):
     # Default args
-    if year == None:
+    if year is None:
         year = current_year()
     
     return get_courses(year, term)
