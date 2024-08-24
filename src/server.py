@@ -2,22 +2,18 @@ import re
 from datetime import datetime
 from typing import Union
 
-import requests
 from fastapi import FastAPI
 
 from .data_fetcher import DataFetcher
 
-# Gets the current year, needed explicitly for the COURSE_DTL CoursePlanner API endpoint as other years break the response
 def current_year() -> str:
     """Gets the current year, needed explicitly for the COURSE_DTL CoursePlanner API endpoint as other years break the response"""
     return datetime.now().year
 
-# Gets the current semester, to be used as a simple default for /courses/
 def current_sem() -> str:
     """Gets the current semester, to be used as a simple default for /courses/  """
     return "Semester 1" if datetime.now().month <= 6 else "Semester 2" # Not the most bulletproof logic lol
 
-# Converts the date format given in the meetings from "DD {3-char weekday} - DD {3-char weekday}" to "MM-DD"
 def meeting_date_convert(raw_date: str) -> dict[str]:
     """Converts the date format given in the meetings to "MM-DD"
 
@@ -44,7 +40,6 @@ def meeting_date_convert(raw_date: str) -> dict[str]:
     }
     return formatted_date
 
-# Converts the time given in meetings from "H{am/pm}" to "HH:mm"
 def meeting_time_convert(raw_time: str) -> str:
     """Converts the time given in meetings to "HH:mm"
 
@@ -65,7 +60,6 @@ def meeting_time_convert(raw_time: str) -> str:
     formatted_time = f"{hour}:00"
     return formatted_time
 
-# Takes in a string of -requisites and returns a dict containing the original string, and a list of the parsed-out subjects
 def parse_requisites(raw_requisites: str) -> Union[dict[str], None]:
     """Takes in a string of -requisites and returns a dict containing the original string, and a list of the parsed-out subjects
 
@@ -94,7 +88,6 @@ def parse_requisites(raw_requisites: str) -> Union[dict[str], None]:
     
     return parsed_requisites
 
-# Converts a year and term string to the courseplanner term number
 def get_term_number(year: int, term: str) -> int:
     """Converts a year and term string to the courseplanner term number
 
@@ -116,7 +109,6 @@ def get_term_number(year: int, term: str) -> int:
         "sem2": "Semester 2"
     }.get(term, term)
     
-    #terms_raw = requests.get(f"https://courseplanner-api.adelaide.edu.au/api/course-planner-query/v1/?target=/system/TERMS/queryx&virtual=Y&year_from=0&year_to=9999").json()["data"]["query"]["rows"]
     terms_raw = DataFetcher(f"https://courseplanner-api.adelaide.edu.au/api/course-planner-query/v1/?target=/system/TERMS/queryx&virtual=Y&year_from=0&year_to=9999").get()["data"]
     
     # Find and return the chosen term number
@@ -128,7 +120,6 @@ def get_term_number(year: int, term: str) -> int:
     raise Exception(f"Invalid term: {term}")
 
 
-# Gets the course info given an ID, year and term, and returns a dict as described in the spec
 def get_course_info(course_id: int, year: int, term: str) -> dict:
     """Gets the course info given an ID, year and term, and returns a dict as described in the spec
 
@@ -144,9 +135,7 @@ def get_course_info(course_id: int, year: int, term: str) -> dict:
     course_info = dict()
     
     term_number = get_term_number(year, term)
-    #details = requests.get(f"https://courseplanner-api.adelaide.edu.au/api/course-planner-query/v1/?target=/system/COURSE_DTL/queryx&virtual=Y&year={year}&courseid={course_id}&term={term_number}").json()["data"]["query"]["rows"][0]
     details = DataFetcher(f"https://courseplanner-api.adelaide.edu.au/api/course-planner-query/v1/?target=/system/COURSE_DTL/queryx&virtual=Y&year={year}&courseid={course_id}&term={term_number}").get()["data"][0]
-    #classes = requests.get(f"https://courseplanner-api.adelaide.edu.au/api/course-planner-query/v1/?target=/system/COURSE_CLASS_LIST/queryx&virtual=Y&crseid={course_id}&term={term_number}&offer=1&session=1").json()["data"]["query"]["rows"][0]
     classes = DataFetcher(f"https://courseplanner-api.adelaide.edu.au/api/course-planner-query/v1/?target=/system/COURSE_CLASS_LIST/queryx&virtual=Y&crseid={course_id}&term={term_number}&offer=1&session=1").get()["data"][0]
     
     # Format the classes properly
@@ -228,7 +217,6 @@ def get_course_info(course_id: int, year: int, term: str) -> dict:
     
     return course_info
 
-# Takes in a year and term, and returns a list of all courses in that year and term as dicts described in the spec
 def get_courses(year: int, term: str) -> list[dict]:
     """Takes in a year and term, and returns a list of all courses in that year and term as dicts described in the spec
 
@@ -249,9 +237,8 @@ def get_courses(year: int, term: str) -> list[dict]:
     
     MAX_RESULTS = 5000
     term_url = "&term=" + get_term_number(year, term) if term is not None else ""
-    #courses_raw = requests.get(f"https://courseplanner-api.adelaide.edu.au/api/course-planner-query/v1/?target=/system/COURSE_SEARCH/queryx&virtual=Y&year={year}&pagenbr=1&pagesize={MAX_RESULTS}" + term_url).json()["data"]["query"]["rows"]
     courses_raw = DataFetcher(f"https://courseplanner-api.adelaide.edu.au/api/course-planner-query/v1/?target=/system/COURSE_SEARCH/queryx&virtual=Y&year={year}&pagenbr=1&pagesize={MAX_RESULTS}" + term_url).get()["data"]
-    print(courses_raw)
+    
     courses = []
     for course in courses_raw:
         courses.append({
@@ -273,10 +260,19 @@ def get_courses(year: int, term: str) -> list[dict]:
 ''' FastAPI stuff below '''
 app = FastAPI()
 
-# Course details, takes in just a course ID and returns all course info and it's class times and such
-# Also optionally takes in a year and semester as query params, but both default to the current ones
 @app.get("/course/{course_id}")
 async def course_info_route(course_id, year: int = None, term: str = None):
+    """Course details route, takes in a course ID (and optionally a year and term) and returns the courses' info and classes
+
+    Args:
+        course_id: The ID of the course
+        year (int, optional): The year the course takes place in. Defaults to None.
+        term (str, optional): The term the course takes place in. Defaults to None.
+
+    Returns:
+        dict: A dictionary containing the course information and classes
+    """
+    
     course_id = int(course_id)
     
     if year is None:
@@ -286,9 +282,18 @@ async def course_info_route(course_id, year: int = None, term: str = None):
     
     return get_course_info(course_id, year, term)
 
-# List of courses given (year, term)
 @app.get("/courses/")
 async def courses_route(year: int = None, term: str = None):
+    """Gets a list of courses given (optionally) the year and term
+
+    Args:
+        year (int, optional): The year of the courses from 2006 to the current year. Defaults to None.
+        term (str, optional): The term of the courses. Defaults to None.
+
+    Returns:
+        list[dict]: A list of courses as dictionaries
+    """
+    
     # Default args
     if year is None:
         year = current_year()
