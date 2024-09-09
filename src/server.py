@@ -88,6 +88,37 @@ def parse_requisites(raw_requisites: str) -> Union[dict[str], None]:
     
     return parsed_requisites
 
+def convert_term_alias(term_alias: str) -> str:
+    """Takes in a term alias and returns the CoursePlanner API name for said term
+
+    Args:
+        term_alias (str): The unconverted term, this doesn't have to be an alias in which case no conversion will be done
+
+    Returns:
+        str: The converted or original term depending on if a conversion was made
+    """
+    
+    terms_without_digits = ("fast", "summer", "winter")
+    aliases = {
+        "sem": "Semester",
+        "elc": "ELC Term",
+        "tri": "Trimester",
+        "term": "Term",
+        "ol": "Online Teaching Period",
+        "melb": "Melb Teaching Period",
+        "fast": "Fast Track",
+        "pce": "PCE Term",
+        "summer": "Summer School",
+        "winter": "Winter School"
+    }
+    
+    # Convert the alias, append it's digit to the end if the term needs a digit at the end
+    converted_alias = aliases.get(term_alias[:-1] if term_alias[-1].isdigit() else term_alias, term_alias)
+    if term_alias not in terms_without_digits and term_alias[-1].isdigit() and converted_alias != term_alias:
+        converted_alias += " " + term_alias[-1]
+    
+    return converted_alias
+
 def get_term_number(year: int, term: str) -> int:
     """Converts a year and term string to the courseplanner term number
 
@@ -102,12 +133,9 @@ def get_term_number(year: int, term: str) -> int:
         int: The term number used in the CoursePlanner API
     """
     
-    # Make sure year and term are of the correct format
+    # Convert aliases
     year = str(year)
-    term = {
-        "sem1": "Semester 1",
-        "sem2": "Semester 2"
-    }.get(term, term)
+    term = convert_term_alias(term)
     
     terms_raw = DataFetcher(f"https://courseplanner-api.adelaide.edu.au/api/course-planner-query/v1/?target=/system/TERMS/queryx&virtual=Y&year_from=0&year_to=9999").get()["data"]
     
