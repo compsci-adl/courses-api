@@ -106,7 +106,6 @@ def convert_term_alias(term_alias: str) -> str:
         "term": "Term",
         "ol": "Online Teaching Period",
         "melb": "Melb Teaching Period",
-        "fast": "Fast Track",
         "pce": "PCE Term",
         "summer": "Summer School",
         "winter": "Winter School"
