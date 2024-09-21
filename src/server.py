@@ -98,7 +98,7 @@ def convert_term_alias(term_alias: str) -> str:
         str: The converted or original term depending on if a conversion was made
     """
     
-    terms_without_digits = ("fast", "summer", "winter")
+    terms_without_digits = ("summer", "winter")
     aliases = {
         "sem": "Semester",
         "elc": "ELC Term",
