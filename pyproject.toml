@@ -11,6 +11,8 @@ packages = [{include = "src"}]
 python = "^3.11"
 fastapi = "^0.111.0"
 requests = "^2.32.3"
+tqdm = "^4.66.5"
+tinydb = "^4.8.0"
 
 [tool.poetry.scripts]
 scraper = "src.scraper:main"
