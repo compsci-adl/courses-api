@@ -1,6 +1,5 @@
 import requests
 
-
 class DataFetcher:
     """
     Fetch data from the course planner API
@@ -18,14 +17,17 @@ class DataFetcher:
         if self.data is not None:
             return self.data
 
-        resp = requests.get(self.url).json()
+        resp = requests.get(self.url)
 
-        if resp["status"] != "success":
+        if resp.status_code != 200:
             return {}
 
-        self.data = {"data": resp["data"]["query"]["rows"]}
-        return self.data
+        json_resp = resp.json()
+        if json_resp.get("status") != "success":
+            return {}
 
+        self.data = {"data": json_resp["data"]["query"]["rows"]}
+        return self.data
 
 # As an example
 if __name__ == "__main__":

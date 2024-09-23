@@ -9,12 +9,6 @@ server:
 test:
 	poetry run python -m unittest discover -s tests
 
-unit:
-	poetry run python -m unittest discover -s tests/unit
-
-integration:
-	poetry run python -m unittest discover -s tests/integration
-
 test-scraper:
 	SHOW_DATA=true poetry run python -m unittest tests.test_CourseScraper
 

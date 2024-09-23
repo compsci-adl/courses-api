@@ -8,6 +8,8 @@ Ensure that all dependencies are installed:
 
 ```sh
 poetry install
+# add dependencies
+poetry add tinydb
 ```
 
 ## Running the API Server
@@ -43,7 +45,7 @@ poetry run python src/scraper/CourseScraper.py
 To run all tests:
 
 ```sh
-poetry run python -m unittest discover -s tests
+make test
 ```
 
 ### Run a Specific Test

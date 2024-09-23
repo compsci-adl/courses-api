@@ -1,10 +1,9 @@
 import unittest
 from unittest.mock import patch, Mock
-from src.api.DataFetcher import DataFetcher
+from src.api.data_fetcher import DataFetcher
 
-"""This is a mock tests which uses mock data to test the DataFetcher class"""
 class TestDataFetcherIntegration(unittest.TestCase):
-    
+
     show_data = False  
 
     @classmethod
@@ -27,9 +26,8 @@ class TestDataFetcherIntegration(unittest.TestCase):
         self.assertIsInstance(result["data"], list)
         self.assertGreater(len(result["data"]), 0)
 
-    @patch('src.api.DataFetcher.requests.get')
+    @patch('src.api.data_fetcher.requests.get')  
     def test_fetch_subjects(self, mock_get):
-        
         mock_response = Mock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
@@ -49,8 +47,6 @@ class TestDataFetcherIntegration(unittest.TestCase):
         result = fetcher.get()
         self.print_data("Subjects Data", result)
         self.assert_valid_data(result)
-
-   
 
 if __name__ == "__main__":
     unittest.main()

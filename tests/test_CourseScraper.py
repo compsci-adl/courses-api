@@ -1,6 +1,7 @@
 import unittest
-from src.scraper.CourseScraper import CourseScraper
+from src.api.course_scraper import CourseScraper
 
+# TODO: update test names to have the following format test_<method_name> for courseScraper
 class TestCourseScraperIntegration(unittest.TestCase):
     
     show_data = False  
