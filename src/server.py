@@ -1,4 +1,4 @@
-from typing import Union, List
+from typing import Union
 from fastapi import FastAPI, HTTPException
 from tinydb import TinyDB, Query
 import re
@@ -99,50 +99,6 @@ def parse_requisites(raw_requisites: str) -> Union[list[str], None]:
                         for match in re.findall(pattern, raw_requisites)]
 
     return matched_subjects if matched_subjects else None
-
-@app.get("/courses/", response_model=Union[dict, list])
-def list_courses(year: int = current_year(), term: str = current_sem()):
-    """Gets a list of courses given (optionally) the year and term.
-    
-    Args:
-        year (int, optional): The year of the courses from 2006 to
-        the current year. Defaults to None.
-        term (str, optional): The term of the courses. Defaults to None.
-
-    Returns:
-        list[dict]: A list of courses as dictionaries.
-    """
-    term_number = get_term_number(year, term)
-    results = db.search((Course.year == year) & (Course.term == term_number))
-
-    if not results:
-        raise HTTPException(
-            status_code=404, detail="No courses found for the specified year and term")
-
-    transformed_courses = {
-        "courses": []
-    }
-
-    # Extract necessary information from the results
-    for entry in results:
-        nano_id = entry.get("id", "")
-        details = entry.get("details", [])
-
-        for detail in details:
-            subject = detail.get("SUBJECT", "")
-            code = detail.get("CATALOG_NBR", "")
-            title = detail.get("COURSE_TITLE", "")
-
-            transformed_courses["courses"].append({
-                "name": {
-                    "subject": subject,
-                    "code": code,
-                    "title": title
-                },
-                "id": nano_id
-            })
-
-    return transformed_courses
 
 
 @app.get("/courses/{course_id}", response_model=Union[dict, list])
