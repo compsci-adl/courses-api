@@ -482,6 +482,17 @@ files = [
 ]
 
 [[package]]
+name = "nanoid"
+version = "2.0.0"
+description = "A tiny, secure, URL-friendly, unique string ID generator for Python"
+optional = false
+python-versions = "*"
+files = [
+    {file = "nanoid-2.0.0-py3-none-any.whl", hash = "sha256:90aefa650e328cffb0893bbd4c236cfd44c48bc1f2d0b525ecc53c3187b653bb"},
+    {file = "nanoid-2.0.0.tar.gz", hash = "sha256:5a80cad5e9c6e9ae3a41fa2fb34ae189f7cb420b2a5d8f82bd9d23466e4efa68"},
+]
+
+[[package]]
 name = "orjson"
 version = "3.10.6"
 description = "Fast, correct Python JSON library supporting dataclasses, datetimes, and numpy"
@@ -1248,4 +1259,4 @@ files = [
 [metadata]
 lock-version = "2.0"
 python-versions = "^3.11"
-content-hash = "1a0834b80b10fe82c9e6c095a9a4be77b355ed9242b8ab398bc7e4e5183e9e34"
+content-hash = "37173b546e8ff1e2c3a8ecf767a6fe7600843b31e68f319642f97611a82bda3a"

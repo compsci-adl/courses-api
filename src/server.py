@@ -102,13 +102,14 @@ def parse_requisites(raw_requisites: str) -> Union[list[str], None]:
 
 @app.get("/courses/", response_model=Union[dict, list])
 def list_courses(year: int = current_year(), term: str = current_sem()):
-    """Course details route, takes in a course ID (and optionally a year and term) and returns the courses' info and classes
+    """Gets a list of courses given (optionally) the year and term
     Args:
-        course_id: The ID of the course
-        year (int, optional): The year the course takes place in. Defaults to None.
-        term (str, optional): The term the course takes place in. Defaults to None.
+        year (int, optional): The year of the courses from 2006 to
+        the current year. Defaults to None.
+        term (str, optional): The term of the courses. Defaults to None.
+
     Returns:
-        dict: A dictionary containing the course information and classes
+        list[dict]: A list of courses as dictionaries
     """
     term_number = get_term_number(year, term)
     results = db.search((Course.year == year) & (Course.term == term_number))
@@ -123,7 +124,7 @@ def list_courses(year: int = current_year(), term: str = current_sem()):
 
     # Extract necessary information from the results
     for entry in results:
-        course_id = entry.get("course_id", "")
+        nano_id = entry.get("id", "")
         details = entry.get("details", [])
 
         for detail in details:
@@ -137,7 +138,7 @@ def list_courses(year: int = current_year(), term: str = current_sem()):
                     "code": code,
                     "title": title
                 },
-                "id": course_id
+                "id": nano_id
             })
 
     return transformed_courses
@@ -145,16 +146,13 @@ def list_courses(year: int = current_year(), term: str = current_sem()):
 
 @app.get("/courses/{course_id}", response_model=Union[dict, list])
 def get_course(course_id: str, year: int = current_year(), term: str = current_sem()):
-    """Gets a list of courses given (optionally) the year and term
+    """Course details route, takes in a course ID (and optionally a year and term) and returns the courses' info and classes
     Args:
-        year (int, optional): The year of the courses from 2006 to
-        the current year. Defaults to None.
-        term (str, optional): The term of the courses. Defaults to None.
-
+        year (int, optional): The year the course takes place in. Defaults to None.
+        term (str, optional): The term the course takes place in. Defaults to None.
     Returns:
-        list[dict]: A list of courses as dictionaries
+        dict: A dictionary containing the course information and classes
     """
-    
     # Search for the course details using course_id, year, and term
     term_number = get_term_number(year, term)
     course_details_result = db.search((Course.course_id == course_id) &
@@ -190,6 +188,7 @@ def get_course(course_id: str, year: int = current_year(), term: str = current_s
 
     # Construct the response
     response = {
+        "id": course_details.get("id", ""),
         "course_id": course_id,
         "name": name,
         "class_number": detail.get("CLASS_NBR", ""),
@@ -206,6 +205,7 @@ def get_course(course_id: str, year: int = current_year(), term: str = current_s
         for group in class_group.get("groups", []):
             class_list_entry = {
                 "type": group["type"],
+                "id": group["id"],
                 "classes": []
             }
             for class_info in group.get("classes", []):
