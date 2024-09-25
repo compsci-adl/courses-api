@@ -7,7 +7,7 @@ class DataFetcher:
     """Fetch data from the course planner API"""
 
     BASE_URL = (
-        "https://courseplanner-api.adelaide.edu.au/api/course-planner-query/v1/target=/system/"
+        "https://courseplanner-api.adelaide.edu.au/api/course-planner-query/v1/?target=/system/"
     )
 
     def __init__(self, endpoint: str) -> None:
