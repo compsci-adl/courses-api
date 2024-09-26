@@ -151,7 +151,7 @@ def convert_term_alias(term_alias: str) -> str:
     return converted_alias
 
 
-@app.get("/courses/subjects", response_model=Union[dict, list])
+@app.get("/subjects", response_model=Union[dict, list])
 def get_subjects(year: int = current_year(), term: str = current_sem()):
     """Get all possible subjects for a given year and term, sorted alphabetically.
     
@@ -183,7 +183,7 @@ def get_subjects(year: int = current_year(), term: str = current_sem()):
     return {"subjects": sorted(subjects)}
 
 
-@app.get("/courses/subject", response_model=Union[dict, list])
+@app.get("/courses", response_model=Union[dict, list])
 def get_subject_courses(subject: str, year: int = current_year(), term: str = current_sem()):
     """Gets a list of courses given a subject (and optionally a year and term).
     
