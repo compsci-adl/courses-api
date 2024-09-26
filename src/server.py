@@ -1,9 +1,11 @@
-from typing import Union
+from datetime import datetime
+import re
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from tinydb import TinyDB, Query
-import re
-from datetime import datetime
+from tinydb import Query, TinyDB
+from typing import Union
+
 
 app = FastAPI()
 db = TinyDB('src/db.json')
@@ -142,7 +144,7 @@ def convert_term_alias(term_alias: str) -> str:
         "winter": "Winter School"
     }
 
-    # Convert the alias, append it's digit to the end if the term needs a digit at the end
+    # Convert the alias, append its digit to the end if the term needs a digit at the end
     converted_alias = aliases.get(
         term_alias[:-1] if term_alias[-1].isdigit() else term_alias, term_alias)
     if term_alias not in terms_without_digits and term_alias[-1].isdigit() and converted_alias != term_alias:
