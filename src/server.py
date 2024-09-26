@@ -152,14 +152,46 @@ def convert_term_alias(term_alias: str) -> str:
 
 
 @app.get("/courses/subjects", response_model=Union[dict, list])
-def list_courses(subject: str, year: int = current_year(), term: str = current_sem()):
+def get_subjects(year: int = current_year(), term: str = current_sem()):
+    """Get all possible subjects for a given year and term, sorted alphabetically.
+    
+    Args: 
+        year (int, optional): The year to search for courses. Defaults to current year.
+        term (str, optional): The term to search for courses. Defaults to current semester.
+
+    Returns:
+        dict: A dictionary containing a list of subjects.
+    """
+    term_number = get_term_number(year, term)
+
+    results = db.search((Course.year == year) & (Course.term == term_number))
+
+    if not results:
+        raise HTTPException(
+            status_code=404, detail="No courses found for the specified year and term")
+
+    # Extract unique subjects from the course details
+    subjects = set()
+    for course in results:
+        details = course.get("details", [])
+        for detail in details:
+            subject = detail.get("SUBJECT", "")
+            if subject:
+                subjects.add(subject)
+
+    # Sort the subjects alphabetically and return them
+    return {"subjects": sorted(subjects)}
+
+
+@app.get("/courses/subject", response_model=Union[dict, list])
+def get_subject_courses(subject: str, year: int = current_year(), term: str = current_sem()):
     """Gets a list of courses given a subject (and optionally a year and term).
     
     Args:
         subject (str, required): The subject code to search for.
         year (int, optional): The year of the courses from 2006 to
-        the current year. Defaults to None.
-        term (str, optional): The term of the courses. Defaults to None.
+        the current year. Defaults to current year.
+        term (str, optional): The term of the courses. Defaults to current semester.
 
     Returns:
         list[dict]: A list of courses as dictionaries.
