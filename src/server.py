@@ -1,4 +1,4 @@
-from typing import Union, List
+from typing import Union
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from tinydb import TinyDB, Query
