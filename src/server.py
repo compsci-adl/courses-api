@@ -1,10 +1,10 @@
-from datetime import datetime
 import re
+from datetime import datetime
+from typing import Union
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from tinydb import Query, TinyDB
-from typing import Union
 
 
 app = FastAPI()
