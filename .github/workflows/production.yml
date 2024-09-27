@@ -1,0 +1,86 @@
+name: Production
+
+on:
+  push:
+    branches: [main]
+
+env:
+  AWS_REGION: ap-southeast-2
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    environment: Production
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          role-session-name: ${{ secrets.AWS_ROLE_SESSION_NAME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Set up QEMU for ARM64
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: linux/arm64
+
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
+
+      - name: Build Docker container
+        env:
+          PRODUCTION_BUILD: 'true'
+        run: |
+          docker buildx build \
+            --cache-from=type=local,src=/tmp/.buildx-cache \
+            --cache-to=type=local,dest=/tmp/.buildx-cache-new,mode=max \
+            --output type=docker,dest=courses-api.tar \
+            --platform=linux/arm64 --file=Dockerfile -t courses-api .
+          gzip courses-api.tar
+
+      - name: Save Docker cache
+        if: success()
+        run: |
+          rsync -a --delete /tmp/.buildx-cache-new/ /tmp/.buildx-cache/
+
+      - name: Copy image and compose file to S3
+        run: |
+          aws s3 cp ./courses-api.tar.gz s3://${{ secrets.AWS_S3_BUCKET }}/courses-api/
+          aws s3 cp ./docker-compose.yml s3://${{ secrets.AWS_S3_BUCKET }}/courses-api/
+
+  deploy:
+    needs: build
+    name: Deploy
+    runs-on: ubuntu-latest
+    environment: Production
+    steps:
+      - name: Deploy on EC2
+        env:
+          KEY: ${{ secrets.SSH_EC2_KEY }}
+          HOSTNAME: ${{ secrets.SSH_EC2_HOSTNAME }}
+          USER: ${{ secrets.SSH_EC2_USER }}
+        run: |
+          echo "$KEY" > private_key && chmod 600 private_key
+          ssh -v -o StrictHostKeyChecking=no -i private_key ${USER}@${HOSTNAME} '
+            cd ~/courses-api
+            aws s3 cp s3://${{ secrets.AWS_S3_BUCKET }}/courses-api/courses-api.tar.gz .
+            aws s3 cp s3://${{ secrets.AWS_S3_BUCKET }}/courses-api/docker-compose.yml .
+            docker load -i courses-api.tar.gz
+            docker compose up -d
+            docker restart courses-api
+          '
