@@ -1,12 +1,29 @@
-from typing import Union
-from fastapi import FastAPI, HTTPException
-from tinydb import TinyDB, Query
 import re
 from datetime import datetime
+from typing import Union
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from tinydb import Query, TinyDB
+
 
 app = FastAPI()
 db = TinyDB('src/db.json')
 Course = Query()
+
+# Configure CORS for local development
+origins = [
+    "http://localhost:5173",
+    "http://localhost:8000",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 def current_year() -> int:
     """Gets the current year."""
@@ -20,6 +37,10 @@ def current_sem() -> str:
 
 def get_term_number(year: int, term: str) -> int:
     """Gets the term number from the local database."""
+
+    # Convert aliases
+    term = convert_term_alias(term)
+
     course_details_results = db.search(Course.year == year)
 
     if not course_details_results:
@@ -101,30 +122,158 @@ def parse_requisites(raw_requisites: str) -> Union[list[str], None]:
     return matched_subjects if matched_subjects else None
 
 
-@app.get("/courses/{course_id}", response_model=Union[dict, list])
-def get_course(course_id: str, year: int = current_year(), term: str = current_sem()):
-    """Course details route, takes in a course ID (and optionally a year and term) and returns the courses' info and classes.
+def convert_term_alias(term_alias: str) -> str:
+    """Takes in a term alias and returns the CoursePlanner API name for said term
+    Args:
+        term_alias (str): The unconverted term, this doesn't have to be an alias
+        in which case no conversion will be done
+    Returns:
+        str: The converted or original term depending on if a conversion was made
+    """
+
+    terms_without_digits = ("summer", "winter")
+    aliases = {
+        "sem": "Semester",
+        "elc": "ELC Term",
+        "tri": "Trimester",
+        "term": "Term",
+        "ol": "Online Teaching Period",
+        "melb": "Melb Teaching Period",
+        "pce": "PCE Term",
+        "summer": "Summer School",
+        "winter": "Winter School"
+    }
+
+    # Convert the alias, append its digit to the end if the term needs a digit at the end
+    converted_alias = aliases.get(
+        term_alias[:-1] if term_alias[-1].isdigit() else term_alias, term_alias)
+    if term_alias not in terms_without_digits and term_alias[-1].isdigit() and converted_alias != term_alias:
+        converted_alias += " " + term_alias[-1]
+
+    return converted_alias
+
+
+@app.get("/subjects", response_model=Union[dict, list])
+def get_subjects(year: int = current_year(), term: str = current_sem()):
+    """Get all possible subjects for a given year and term, sorted alphabetically.
+    
+    Args: 
+        year (int, optional): The year to search for courses. Defaults to current year.
+        term (str, optional): The term to search for courses. Defaults to current semester.
+
+    Returns:
+        dict: A dictionary containing a list of subjects.
+    """
+    term_number = get_term_number(year, term)
+
+    results = db.search((Course.year == year) & (Course.term == term_number))
+
+    if not results:
+        raise HTTPException(
+            status_code=404, detail="No courses found for the specified year and term"
+        )
+
+    # Extract unique subject codes from the results
+    subject_info = db.all()[0]
+    subjects = subject_info.get("subjects", [])
+    print(subject_info)
+
+    unique_codes = set()
+
+    transformed_subjects = {
+        "subjects": []
+    }
+
+    # Collect unique subject codes from course results
+    for entry in results:
+        details = entry.get("details", [])
+        for detail in details:
+            code = detail.get("SUBJECT", "")
+            if code:  # Skip empty codes
+                unique_codes.add(code)
+
+    # Add subject descriptions for each unique code
+    for code in unique_codes:
+        for subject in subjects:
+            if subject.get("SUBJECT") == code:
+                transformed_subjects["subjects"].append({
+                    "code": code,
+                    "name": subject.get("DESCR")
+                })
+                break
+
+    # Sort the subjects alphabetically by the code
+    transformed_subjects["subjects"].sort(key=lambda x: x["code"])
+
+    return transformed_subjects
+
+
+@app.get("/courses", response_model=Union[dict, list])
+def get_subject_courses(subject: str, year: int = current_year(), term: str = current_sem()):
+    """Gets a list of courses given a subject (and optionally a year and term).
+    
+    Args:
+        subject (str, required): The subject code to search for.
+        year (int, optional): The year of the courses from 2006 to
+        the current year. Defaults to current year.
+        term (str, optional): The term of the courses. Defaults to current semester.
+
+    Returns:
+        list[dict]: A list of courses as dictionaries.
+    """
+    term_number = get_term_number(year, term)
+    results = db.search((Course.details.any(Query().SUBJECT == subject)) &
+                        (Course.year == year) &
+                        (Course.term == term_number))
+
+    if not results:
+        raise HTTPException(
+            status_code=404, detail="No courses found for the specified year and term")
+
+    transformed_courses = {
+        "courses": []
+    }
+
+    # Extract necessary information from the results
+    for entry in results:
+        nano_id = entry.get("id", "")
+        details = entry.get("details", [])
+
+        for detail in details:
+            subject = detail.get("SUBJECT", "")
+            code = detail.get("CATALOG_NBR", "")
+            title = detail.get("COURSE_TITLE", "")
+
+            transformed_courses["courses"].append({
+                "id": nano_id,
+                "name": {
+                    "subject": subject,
+                    "code": code,
+                    "title": title
+                },
+            })
+
+    return transformed_courses
+
+
+@app.get("/courses/{id}", response_model=Union[dict, list])
+def get_course(id: str):
+    """Course details route, takes in an id returns the courses' info and classes.
 
     Args:
-        year (int, optional): The year the course takes place in. Defaults to None.
-        term (str, optional): The term the course takes place in. Defaults to None.
+        id (string, required): The nano id to search for.
 
     Returns:
         dict: A dictionary containing the course information and classes.
     """
-    # Search for the course details using course_id, year, and term
-    term_number = get_term_number(year, term)
-    course_details_result = db.search((Course.course_id == course_id) &
-                                      (Course.year == year) &
-                                      (Course.term == term_number))
 
-    if not course_details_result:
+    results = db.search((Course.id == id))
+
+    if not results:
         raise HTTPException(status_code=404, detail="Course not found")
 
-    course_details = course_details_result[0]
-    class_details = course_details_result[1]
+    course_details = results[0]
     details = course_details.get("details", [])
-    classes = class_details.get("class_list", [])
 
     # Extract necessary information from details
     if details:
@@ -145,9 +294,13 @@ def get_course(course_id: str, year: int = current_year(), term: str = current_s
         name = {"subject": "", "code": "", "title": ""}
         requirement = {}
 
+    course_id = course_details.get("course_id", "")
+    year = course_details.get("year", "")
+    term = course_details.get("term", "")
+
     # Construct the response
     response = {
-        "id": course_details.get("id", ""),
+        "id": id,
         "course_id": course_id,
         "name": name,
         "class_number": detail.get("CLASS_NBR", ""),
@@ -159,33 +312,38 @@ def get_course(course_id: str, year: int = current_year(), term: str = current_s
         "class_list": []
     }
 
-    # Process the classes to match the required structure
-    for class_group in classes:
-        for group in class_group.get("groups", []):
-            class_list_entry = {
-                "type": group["type"],
-                "id": group["id"],
-                "classes": []
-            }
-            for class_info in group.get("classes", []):
-                class_entry = {
-                    "number": class_info["class_nbr"],
-                    "meetings": []
+    # Fetch classes info and process to match the required structure
+    classes = db.search((Course.course_id == course_id) & (Course.year == year) &
+                        (Course.term == term))
+    if classes:
+        class_details = classes[1]
+        class_list = class_details.get("class_list", [])
+        for class_group in class_list:
+            for group in class_group.get("groups", []):
+                class_list_entry = {
+                    "type": group["type"],
+                    "id": group["id"],
+                    "classes": []
                 }
-                for meeting in class_info.get("meetings", []):
-                    meeting_entry = {
-                        "day": meeting.get("days", ""),
-                        "location": meeting.get("location", ""),
-                        "date": meeting_date_convert(meeting.get("dates", "")),
-                        "time": {
-                            "start": meeting_time_convert(meeting.get("start_time", "")),
-                            "end": meeting_time_convert(meeting.get("end_time", ""))
-                        }
+                for class_info in group.get("classes", []):
+                    class_entry = {
+                        "number": class_info["class_nbr"],
+                        "meetings": []
                     }
-                    class_entry["meetings"].append(meeting_entry)
+                    for meeting in class_info.get("meetings", []):
+                        meeting_entry = {
+                            "day": meeting.get("days", ""),
+                            "location": meeting.get("location", ""),
+                            "date": meeting_date_convert(meeting.get("dates", "")),
+                            "time": {
+                                "start": meeting_time_convert(meeting.get("start_time", "")),
+                                "end": meeting_time_convert(meeting.get("end_time", ""))
+                            }
+                        }
+                        class_entry["meetings"].append(meeting_entry)
 
-                class_list_entry["classes"].append(class_entry)
+                    class_list_entry["classes"].append(class_entry)
 
-            response["class_list"].append(class_list_entry)
+                response["class_list"].append(class_list_entry)
 
     return response

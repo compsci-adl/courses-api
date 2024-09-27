@@ -14,7 +14,13 @@ def get_subjects(year: int):
             print(f"Error: {subjects.last_response.status_code} - {data}")
             return {"subjects": []}
 
-        subject_list = [subject["SUBJECT"] for subject in data["data"]]
+        subject_list = [
+            {
+                "SUBJECT": subject["SUBJECT"],
+                "DESCR": subject["DESCR"].split(" - ", 1)[1]
+            }
+            for subject in data["data"]
+        ]
         return {"subjects": subject_list}
 
     except Exception as e:
