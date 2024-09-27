@@ -170,19 +170,42 @@ def get_subjects(year: int = current_year(), term: str = current_sem()):
 
     if not results:
         raise HTTPException(
-            status_code=404, detail="No courses found for the specified year and term")
+            status_code=404, detail="No courses found for the specified year and term"
+        )
 
-    # Extract unique subjects from the course details
-    subjects = set()
-    for course in results:
-        details = course.get("details", [])
+    # Extract unique subject codes from the results
+    subject_info = db.all()[0]
+    subjects = subject_info.get("subjects", [])
+    print(subject_info)
+
+    unique_codes = set()
+
+    transformed_subjects = {
+        "subjects": []
+    }
+
+    # Collect unique subject codes from course results
+    for entry in results:
+        details = entry.get("details", [])
         for detail in details:
-            subject = detail.get("SUBJECT", "")
-            if subject:
-                subjects.add(subject)
+            code = detail.get("SUBJECT", "")
+            if code:  # Skip empty codes
+                unique_codes.add(code)
 
-    # Sort the subjects alphabetically and return them
-    return {"subjects": sorted(subjects)}
+    # Add subject descriptions for each unique code
+    for code in unique_codes:
+        for subject in subjects:
+            if subject.get("SUBJECT") == code:
+                transformed_subjects["subjects"].append({
+                    "code": code,
+                    "name": subject.get("DESCR")
+                })
+                break
+
+    # Sort the subjects alphabetically by the code
+    transformed_subjects["subjects"].sort(key=lambda x: x["code"])
+
+    return transformed_subjects
 
 
 @app.get("/courses", response_model=Union[dict, list])
