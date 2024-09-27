@@ -2,8 +2,6 @@ services:
   courses-api:
     image: courses-api:latest
     container_name: courses-api
-    env_file:
-      - .env.local
     environment:
       - PUID=1000
       - PGID=1000
