@@ -16,6 +16,9 @@ ENV POETRY_CACHE_DIR=/opt/.cache
 
 RUN pip install "poetry==${POETRY_VERSION}"
 
+# Add poetry to PATH
+ENV PATH="/root/.local/bin:${PATH}"
+
 WORKDIR /app
 
 # --- Reproduce the environment ---
@@ -39,5 +42,6 @@ WORKDIR /app
 COPY --from=builder ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 COPY . .
 
-# Set the entrypoint to run your FastAPI app with Poetry
-ENTRYPOINT ["poetry", "run", "python", "src/server.py"]
+EXPOSE 8000
+
+ENTRYPOINT ["fastapi", "run", "src/server.py"]
