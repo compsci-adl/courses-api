@@ -4,8 +4,10 @@ from typing import Union
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import ValidationError
 from tinydb import Query, TinyDB
 
+from .schemas import CourseSchema
 
 app = FastAPI()
 db = TinyDB("src/db.json")
@@ -311,7 +313,7 @@ def get_course(id: str):
             "code": detail.get("CATALOG_NBR", ""),
             "title": detail.get("COURSE_TITLE", ""),
         }
-        requirement = {
+        requirements = {
             "restriction": parse_requisites(detail.get("RESTRICTION_TXT", "")),
             "prerequisite": parse_requisites(detail.get("PRE_REQUISITE", "")),
             "corequisite": parse_requisites(detail.get("CO_REQUISITE", "")),
@@ -320,7 +322,7 @@ def get_course(id: str):
         }
     else:
         name = {"subject": "", "code": "", "title": ""}
-        requirement = {}
+        requirements = {}
 
     course_id = course_details.get("course_id", "")
     year = course_details.get("year", "")
@@ -336,7 +338,7 @@ def get_course(id: str):
         "term": detail.get("TERM_DESCR", ""),
         "campus": detail.get("CAMPUS", ""),
         "units": detail.get("UNITS", 0),
-        "requirement": requirement,
+        "requirements": requirements,
         "class_list": [],
     }
 
@@ -378,5 +380,10 @@ def get_course(id: str):
                     class_list_entry["classes"].append(class_entry)
 
                 response["class_list"].append(class_list_entry)
+
+    try:
+        CourseSchema.model_validate(response)
+    except ValidationError as e:
+        raise HTTPException(status_code=501, detail=e.errors())
 
     return response

@@ -15,6 +15,7 @@ tqdm = "^4.66.5"
 tinydb = "^4.8.0"
 nanoid = "^2.0.0"
 black = "^24.8.0"
+pydantic = "^2.9.2"
 
 [tool.poetry.scripts]
 scraper = "src.scraper:main"
