@@ -11,10 +11,11 @@ app = FastAPI()
 db = TinyDB('src/db.json')
 Course = Query()
 
-# Configure CORS for local development
+# Configure CORS for local development and production
 origins = [
     "http://localhost:5173",
     "http://localhost:8000",
+    "https://mytimetable.csclub.org.au",
 ]
 
 app.add_middleware(
