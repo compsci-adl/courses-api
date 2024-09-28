@@ -17,7 +17,7 @@ def get_subjects(year: int):
         subject_list = [
             {
                 "SUBJECT": subject["SUBJECT"],
-                "DESCR": subject["DESCR"].split(" - ", 1)[1]
+                "DESCR": subject["DESCR"].split(" - ", 1)[1],
             }
             for subject in data["data"]
         ]
@@ -41,8 +41,10 @@ def get_course_ids(subject_code: str, year: int):
             print(f"Error: {courses.last_response.status_code} - {data}")
             return {"courses": []}
 
-        course_ids = [{"course_id": course["COURSE_ID"],
-                       "term": course["TERM"]} for course in data["data"]]
+        course_ids = [
+            {"course_id": course["COURSE_ID"], "term": course["TERM"]}
+            for course in data["data"]
+        ]
         return {"courses": course_ids}
 
     except Exception as e:
@@ -68,8 +70,10 @@ def get_course_details(course_id: int, term: int, year: int, max_retries=3):
                 return {}
 
             if "data" not in data or len(data["data"]) == 0:
-                print(f"No data found for course {
-                      course_id}, term {term}. Retrying...")
+                print(
+                    f"No data found for course {
+                      course_id}, term {term}. Retrying..."
+                )
                 time.sleep(2)
                 continue
 
@@ -79,8 +83,10 @@ def get_course_details(course_id: int, term: int, year: int, max_retries=3):
             print(f"An error occurred while fetching course details: {e}")
             return {}
 
-    print(f"Failed to retrieve course details for course {
-          course_id} after {max_retries} attempts.")
+    print(
+        f"Failed to retrieve course details for course {
+          course_id} after {max_retries} attempts."
+    )
     return {}
 
 

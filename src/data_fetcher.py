@@ -6,9 +6,7 @@ from tqdm import tqdm
 class DataFetcher:
     """Fetch data from the course planner API"""
 
-    BASE_URL = (
-        "https://courseplanner-api.adelaide.edu.au/api/course-planner-query/v1/?target=/system/"
-    )
+    BASE_URL = "https://courseplanner-api.adelaide.edu.au/api/course-planner-query/v1/?target=/system/"
 
     def __init__(self, endpoint: str) -> None:
         self.url = self.BASE_URL + endpoint
@@ -75,7 +73,5 @@ if __name__ == "__main__":
     )
     print(course_class_list.get()["data"][0])
 
-    terms = DataFetcher(
-        f"TERMS/queryx&virtual=Y&year_from={YEAR}&year_to={YEAR}"
-    )
+    terms = DataFetcher(f"TERMS/queryx&virtual=Y&year_from={YEAR}&year_to={YEAR}")
     print(terms.get()["data"])

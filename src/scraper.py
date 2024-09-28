@@ -20,22 +20,24 @@ def main():
             course_id = course["course_id"]
             term = course["term"]
 
-            course_details = data_parser.get_course_details(
-                course_id, term, year)
-            db.insert({
-                "id": generate(),
-                "course_id": course_id,
-                "term": term,
-                "year": year,
-                "details": course_details
-            })
+            course_details = data_parser.get_course_details(course_id, term, year)
+            db.insert(
+                {
+                    "id": generate(),
+                    "course_id": course_id,
+                    "term": term,
+                    "year": year,
+                    "details": course_details,
+                }
+            )
 
             if isinstance(course_details, list) and len(course_details) > 0:
                 session = course_details[0].get("SESSION_CD", "N/A")
                 offer = course_details[0].get("COURSE_OFFER_NBR", "N/A")
 
                 course_class_list = data_parser.get_course_class_list(
-                    course_id, offer, term, session)["data"]
+                    course_id, offer, term, session
+                )["data"]
 
                 for cls in course_class_list:
                     # Restructure each group's dict to be type, id, and then classes
@@ -49,12 +51,14 @@ def main():
                         group["id"] = group_id
                         group["classes"] = group_classes
 
-                db.insert({
-                    "course_id": course_id,
-                    "term": term,
-                    "year": year,
-                    "class_list": course_class_list
-                })
+                db.insert(
+                    {
+                        "course_id": course_id,
+                        "term": term,
+                        "year": year,
+                        "class_list": course_class_list,
+                    }
+                )
             else:
                 print(f"No data found for course {course_id}, term {term}")
 
