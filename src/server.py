@@ -6,6 +6,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from tinydb import Query, TinyDB
 
+from .schemas import CourseSchema
+from pydantic import ValidationError
 
 app = FastAPI()
 db = TinyDB("src/db.json")
@@ -311,7 +313,7 @@ def get_course(id: str):
             "code": detail.get("CATALOG_NBR", ""),
             "title": detail.get("COURSE_TITLE", ""),
         }
-        requirement = {
+        requirements = {
             "restriction": parse_requisites(detail.get("RESTRICTION_TXT", "")),
             "prerequisite": parse_requisites(detail.get("PRE_REQUISITE", "")),
             "corequisite": parse_requisites(detail.get("CO_REQUISITE", "")),
@@ -320,7 +322,7 @@ def get_course(id: str):
         }
     else:
         name = {"subject": "", "code": "", "title": ""}
-        requirement = {}
+        requirements = {}
 
     course_id = course_details.get("course_id", "")
     year = course_details.get("year", "")
@@ -336,7 +338,7 @@ def get_course(id: str):
         "term": detail.get("TERM_DESCR", ""),
         "campus": detail.get("CAMPUS", ""),
         "units": detail.get("UNITS", 0),
-        "requirement": requirement,
+        "requirements": requirements,
         "class_list": [],
     }
 
@@ -379,4 +381,10 @@ def get_course(id: str):
 
                 response["class_list"].append(class_list_entry)
 
-    return response
+    try:
+        CourseSchema.model_validate(response)
+        return response
+    except ValidationError as e:
+        raise HTTPException(status_code=501, detail=str(e))
+
+    # return response
