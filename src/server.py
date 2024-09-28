@@ -4,10 +4,10 @@ from typing import Union
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import ValidationError
 from tinydb import Query, TinyDB
 
 from .schemas import CourseSchema
-from pydantic import ValidationError
 
 app = FastAPI()
 db = TinyDB("src/db.json")
