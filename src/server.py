@@ -273,6 +273,17 @@ def get_subject_courses(
     return transformed_courses
 
 
+def split_class_type_category(original_type: str):
+    CATEGORIES = {"enrolment", "related"}
+    [full_category, class_type] = original_type.split(": ")
+    class_category = "unknown"
+    for category in CATEGORIES:
+        if category in full_category.lower():
+            class_category = category
+            break
+    return {"category": class_category, "type": class_type}
+
+
 @app.get("/courses/{id}", response_model=Union[dict, list])
 def get_course(id: str):
     """Course details route, takes in an id returns the courses' info and classes.
@@ -339,7 +350,7 @@ def get_course(id: str):
         for class_group in class_list:
             for group in class_group.get("groups", []):
                 class_list_entry = {
-                    "type": group["type"],
+                    **split_class_type_category(group["type"]),
                     "id": group["id"],
                     "classes": [],
                 }
