@@ -385,6 +385,6 @@ def get_course(id: str):
         CourseSchema.model_validate(response)
         return response
     except ValidationError as e:
-        raise HTTPException(status_code=501, detail=str(e))
+        raise HTTPException(status_code=501, detail=e.errors())
 
     # return response
