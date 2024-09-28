@@ -8,7 +8,7 @@ from tinydb import Query, TinyDB
 
 
 app = FastAPI()
-db = TinyDB('src/db.json')
+db = TinyDB("src/db.json")
 Course = Query()
 
 # Configure CORS for local development and production
@@ -25,6 +25,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 def current_year() -> int:
     """Gets the current year."""
@@ -57,7 +58,6 @@ def get_term_number(year: int, term: str) -> int:
     raise Exception(f"Invalid term: {term} for year: {year}")
 
 
-
 def meeting_date_convert(raw_date: str) -> dict[str]:
     """Converts the date format given in the meetings to "MM-DD"
     Args:
@@ -66,8 +66,20 @@ def meeting_date_convert(raw_date: str) -> dict[str]:
     Returns:
         formatted_date (dict[str]): The formatted meeting date in the format of "MM-DD"
     """
-    months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
-              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    months = [
+        "Jan",
+        "Feb",
+        "Mar",
+        "Apr",
+        "May",
+        "Jun",
+        "Jul",
+        "Aug",
+        "Sep",
+        "Oct",
+        "Nov",
+        "Dec",
+    ]
     start, end = raw_date.split(" - ")
 
     start_d, start_m = start.split()
@@ -78,7 +90,7 @@ def meeting_date_convert(raw_date: str) -> dict[str]:
 
     formatted_date = {
         "start": f"{start_m}-{start_d.zfill(2)}",
-        "end": f"{end_m}-{end_d.zfill(2)}"
+        "end": f"{end_m}-{end_d.zfill(2)}",
     }
     return formatted_date
 
@@ -116,9 +128,10 @@ def parse_requisites(raw_requisites: str) -> Union[list[str], None]:
         return None
 
     # Regex pattern to match subjects and course numbers
-    pattern = r'\b([A-Z]+(?:\s+[A-Z]+)*)\s+(\d{4}\w*)\b'
-    matched_subjects = [" ".join(match)
-                        for match in re.findall(pattern, raw_requisites)]
+    pattern = r"\b([A-Z]+(?:\s+[A-Z]+)*)\s+(\d{4}\w*)\b"
+    matched_subjects = [
+        " ".join(match) for match in re.findall(pattern, raw_requisites)
+    ]
 
     return matched_subjects if matched_subjects else None
 
@@ -142,13 +155,18 @@ def convert_term_alias(term_alias: str) -> str:
         "melb": "Melb Teaching Period",
         "pce": "PCE Term",
         "summer": "Summer School",
-        "winter": "Winter School"
+        "winter": "Winter School",
     }
 
     # Convert the alias, append its digit to the end if the term needs a digit at the end
     converted_alias = aliases.get(
-        term_alias[:-1] if term_alias[-1].isdigit() else term_alias, term_alias)
-    if term_alias not in terms_without_digits and term_alias[-1].isdigit() and converted_alias != term_alias:
+        term_alias[:-1] if term_alias[-1].isdigit() else term_alias, term_alias
+    )
+    if (
+        term_alias not in terms_without_digits
+        and term_alias[-1].isdigit()
+        and converted_alias != term_alias
+    ):
         converted_alias += " " + term_alias[-1]
 
     return converted_alias
@@ -157,8 +175,8 @@ def convert_term_alias(term_alias: str) -> str:
 @app.get("/subjects", response_model=Union[dict, list])
 def get_subjects(year: int = current_year(), term: str = current_sem()):
     """Get all possible subjects for a given year and term, sorted alphabetically.
-    
-    Args: 
+
+    Args:
         year (int, optional): The year to search for courses. Defaults to current year.
         term (str, optional): The term to search for courses. Defaults to current semester.
 
@@ -181,9 +199,7 @@ def get_subjects(year: int = current_year(), term: str = current_sem()):
 
     unique_codes = set()
 
-    transformed_subjects = {
-        "subjects": []
-    }
+    transformed_subjects = {"subjects": []}
 
     # Collect unique subject codes from course results
     for entry in results:
@@ -197,10 +213,9 @@ def get_subjects(year: int = current_year(), term: str = current_sem()):
     for code in unique_codes:
         for subject in subjects:
             if subject.get("SUBJECT") == code:
-                transformed_subjects["subjects"].append({
-                    "code": code,
-                    "name": subject.get("DESCR")
-                })
+                transformed_subjects["subjects"].append(
+                    {"code": code, "name": subject.get("DESCR")}
+                )
                 break
 
     # Sort the subjects alphabetically by the code
@@ -210,9 +225,11 @@ def get_subjects(year: int = current_year(), term: str = current_sem()):
 
 
 @app.get("/courses", response_model=Union[dict, list])
-def get_subject_courses(subject: str, year: int = current_year(), term: str = current_sem()):
+def get_subject_courses(
+    subject: str, year: int = current_year(), term: str = current_sem()
+):
     """Gets a list of courses given a subject (and optionally a year and term).
-    
+
     Args:
         subject (str, required): The subject code to search for.
         year (int, optional): The year of the courses from 2006 to
@@ -223,17 +240,18 @@ def get_subject_courses(subject: str, year: int = current_year(), term: str = cu
         list[dict]: A list of courses as dictionaries.
     """
     term_number = get_term_number(year, term)
-    results = db.search((Course.details.any(Query().SUBJECT == subject)) &
-                        (Course.year == year) &
-                        (Course.term == term_number))
+    results = db.search(
+        (Course.details.any(Query().SUBJECT == subject))
+        & (Course.year == year)
+        & (Course.term == term_number)
+    )
 
     if not results:
         raise HTTPException(
-            status_code=404, detail="No courses found for the specified year and term")
+            status_code=404, detail="No courses found for the specified year and term"
+        )
 
-    transformed_courses = {
-        "courses": []
-    }
+    transformed_courses = {"courses": []}
 
     # Extract necessary information from the results
     for entry in results:
@@ -245,14 +263,12 @@ def get_subject_courses(subject: str, year: int = current_year(), term: str = cu
             code = detail.get("CATALOG_NBR", "")
             title = detail.get("COURSE_TITLE", "")
 
-            transformed_courses["courses"].append({
-                "id": nano_id,
-                "name": {
-                    "subject": subject,
-                    "code": code,
-                    "title": title
-                },
-            })
+            transformed_courses["courses"].append(
+                {
+                    "id": nano_id,
+                    "name": {"subject": subject, "code": code, "title": title},
+                }
+            )
 
     return transformed_courses
 
@@ -289,7 +305,7 @@ def get_course(id: str):
             "prerequisite": parse_requisites(detail.get("PRE_REQUISITE", "")),
             "corequisite": parse_requisites(detail.get("CO_REQUISITE", "")),
             "assumed_knowledge": parse_requisites(detail.get("ASSUMED_KNOWLEDGE", "")),
-            "incompatible": parse_requisites(detail.get("INCOMPATIBLE", ""))
+            "incompatible": parse_requisites(detail.get("INCOMPATIBLE", "")),
         }
     else:
         name = {"subject": "", "code": "", "title": ""}
@@ -310,12 +326,13 @@ def get_course(id: str):
         "campus": detail.get("CAMPUS", ""),
         "units": detail.get("UNITS", 0),
         "requirement": requirement,
-        "class_list": []
+        "class_list": [],
     }
 
     # Fetch classes info and process to match the required structure
-    classes = db.search((Course.course_id == course_id) & (Course.year == year) &
-                        (Course.term == term))
+    classes = db.search(
+        (Course.course_id == course_id) & (Course.year == year) & (Course.term == term)
+    )
     if classes:
         class_details = classes[1]
         class_list = class_details.get("class_list", [])
@@ -324,12 +341,12 @@ def get_course(id: str):
                 class_list_entry = {
                     "type": group["type"],
                     "id": group["id"],
-                    "classes": []
+                    "classes": [],
                 }
                 for class_info in group.get("classes", []):
                     class_entry = {
-                        "number": class_info["class_nbr"],
-                        "meetings": []
+                        "number": str(class_info["class_nbr"]),
+                        "meetings": [],
                     }
                     for meeting in class_info.get("meetings", []):
                         meeting_entry = {
@@ -337,9 +354,13 @@ def get_course(id: str):
                             "location": meeting.get("location", ""),
                             "date": meeting_date_convert(meeting.get("dates", "")),
                             "time": {
-                                "start": meeting_time_convert(meeting.get("start_time", "")),
-                                "end": meeting_time_convert(meeting.get("end_time", ""))
-                            }
+                                "start": meeting_time_convert(
+                                    meeting.get("start_time", "")
+                                ),
+                                "end": meeting_time_convert(
+                                    meeting.get("end_time", "")
+                                ),
+                            },
                         }
                         class_entry["meetings"].append(meeting_entry)
 
