@@ -344,7 +344,10 @@ def get_course(id: str):
                     "classes": [],
                 }
                 for class_info in group.get("classes", []):
-                    class_entry = {"number": class_info["class_nbr"], "meetings": []}
+                    class_entry = {
+                        "number": str(class_info["class_nbr"]),
+                        "meetings": [],
+                    }
                     for meeting in class_info.get("meetings", []):
                         meeting_entry = {
                             "day": meeting.get("days", ""),
