@@ -7,7 +7,7 @@ services:
       - PGID=1000
       - PORT=8000
     ports:
-      - 3530:8000
+      - 8000:8000
     networks:
       - csclub
 
