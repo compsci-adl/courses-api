@@ -20,8 +20,11 @@ def main():
         for course in courses["courses"]:
             course_id = course["course_id"]
             term = course["term"]
+            offer = course["offer"]
 
-            course_details = data_parser.get_course_details(course_id, term, year)
+            course_details = data_parser.get_course_details(
+                course_id, term, year, offer
+            )
             db.insert(
                 {
                     "id": generate(),
@@ -34,7 +37,6 @@ def main():
 
             if isinstance(course_details, list) and len(course_details) > 0:
                 session = course_details[0].get("SESSION_CD", "N/A")
-                offer = course_details[0].get("COURSE_OFFER_NBR", "N/A")
 
                 course_class_list = data_parser.get_course_class_list(
                     course_id, offer, term, session

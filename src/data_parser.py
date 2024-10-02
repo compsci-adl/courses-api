@@ -42,7 +42,11 @@ def get_course_ids(subject_code: str, year: int):
             return {"courses": []}
 
         course_ids = [
-            {"course_id": course["COURSE_ID"], "term": course["TERM"]}
+            {
+                "course_id": course["COURSE_ID"],
+                "term": course["TERM"],
+                "offer": course["COURSE_OFFER_NBR"],
+            }
             for course in data["data"]
         ]
         return {"courses": course_ids}
@@ -52,7 +56,7 @@ def get_course_ids(subject_code: str, year: int):
         return {"courses": []}
 
 
-def get_course_details(course_id: int, term: int, year: int, max_retries=3):
+def get_course_details(course_id: str, term: int, year: int, offer: int, max_retries=3):
     """Return the details of a course for a given course id, term, and year."""
     for _ in range(max_retries):
         course_details = data_fetcher.DataFetcher(
