@@ -197,7 +197,6 @@ def get_subjects(year: int = current_year(), term: str = current_sem()):
     # Extract unique subject codes from the results
     subject_info = db.all()[0]
     subjects = subject_info.get("subjects", [])
-    print(subject_info)
 
     unique_codes = set()
 
