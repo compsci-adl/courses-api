@@ -32,8 +32,7 @@ def get_subjects(year: int) -> dict[str, list[dict[str, str]]]:
 def get_course_ids(subject_code: str, year: int):
     """Return a list of course ids for a given subject code and year."""
     courses = data_fetcher.DataFetcher(
-        f"COURSE_SEARCH/queryx&virtual=Y&year={
-        year}&pagenbr=1&pagesize=500&subject={subject_code}"
+        f"COURSE_SEARCH/queryx&virtual=Y&year={year}&pagenbr=1&pagesize=500&subject={subject_code}"
     )
 
     try:
@@ -57,8 +56,7 @@ def get_course_details(course_id: int, term: int, year: int, max_retries=3):
     """Return the details of a course for a given course id, term, and year."""
     for _ in range(max_retries):
         course_details = data_fetcher.DataFetcher(
-            f"COURSE_DTL/queryx&virtual=Y&year={
-            year}&courseid={course_id}&term={term}"
+            f"COURSE_DTL/queryx&virtual=Y&year={year}&courseid={course_id}&term={term}&course_offer_nbr={offer}"
         )
 
         try:
@@ -71,10 +69,7 @@ def get_course_details(course_id: int, term: int, year: int, max_retries=3):
                 return {}
 
             if "data" not in data or len(data["data"]) == 0:
-                print(
-                    f"No data found for course {
-                    course_id}, term {term}. Retrying..."
-                )
+                print(f"No data found for course {course_id}, term {term}. Retrying...")
                 time.sleep(2)
                 continue
 
@@ -85,8 +80,7 @@ def get_course_details(course_id: int, term: int, year: int, max_retries=3):
             return {}
 
     print(
-        f"Failed to retrieve course details for course {
-        course_id} after {max_retries} attempts."
+        f"Failed to retrieve course details for course {course_id} after {max_retries} attempts."
     )
     return {}
 
@@ -99,8 +93,7 @@ def get_course_class_list(course_id: int, offer: int, term: int, session: int):
         session = "1"
 
     course_class_list = data_fetcher.DataFetcher(
-        f"COURSE_CLASS_LIST/queryx&virtual=Y&crseid={
-        course_id}&offer={offer}&term={term}&session={session}"
+        f"COURSE_CLASS_LIST/queryx&virtual=Y&crseid={course_id}&offer={offer}&term={term}&session={session}"
     )
 
     try:
