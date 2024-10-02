@@ -1,6 +1,5 @@
 import requests
 import time
-from tqdm import tqdm
 
 
 class DataFetcher:
@@ -30,8 +29,7 @@ class DataFetcher:
 
         if response.status_code == 429:
             print("Error: HTTP 429 - Too Many Requests. Waiting for 30 seconds...")
-            for _ in tqdm(range(30), desc="Waiting for rate limit reset"):
-                time.sleep(1)
+            time.sleep(30)
             return self.get()
 
         if response.status_code != 200:
