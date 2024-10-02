@@ -77,6 +77,15 @@ def get_course_details(course_id: str, term: int, year: int, offer: int, max_ret
                 time.sleep(2)
                 continue
 
+            details = data["data"][0]
+            name_with_term = f"{details['CATALOG_NBR']} {details['COURSE_TITLE']} {details['TERM_DESCR']}"
+            if name_with_term.isspace():
+                # TODO: Logger
+                # print(f"Course Details Not Found")
+                return {}
+            # TODO: Logger
+            # print(f"{name_with_term}")
+
             return data["data"]
 
         except Exception as e:
@@ -108,6 +117,9 @@ def get_course_class_list(course_id: int, offer: int, term: int, session: int):
                 f"{course_class_list.last_response.text}"
             )
             return {}
+
+        # TODO: Logger
+        # print(f"{len(data['data'][0]['groups'])} Classes Found")
 
         return data
 
