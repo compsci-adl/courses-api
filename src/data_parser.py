@@ -1,8 +1,10 @@
-import data_fetcher
 import time
+from typing import Dict, List
+
+import data_fetcher
 
 
-def get_subjects(year: int):
+def get_subjects(year: int) -> Dict[str, List[Dict[str, str]]]:
     """Return a list of subjects for a given year."""
     subjects = data_fetcher.DataFetcher(
         f"SUBJECTS_BY_YEAR/queryx&virtual=Y&year_from={year}&year_to={year}"
@@ -32,7 +34,7 @@ def get_course_ids(subject_code: str, year: int):
     """Return a list of course ids for a given subject code and year."""
     courses = data_fetcher.DataFetcher(
         f"COURSE_SEARCH/queryx&virtual=Y&year={
-            year}&pagenbr=1&pagesize=500&subject={subject_code}"
+        year}&pagenbr=1&pagesize=500&subject={subject_code}"
     )
 
     try:
@@ -57,7 +59,7 @@ def get_course_details(course_id: int, term: int, year: int, max_retries=3):
     for _ in range(max_retries):
         course_details = data_fetcher.DataFetcher(
             f"COURSE_DTL/queryx&virtual=Y&year={
-                year}&courseid={course_id}&term={term}"
+            year}&courseid={course_id}&term={term}"
         )
 
         try:
@@ -72,7 +74,7 @@ def get_course_details(course_id: int, term: int, year: int, max_retries=3):
             if "data" not in data or len(data["data"]) == 0:
                 print(
                     f"No data found for course {
-                      course_id}, term {term}. Retrying..."
+                    course_id}, term {term}. Retrying..."
                 )
                 time.sleep(2)
                 continue
@@ -85,7 +87,7 @@ def get_course_details(course_id: int, term: int, year: int, max_retries=3):
 
     print(
         f"Failed to retrieve course details for course {
-          course_id} after {max_retries} attempts."
+        course_id} after {max_retries} attempts."
     )
     return {}
 
@@ -99,7 +101,7 @@ def get_course_class_list(course_id: int, offer: int, term: int, session: int):
 
     course_class_list = data_fetcher.DataFetcher(
         f"COURSE_CLASS_LIST/queryx&virtual=Y&crseid={
-            course_id}&offer={offer}&term={term}&session={session}"
+        course_id}&offer={offer}&term={term}&session={session}"
     )
 
     try:
