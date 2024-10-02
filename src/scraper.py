@@ -13,8 +13,9 @@ def main():
     db.insert(subjects)
 
     for subject in subjects["subjects"]:
-        courses = data_parser.get_course_ids(subject, year)
-        db.insert({"subject": subject, "courses": courses})
+        code = subject["SUBJECT"]
+        courses = data_parser.get_course_ids(code, year)
+        db.insert({"subject": code, "courses": courses})
 
         for course in courses["courses"]:
             course_id = course["course_id"]
