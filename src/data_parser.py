@@ -1,10 +1,9 @@
 import time
-from typing import Dict, List
 
 import data_fetcher
 
 
-def get_subjects(year: int) -> Dict[str, List[Dict[str, str]]]:
+def get_subjects(year: int) -> dict[str, list[dict[str, str]]]:
     """Return a list of subjects for a given year."""
     subjects = data_fetcher.DataFetcher(
         f"SUBJECTS_BY_YEAR/queryx&virtual=Y&year_from={year}&year_to={year}"
