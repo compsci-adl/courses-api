@@ -1,0 +1,6 @@
+{
+    "black-formatter.args" : ["--config", "${workspaceFolder}/pyproject.toml"],
+    "black-formatter.path":[
+        "poetry","run","python", "-m", "black"
+    ]
+}
