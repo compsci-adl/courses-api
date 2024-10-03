@@ -22,7 +22,7 @@ def main():
 
         for subject in subjects["subjects"]:
             # Test with a single subject
-            # TEST_SUBJECT = "ASIA"
+            # TEST_SUBJECT = "COMP SCI"
             # if subject["SUBJECT"] != TEST_SUBJECT:
             #     continue
 
@@ -40,9 +40,11 @@ def main():
                 course_details = data_parser.get_course_details(
                     course_id, term, year, offer
                 )
+
+                nanoid = generate()
                 db.insert(
                     {
-                        "id": generate(),
+                        "id": nanoid,
                         "course_id": course_id,
                         "term": term,
                         "year": year,
@@ -71,6 +73,7 @@ def main():
 
                     db.insert(
                         {
+                            "id": nanoid,
                             "course_id": course_id,
                             "term": term,
                             "year": year,

@@ -342,9 +342,7 @@ def get_course(id: str):
     }
 
     # Fetch classes info and process to match the required structure
-    classes = db.search(
-        (Course.course_id == course_id) & (Course.year == year) & (Course.term == term)
-    )
+    classes = db.search((Course.id == id))
     if classes:
         class_details = classes[1]
         class_list = class_details.get("class_list", [])
