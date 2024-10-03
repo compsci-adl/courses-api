@@ -74,9 +74,6 @@ def main():
                     db.insert(
                         {
                             "id": nanoid,
-                            "course_id": course_id,
-                            "term": term,
-                            "year": year,
                             "class_list": course_class_list,
                         }
                     )
