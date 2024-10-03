@@ -78,13 +78,17 @@ def get_course_details(course_id: str, term: int, year: int, offer: int, max_ret
                 continue
 
             details = data["data"][0]
-            name_with_term = f"{details['CATALOG_NBR']} {details['COURSE_TITLE']} {details['TERM_DESCR']}"
-            if name_with_term.isspace():
+            if not (
+                details["CATALOG_NBR"]
+                and details["COURSE_TITLE"]
+                and details["TERM_DESCR"]
+            ):
                 # TODO: Logger
                 # print(f"Course Details Not Found")
                 return {}
             # TODO: Logger
-            # print(f"{name_with_term}")
+            # name_with_term = f"{details['CATALOG_NBR']} {details['COURSE_TITLE']} {details['TERM_DESCR']}"
+            # print(name_with_term)
 
             return data["data"]
 
