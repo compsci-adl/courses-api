@@ -11,11 +11,12 @@ poetry install
 Run the FastAPI server
 
 ```sh
-fastapi run src/server.py
+poetry run fastapi run src/server.py
 ```
 
 ## Running the scraper
 
 ```sh
+cd src
 poetry run scraper
 ```

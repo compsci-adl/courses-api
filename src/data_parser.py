@@ -1,10 +1,9 @@
 import time
-from typing import Dict, List
 
 import data_fetcher
 
 
-def get_subjects(year: int) -> Dict[str, List[Dict[str, str]]]:
+def get_subjects(year: int) -> dict[str, list[dict[str, str]]]:
     """Return a list of subjects for a given year."""
     subjects = data_fetcher.DataFetcher(
         f"SUBJECTS_BY_YEAR/queryx&virtual=Y&year_from={year}&year_to={year}"
@@ -33,8 +32,7 @@ def get_subjects(year: int) -> Dict[str, List[Dict[str, str]]]:
 def get_course_ids(subject_code: str, year: int):
     """Return a list of course ids for a given subject code and year."""
     courses = data_fetcher.DataFetcher(
-        f"COURSE_SEARCH/queryx&virtual=Y&year={
-        year}&pagenbr=1&pagesize=500&subject={subject_code}"
+        f"COURSE_SEARCH/queryx&virtual=Y&year={year}&pagenbr=1&pagesize=500&subject={subject_code}"
     )
 
     try:
@@ -44,7 +42,11 @@ def get_course_ids(subject_code: str, year: int):
             return {"courses": []}
 
         course_ids = [
-            {"course_id": course["COURSE_ID"], "term": course["TERM"]}
+            {
+                "course_id": course["COURSE_ID"],
+                "term": course["TERM"],
+                "offer": course["COURSE_OFFER_NBR"],
+            }
             for course in data["data"]
         ]
         return {"courses": course_ids}
@@ -54,12 +56,11 @@ def get_course_ids(subject_code: str, year: int):
         return {"courses": []}
 
 
-def get_course_details(course_id: int, term: int, year: int, max_retries=3):
+def get_course_details(course_id: str, term: int, year: int, offer: int, max_retries=3):
     """Return the details of a course for a given course id, term, and year."""
     for _ in range(max_retries):
         course_details = data_fetcher.DataFetcher(
-            f"COURSE_DTL/queryx&virtual=Y&year={
-            year}&courseid={course_id}&term={term}"
+            f"COURSE_DTL/queryx&virtual=Y&year={year}&courseid={course_id}&term={term}&course_offer_nbr={offer}"
         )
 
         try:
@@ -72,12 +73,22 @@ def get_course_details(course_id: int, term: int, year: int, max_retries=3):
                 return {}
 
             if "data" not in data or len(data["data"]) == 0:
-                print(
-                    f"No data found for course {
-                    course_id}, term {term}. Retrying..."
-                )
+                print(f"No data found for course {course_id}, term {term}. Retrying...")
                 time.sleep(2)
                 continue
+
+            details = data["data"][0]
+            if not (
+                details["CATALOG_NBR"]
+                and details["COURSE_TITLE"]
+                and details["TERM_DESCR"]
+            ):
+                # TODO: Logger
+                # print(f"Course Details Not Found")
+                return {}
+            # TODO: Logger
+            # name_with_term = f"{details['CATALOG_NBR']} {details['COURSE_TITLE']} {details['TERM_DESCR']}"
+            # print(name_with_term)
 
             return data["data"]
 
@@ -86,8 +97,7 @@ def get_course_details(course_id: int, term: int, year: int, max_retries=3):
             return {}
 
     print(
-        f"Failed to retrieve course details for course {
-        course_id} after {max_retries} attempts."
+        f"Failed to retrieve course details for course {course_id} after {max_retries} attempts."
     )
     return {}
 
@@ -100,8 +110,7 @@ def get_course_class_list(course_id: int, offer: int, term: int, session: int):
         session = "1"
 
     course_class_list = data_fetcher.DataFetcher(
-        f"COURSE_CLASS_LIST/queryx&virtual=Y&crseid={
-        course_id}&offer={offer}&term={term}&session={session}"
+        f"COURSE_CLASS_LIST/queryx&virtual=Y&crseid={course_id}&offer={offer}&term={term}&session={session}"
     )
 
     try:
@@ -112,6 +121,9 @@ def get_course_class_list(course_id: int, offer: int, term: int, session: int):
                 f"{course_class_list.last_response.text}"
             )
             return {}
+
+        # TODO: Logger
+        # print(f"{len(data['data'][0]['groups'])} Classes Found")
 
         return data
 

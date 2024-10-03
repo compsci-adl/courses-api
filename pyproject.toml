@@ -11,11 +11,11 @@ packages = [{include = "src"}]
 python = "^3.11"
 fastapi = "^0.111.0"
 requests = "^2.32.3"
-tqdm = "^4.66.5"
 tinydb = "^4.8.0"
 nanoid = "^2.0.0"
 black = "^24.8.0"
 pydantic = "^2.9.2"
+rich = "^13.9.1"
 
 [tool.poetry.scripts]
 scraper = "src.scraper:main"

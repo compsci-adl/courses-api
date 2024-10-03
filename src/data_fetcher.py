@@ -1,6 +1,5 @@
 import requests
 import time
-from tqdm import tqdm
 
 
 class DataFetcher:
@@ -9,12 +8,15 @@ class DataFetcher:
     BASE_URL = "https://courseplanner-api.adelaide.edu.au/api/course-planner-query/v1/?target=/system/"
 
     def __init__(self, endpoint: str) -> None:
+        self.endpoint = endpoint
         self.url = self.BASE_URL + endpoint
         self.data = None
         self.last_response = None
 
     def get(self) -> dict:
         """Get data from the API"""
+        # TODO: Logger
+        # print(f"Fetching {self.endpoint}...")
         if self.data is not None:
             return self.data
 
@@ -27,8 +29,7 @@ class DataFetcher:
 
         if response.status_code == 429:
             print("Error: HTTP 429 - Too Many Requests. Waiting for 30 seconds...")
-            for _ in tqdm(range(30), desc="Waiting for rate limit reset"):
-                time.sleep(1)
+            time.sleep(30)
             return self.get()
 
         if response.status_code != 200:
