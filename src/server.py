@@ -1,4 +1,5 @@
 import re
+import sys
 from datetime import datetime
 from typing import Union
 
@@ -9,7 +10,15 @@ from tinydb import Query, TinyDB
 
 from .schemas import CourseSchema
 
-app = FastAPI()
+# Check if the application is running in development mode
+is_dev_mode = "dev" in sys.argv
+
+# Configure FastAPI based on the mode
+app = FastAPI(
+    docs_url="/docs" if is_dev_mode else None,
+    redoc_url="/redoc" if is_dev_mode else None,
+)
+
 db = TinyDB("src/db.json")
 Course = Query()
 
