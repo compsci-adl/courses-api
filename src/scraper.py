@@ -50,7 +50,9 @@ def main():
                 catalog_nbr = course_details[0]["CATALOG_NBR"]
 
                 # Course Custom ID
-                course_cid = get_short_hash(f"{subject}{catalog_nbr}{year}{term}{course_id}")
+                course_cid = get_short_hash(
+                    f"{subject}{catalog_nbr}{year}{term}{course_id}"
+                )
                 db.insert(
                     {
                         "id": course_cid,
