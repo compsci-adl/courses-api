@@ -1,9 +1,14 @@
 from datetime import datetime
+from hashlib import shake_256
 from tinydb import TinyDB
-from nanoid import generate
 from rich.progress import Progress
 
 import data_parser
+
+
+def get_short_hash(content: str, even_length=12) -> str:
+    """Generates a short hash from the given content using the shake_256 algorithm."""
+    return shake_256(content.encode("utf8")).hexdigest(even_length // 2)
 
 
 def main():
@@ -41,10 +46,16 @@ def main():
                     course_id, term, year, offer
                 )
 
-                nanoid = generate()
+                subject = course_details[0]["SUBJECT"]
+                catalog_nbr = course_details[0]["CATALOG_NBR"]
+
+                # Course Custom ID
+                course_cid = get_short_hash(
+                    f"{subject}{catalog_nbr}{year}{term}{course_id}"
+                )
                 db.insert(
                     {
-                        "id": nanoid,
+                        "id": course_cid,
                         "course_id": course_id,
                         "term": term,
                         "year": year,
@@ -62,8 +73,8 @@ def main():
                     for cls in course_class_list:
                         # Restructure each group's dict to be type, id, and then classes
                         for group in cls.get("groups", []):
-                            group_id = generate()
                             group_type = group.get("type", "")
+                            group_id = get_short_hash(f"{course_cid}{group_type}")
                             group_classes = group.get("classes", [])
 
                             group.clear()
@@ -73,7 +84,7 @@ def main():
 
                     db.insert(
                         {
-                            "id": nanoid,
+                            "id": course_cid,
                             "class_list": course_class_list,
                         }
                     )
