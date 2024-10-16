@@ -3,6 +3,7 @@ import time
 
 from log_setup import logger
 
+
 class DataFetcher:
     """Fetch data from the course planner API"""
 
@@ -15,7 +16,6 @@ class DataFetcher:
         self.last_response = None
 
     def get(self) -> dict:
-
         """Get data from the API"""
         print(f"Fetching {self.endpoint}...")
         logger.debug(f"Fetching {self.endpoint}...")
