@@ -28,9 +28,9 @@ def main():
 
         for subject in subjects["subjects"]:
             # Test with a single subject
-            TEST_SUBJECT = "MUSTHEAT"
-            if subject["SUBJECT"] != TEST_SUBJECT:
-                continue
+            # TEST_SUBJECT = "MUSTHEAT"
+            # if subject["SUBJECT"] != TEST_SUBJECT:
+            #     continue
             
             code = subject["SUBJECT"]
             subject_task = progress.add_task(f"[cyan]{code}", total=None)
