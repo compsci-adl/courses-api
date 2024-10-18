@@ -422,6 +422,17 @@ MarkupSafe = ">=2.0"
 i18n = ["Babel (>=2.7)"]
 
 [[package]]
+name = "json-repair"
+version = "0.30.0"
+description = "A package to repair broken json strings"
+optional = false
+python-versions = ">=3.8"
+files = [
+    {file = "json_repair-0.30.0-py3-none-any.whl", hash = "sha256:bda4a5552dc12085c6363ff5acfcdb0c9cafc629989a2112081b7e205828228d"},
+    {file = "json_repair-0.30.0.tar.gz", hash = "sha256:24f12087a0e385ed47207eab1fca12bffd473e48db5bb803793d6c4fd97377ce"},
+]
+
+[[package]]
 name = "markdown-it-py"
 version = "3.0.0"
 description = "Python port of markdown-it. Markdown parsing, done right!"
@@ -1334,4 +1345,4 @@ files = [
 [metadata]
 lock-version = "2.0"
 python-versions = "^3.11"
-content-hash = "91169b8abde8d275a2e55b43d82a044c4b1fe7f4992329fe335147d85eabba52"
+content-hash = "b1fe2786161b29dc9638b3552fd264b548478ad51051c836fbd5b90fc7f71d77"
