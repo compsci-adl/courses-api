@@ -46,24 +46,24 @@ def main():
                     course_id, term, year, offer
                 )
 
-                subject = course_details[0]["SUBJECT"]
-                catalog_nbr = course_details[0]["CATALOG_NBR"]
-
-                # Course Custom ID
-                course_cid = get_short_hash(
-                    f"{subject}{catalog_nbr}{year}{term}{course_id}"
-                )
-                db.insert(
-                    {
-                        "id": course_cid,
-                        "course_id": course_id,
-                        "term": term,
-                        "year": year,
-                        "details": course_details,
-                    }
-                )
-
                 if isinstance(course_details, list) and len(course_details) > 0:
+                    subject = course_details[0]["SUBJECT"]
+                    catalog_nbr = course_details[0]["CATALOG_NBR"]
+
+                    # Course Custom ID
+                    course_cid = get_short_hash(
+                        f"{subject}{catalog_nbr}{year}{term}{course_id}"
+                    )
+                    db.insert(
+                        {
+                            "id": course_cid,
+                            "course_id": course_id,
+                            "term": term,
+                            "year": year,
+                            "details": course_details,
+                        }
+                    )
+
                     session = course_details[0].get("SESSION_CD", "N/A")
 
                     course_class_list = data_parser.get_course_class_list(
