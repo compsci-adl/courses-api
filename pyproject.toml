@@ -16,6 +16,7 @@ nanoid = "^2.0.0"
 black = "^24.8.0"
 pydantic = "^2.9.2"
 rich = "^13.9.1"
+json-repair = "^0.30.0"
 
 [tool.poetry.scripts]
 scraper = "src.scraper:main"
