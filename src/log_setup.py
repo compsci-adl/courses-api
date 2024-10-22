@@ -12,7 +12,7 @@ def setup_logger():
         console_handler.setLevel(logging.DEBUG)
 
         """Error file handler"""
-        error_file_handler = logging.FileHandler("error_log.txt", mode="w")
+        error_file_handler = logging.FileHandler("../logs/error.log", mode="w")
         error_file_handler.setLevel(logging.ERROR)
 
         """Log formatters"""
