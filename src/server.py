@@ -373,7 +373,6 @@ def get_course(id: str):
                         "meetings": [],
                     }
                     for meeting in class_info.get("meetings", []):
-
                         meeting_entry = {
                             "day": meeting.get("days", ""),
                             "location": meeting.get("location", ""),
