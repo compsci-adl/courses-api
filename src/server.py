@@ -113,15 +113,20 @@ def meeting_time_convert(raw_time: str) -> str:
     Returns:
         formatted_time (str): The formatted meeting time in the format of "HH:mm"
     """
-    period = raw_time[-2:]
-    hour = int(raw_time.replace(period, "").strip())
+    if ":" in raw_time:
+        time_part, period = raw_time[:-2], raw_time[-2:].lower()
+        hour, minute = map(int, time_part.split(":"))
+    else:
+        period = raw_time[-2:].lower()
+        hour = int(raw_time[:-2])
+        minute = 0
 
-    if period.lower() == "pm" and hour != 12:
+    if period == "pm" and hour != 12:
         hour += 12
-    elif period.lower() == "am" and hour == 12:
+    elif period == "am" and hour == 12:
         hour = 0
 
-    formatted_time = f"{str(hour).zfill(2)}:00"
+    formatted_time = f"{str(hour).zfill(2)}:{str(minute).zfill(2)}"
     return formatted_time
 
 
