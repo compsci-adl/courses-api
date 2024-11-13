@@ -3,7 +3,7 @@
 Ensure that dependencies are installed.
 
 ```sh
-poetry install
+uv sync
 ```
 
 ## Running the API Server
@@ -11,12 +11,11 @@ poetry install
 Run the FastAPI server
 
 ```sh
-poetry run fastapi dev src/server.py
+uv run fastapi dev src/server.py
 ```
 
 ## Running the scraper
 
 ```sh
-cd src
-poetry run scraper
+uv run python3 src/scraper.py
 ```
