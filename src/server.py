@@ -368,6 +368,12 @@ def get_course(id: str):
                         "meetings": [],
                     }
                     for meeting in class_info.get("meetings", []):
+                        # Skip weekend meetings
+                        if "Saturday" in meeting.get(
+                            "days", ""
+                        ) or "Sunday" in meeting.get("days", ""):
+                            continue
+
                         days = [
                             day.strip()
                             for day in meeting.get("days", "").split(",")
