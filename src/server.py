@@ -373,7 +373,7 @@ def get_course(id: str):
                             "days", ""
                         ) or "Sunday" in meeting.get("days", ""):
                             continue
-                            
+
                         days = [
                             day.strip()
                             for day in meeting.get("days", "").split(",")
