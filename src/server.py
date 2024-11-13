@@ -373,24 +373,30 @@ def get_course(id: str):
                             "days", ""
                         ) or "Sunday" in meeting.get("days", ""):
                             continue
+                            
+                        days = [
+                            day.strip()
+                            for day in meeting.get("days", "").split(",")
+                            if day.strip()
+                        ]
 
-                        meeting_entry = {
-                            "day": meeting.get("days", ""),
-                            "location": meeting.get("location", ""),
-                            "date": meeting_date_convert(meeting.get("dates", "")),
-                            "time": {
-                                "start": meeting_time_convert(
-                                    meeting.get("start_time", "")
-                                ),
-                                "end": meeting_time_convert(
-                                    meeting.get("end_time", "")
-                                ),
-                            },
-                        }
-                        class_entry["meetings"].append(meeting_entry)
+                        for day in days:
+                            meeting_entry = {
+                                "day": day,
+                                "location": meeting.get("location", ""),
+                                "date": meeting_date_convert(meeting.get("dates", "")),
+                                "time": {
+                                    "start": meeting_time_convert(
+                                        meeting.get("start_time", "")
+                                    ),
+                                    "end": meeting_time_convert(
+                                        meeting.get("end_time", "")
+                                    ),
+                                },
+                            }
+                            class_entry["meetings"].append(meeting_entry)
 
-                    class_list_entry["classes"].append(class_entry)
-
+                class_list_entry["classes"].append(class_entry)
                 response["class_list"].append(class_list_entry)
 
     try:
