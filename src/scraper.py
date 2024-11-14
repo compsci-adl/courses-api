@@ -1,7 +1,8 @@
 from datetime import datetime
 from hashlib import shake_256
-from tinydb import TinyDB
+
 from rich.progress import Progress
+from tinydb import TinyDB
 
 import data_parser
 
@@ -47,12 +48,12 @@ def main():
                 )
 
                 if isinstance(course_details, list) and len(course_details) > 0:
-                    subject = course_details[0]["SUBJECT"]
+                    subject_name = course_details[0]["SUBJECT"]
                     catalog_nbr = course_details[0]["CATALOG_NBR"]
 
                     # Course Custom ID
                     course_cid = get_short_hash(
-                        f"{subject}{catalog_nbr}{year}{term}{course_id}"
+                        f"{subject_name}{catalog_nbr}{year}{term}{course_id}"
                     )
                     db.insert(
                         {

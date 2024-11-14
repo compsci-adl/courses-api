@@ -2,7 +2,9 @@
 name = "courses-api"
 version = "1.0.0"
 description = "API for getting University of Adelaide course information"
-authors = ["CS Club Open Source Team <dev@csclub.org.au>"]
+authors = [
+    { name = "CS Club Open Source Team", email = "dev@csclub.org.au" }
+]
 license = "MIT"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -13,7 +15,15 @@ dependencies = [
     "pydantic>=2.9.2",
     "requests>=2.32.3",
     "rich>=13.9.4",
-    "ruff>=0.7.3",
     "tinydb>=4.8.2",
 ]
 
+[tool.ruff]
+lint.select = ['E', 'F', 'W', 'A', 'PLC', 'PLE', 'PLW', 'I']
+lint.ignore = ["E501"] 
+lint.fixable = ["ALL"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.7.3",
+]
