@@ -7,14 +7,6 @@ WORKDIR /app
 # Enable bytecode compilation
 ENV UV_COMPILE_BYTECODE=1
 
-# --- Reproduce the environment ---
-# You can comment the following two lines if you prefer to manually install
-#   the dependencies from inside the container.
-COPY pyproject.toml .
-
-# Install the dependencies
-RUN uv install
-
 # Copy from the cache instead of linking since it's a mounted volume
 ENV UV_LINK_MODE=copy
 
