@@ -4,6 +4,7 @@ from tinydb import TinyDB
 from rich.progress import Progress
 
 import data_parser
+from log_setup import logger
 
 
 def get_short_hash(content: str, even_length=12) -> str:
@@ -30,7 +31,7 @@ def main():
             # TEST_SUBJECT = "COMP SCI"
             # if subject["SUBJECT"] != TEST_SUBJECT:
             #     continue
-
+            
             code = subject["SUBJECT"]
             subject_task = progress.add_task(f"[cyan]{code}", total=None)
             courses = data_parser.get_course_ids(code, year)
@@ -45,6 +46,11 @@ def main():
                 course_details = data_parser.get_course_details(
                     course_id, term, year, offer
                 )
+
+                # If NoneType, log specific course and continue to next
+                if not course_details:
+                    logger.error(f"{course} does not have any details", exc_info=True)
+                    continue
 
                 subject = course_details[0]["SUBJECT"]
                 catalog_nbr = course_details[0]["CATALOG_NBR"]
