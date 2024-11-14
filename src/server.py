@@ -298,6 +298,7 @@ def split_class_type_category(original_type: str):
             break
     return {"category": class_category, "type": class_type}
 
+
 @app.get("/courses/{id}", response_model=Union[dict, list])
 def get_course(course_id: str):
     """Course details route, takes in an id returns the courses' info and classes.
