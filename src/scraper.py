@@ -5,7 +5,6 @@ from rich.progress import Progress
 from tinydb import TinyDB
 
 import data_parser
-from log_setup import logger
 
 
 def get_short_hash(content: str, even_length=12) -> str:
