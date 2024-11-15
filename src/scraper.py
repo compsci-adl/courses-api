@@ -32,7 +32,7 @@ def main():
             # TEST_SUBJECT = "COMP SCI"
             # if subject["SUBJECT"] != TEST_SUBJECT:
             #     continue
-            
+
             code = subject["SUBJECT"]
             subject_task = progress.add_task(f"[cyan]{code}", total=None)
             courses = data_parser.get_course_ids(code, year)

@@ -17,7 +17,6 @@ class DataFetcher:
         self.last_response = None
 
     def get(self) -> dict:
-
         """Get data from the API"""
         logger.debug(f"Fetching {self.endpoint}...")
         if self.data is not None:
