@@ -299,18 +299,18 @@ def split_class_type_category(original_type: str):
     return {"category": class_category, "type": class_type}
 
 
-@app.get("/courses/{id}", response_model=Union[dict, list])
-def get_course(course_id: str):
+@app.get("/courses/{course_cid}", response_model=Union[dict, list])
+def get_course(course_cid: str):
     """Course details route, takes in an id returns the courses' info and classes.
 
     Args:
-        id (string, required): The nano id to search for.
+        course_cid (string, required): The id to search for.
 
     Returns:
         dict: A dictionary containing the course information and classes.
     """
 
-    results = db.search((Course.id == course_id))
+    results = db.search((Course.id == course_cid))
 
     if not results:
         raise HTTPException(status_code=404, detail="Course not found")
@@ -342,7 +342,7 @@ def get_course(course_id: str):
 
     # Construct the response
     response = {
-        "id": id,
+        "id": course_cid,
         "course_id": course_id,
         "name": name,
         "class_number": detail.get("CLASS_NBR", ""),
@@ -355,7 +355,7 @@ def get_course(course_id: str):
     }
 
     # Fetch classes info and process to match the required structure
-    classes = db.search((Course.id == course_id))
+    classes = db.search((Course.id == course_cid))
     if classes:
         class_details = classes[1]
         class_list = class_details.get("class_list", [])
