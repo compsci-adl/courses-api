@@ -113,15 +113,20 @@ def meeting_time_convert(raw_time: str) -> str:
     Returns:
         formatted_time (str): The formatted meeting time in the format of "HH:mm"
     """
-    period = raw_time[-2:]
-    hour = int(raw_time.replace(period, "").strip())
+    if ":" in raw_time:
+        time_part, period = raw_time[:-2], raw_time[-2:].lower()
+        hour, minute = map(int, time_part.split(":"))
+    else:
+        period = raw_time[-2:].lower()
+        hour = int(raw_time[:-2])
+        minute = 0
 
-    if period.lower() == "pm" and hour != 12:
+    if period == "pm" and hour != 12:
         hour += 12
-    elif period.lower() == "am" and hour == 12:
+    elif period == "am" and hour == 12:
         hour = 0
 
-    formatted_time = f"{str(hour).zfill(2)}:00"
+    formatted_time = f"{str(hour).zfill(2)}:{str(minute).zfill(2)}"
     return formatted_time
 
 
@@ -294,18 +299,18 @@ def split_class_type_category(original_type: str):
     return {"category": class_category, "type": class_type}
 
 
-@app.get("/courses/{id}", response_model=Union[dict, list])
-def get_course(id: str):
+@app.get("/courses/{course_cid}", response_model=Union[dict, list])
+def get_course(course_cid: str):
     """Course details route, takes in an id returns the courses' info and classes.
 
     Args:
-        id (string, required): The nano id to search for.
+        course_cid (string, required): The id to search for.
 
     Returns:
         dict: A dictionary containing the course information and classes.
     """
 
-    results = db.search((Course.id == id))
+    results = db.search((Course.id == course_cid))
 
     if not results:
         raise HTTPException(status_code=404, detail="Course not found")
@@ -334,11 +339,10 @@ def get_course(id: str):
 
     course_id = course_details.get("course_id", "")
     year = course_details.get("year", "")
-    term = course_details.get("term", "")
 
     # Construct the response
     response = {
-        "id": id,
+        "id": course_cid,
         "course_id": course_id,
         "name": name,
         "class_number": detail.get("CLASS_NBR", ""),
@@ -351,7 +355,7 @@ def get_course(id: str):
     }
 
     # Fetch classes info and process to match the required structure
-    classes = db.search((Course.id == id))
+    classes = db.search((Course.id == course_cid))
     if classes:
         class_details = classes[1]
         class_list = class_details.get("class_list", [])
@@ -368,23 +372,35 @@ def get_course(id: str):
                         "meetings": [],
                     }
                     for meeting in class_info.get("meetings", []):
-                        meeting_entry = {
-                            "day": meeting.get("days", ""),
-                            "location": meeting.get("location", ""),
-                            "date": meeting_date_convert(meeting.get("dates", "")),
-                            "time": {
-                                "start": meeting_time_convert(
-                                    meeting.get("start_time", "")
-                                ),
-                                "end": meeting_time_convert(
-                                    meeting.get("end_time", "")
-                                ),
-                            },
-                        }
-                        class_entry["meetings"].append(meeting_entry)
+                        # Skip weekend meetings
+                        if "Saturday" in meeting.get(
+                            "days", ""
+                        ) or "Sunday" in meeting.get("days", ""):
+                            continue
 
-                    class_list_entry["classes"].append(class_entry)
+                        days = [
+                            day.strip()
+                            for day in meeting.get("days", "").split(",")
+                            if day.strip()
+                        ]
 
+                        for day in days:
+                            meeting_entry = {
+                                "day": day,
+                                "location": meeting.get("location", ""),
+                                "date": meeting_date_convert(meeting.get("dates", "")),
+                                "time": {
+                                    "start": meeting_time_convert(
+                                        meeting.get("start_time", "")
+                                    ),
+                                    "end": meeting_time_convert(
+                                        meeting.get("end_time", "")
+                                    ),
+                                },
+                            }
+                            class_entry["meetings"].append(meeting_entry)
+
+                class_list_entry["classes"].append(class_entry)
                 response["class_list"].append(class_list_entry)
 
     try:

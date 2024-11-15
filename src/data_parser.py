@@ -84,7 +84,8 @@ def get_course_details(course_id: str, term: int, year: int, offer: int, max_ret
                 and details["COURSE_TITLE"]
                 and details["TERM_DESCR"]
             ):
-                logger.error(f"Course Details Not Found")
+
+                logger.debug(f"Course Details Not Found")
                 return {}
             name_with_term = f"{details['CATALOG_NBR']} {details['COURSE_TITLE']} {details['TERM_DESCR']}"
             logger.debug(name_with_term)

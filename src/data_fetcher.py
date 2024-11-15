@@ -1,7 +1,8 @@
-import requests
 import time
 
 from log_setup import logger
+import json_repair
+import requests
 
 
 class DataFetcher:
@@ -16,8 +17,8 @@ class DataFetcher:
         self.last_response = None
 
     def get(self) -> dict:
+
         """Get data from the API"""
-        print(f"Fetching {self.endpoint}...")
         logger.debug(f"Fetching {self.endpoint}...")
         if self.data is not None:
             return self.data
@@ -38,7 +39,7 @@ class DataFetcher:
             print(f"Error: HTTP {response.status_code} - {response.text}")
             return {}
 
-        resp = response.json()
+        resp = json_repair.loads(response.text)
 
         if resp.get("status") != "success":
             print(f"API Error: {resp.get('error', 'Unknown error')}")
