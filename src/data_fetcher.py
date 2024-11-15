@@ -1,8 +1,9 @@
 import time
 
-from log_setup import logger
 import json_repair
 import requests
+
+from log_setup import logger
 
 
 class DataFetcher:

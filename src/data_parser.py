@@ -1,7 +1,7 @@
 import time
-from log_setup import logger
 
 import data_fetcher
+from log_setup import logger
 
 
 def get_subjects(year: int) -> dict[str, list[dict[str, str]]]:
