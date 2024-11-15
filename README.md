@@ -54,6 +54,12 @@ OR if performing the action in bash:
 python3 -m pip install pre-commit
 ```
 
+Then, as recommended by [Official Pre-Commit Documentation](https://pre-commit.com/):
+```
+pre-commit install
+```
+This should be run every time you clone a project
+
 ## License
 
 This project is licensed under the MIT License.
