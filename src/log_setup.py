@@ -32,7 +32,7 @@ def setup_logger():
 
         # Initiaise formatters
         file_formatter = logging.Formatter(
-            "\n%(asctime)s - %(levelname)s - %(message)s\n"
+            "%(asctime)s - %(levelname)s - %(message)s"
         )
 
         # Set formatters
