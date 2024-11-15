@@ -373,7 +373,11 @@ def get_course(course_cid: str):
                     }
                     for meeting in class_info.get("meetings", []):
                         # Split the meeting days by commas, and handle multiple same-day entries
-                        meeting_days = [day.strip() for day in meeting.get("days", "").split(",") if day.strip()]
+                        meeting_days = [
+                            day.strip()
+                            for day in meeting.get("days", "").split(",")
+                            if day.strip()
+                        ]
 
                         # Flatten the list if the days appear multiple times (e.g., "Monday, Monday")
                         flattened_meeting_days = []
@@ -382,7 +386,10 @@ def get_course(course_cid: str):
                             flattened_meeting_days.append(day)
 
                         # Skip weekend meetings
-                        if any(day in flattened_meeting_days for day in ["Saturday", "Sunday"]):
+                        if any(
+                            day in flattened_meeting_days
+                            for day in ["Saturday", "Sunday"]
+                        ):
                             continue
 
                         # Create meeting entry
@@ -392,8 +399,12 @@ def get_course(course_cid: str):
                                 "location": meeting.get("location", ""),
                                 "date": meeting_date_convert(meeting.get("dates", "")),
                                 "time": {
-                                    "start": meeting_time_convert(meeting.get("start_time", "")),
-                                    "end": meeting_time_convert(meeting.get("end_time", "")),
+                                    "start": meeting_time_convert(
+                                        meeting.get("start_time", "")
+                                    ),
+                                    "end": meeting_time_convert(
+                                        meeting.get("end_time", "")
+                                    ),
                                 },
                             }
                             class_entry["meetings"].append(meeting_entry)
