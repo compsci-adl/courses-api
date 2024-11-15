@@ -18,10 +18,6 @@ def setup_logger():
         # All non_error outputs go into single debug file
         debug_log_file_path = os.path.join(logs_dir, f"debug_{timestamp}.log")
 
-        # # Setup console handler
-        # console_handler = logging.StreamHandler()
-        # console_handler.setLevel(logging.DEBUG)
-
         # Setup debug file handler
         debug_file_handler = logging.FileHandler(
             debug_log_file_path, mode="w", delay=True
@@ -35,18 +31,15 @@ def setup_logger():
         error_file_handler.setLevel(logging.ERROR)
 
         # Initiaise formatters
-        # console_formatter = logging.Formatter('\n%(asctime)s - %(levelname)s - %(message)s\n')
         file_formatter = logging.Formatter(
             "\n%(asctime)s - %(levelname)s - %(message)s\n"
         )
 
         # Set formatters
-        # console_handler.setFormatter(console_formatter)
         error_file_handler.setFormatter(file_formatter)
         debug_file_handler.setFormatter(file_formatter)
 
         # Add handlers to logger
-        # logger.addHandler(console_handler)
         logger.addHandler(error_file_handler)
         logger.addHandler(debug_file_handler)
 
