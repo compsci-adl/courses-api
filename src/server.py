@@ -372,35 +372,34 @@ def get_course(course_cid: str):
                         "meetings": [],
                     }
                     for meeting in class_info.get("meetings", []):
+                        # Split the meeting days by commas, and handle multiple same-day entries
+                        meeting_days = [day.strip() for day in meeting.get("days", "").split(",") if day.strip()]
+
+                        # Flatten the list if the days appear multiple times (e.g., "Monday, Monday")
+                        flattened_meeting_days = []
+                        for day in meeting_days:
+                            # Append each day individually
+                            flattened_meeting_days.append(day)
+
                         # Skip weekend meetings
-                        if "Saturday" in meeting.get(
-                            "days", ""
-                        ) or "Sunday" in meeting.get("days", ""):
+                        if any(day in flattened_meeting_days for day in ["Saturday", "Sunday"]):
                             continue
 
-                        days = [
-                            day.strip()
-                            for day in meeting.get("days", "").split(",")
-                            if day.strip()
-                        ]
-
-                        for day in days:
+                        # Create meeting entry
+                        for day in flattened_meeting_days:
                             meeting_entry = {
                                 "day": day,
                                 "location": meeting.get("location", ""),
                                 "date": meeting_date_convert(meeting.get("dates", "")),
                                 "time": {
-                                    "start": meeting_time_convert(
-                                        meeting.get("start_time", "")
-                                    ),
-                                    "end": meeting_time_convert(
-                                        meeting.get("end_time", "")
-                                    ),
+                                    "start": meeting_time_convert(meeting.get("start_time", "")),
+                                    "end": meeting_time_convert(meeting.get("end_time", "")),
                                 },
                             }
                             class_entry["meetings"].append(meeting_entry)
 
-                class_list_entry["classes"].append(class_entry)
+                    class_list_entry["classes"].append(class_entry)
+
                 response["class_list"].append(class_list_entry)
 
     try:
