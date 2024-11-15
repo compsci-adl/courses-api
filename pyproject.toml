@@ -1,25 +1,29 @@
-[tool.poetry]
+[project]
 name = "courses-api"
-version = "0.1.0"
-description = ""
-authors = ["CS Club Open Source Team <dev@csclub.org.au>"]
+version = "1.0.0"
+description = "API for getting University of Adelaide course information"
+authors = [
+    { name = "CS Club Open Source Team", email = "dev@csclub.org.au" }
+]
 license = "MIT"
 readme = "README.md"
-packages = [{include = "src"}]
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi[standard]>=0.115.5",
+    "json-repair>=0.30.1",
+    "nanoid>=2.0.0",
+    "pydantic>=2.9.2",
+    "requests>=2.32.3",
+    "rich>=13.9.4",
+    "tinydb>=4.8.2",
+]
 
-[tool.poetry.dependencies]
-python = "^3.11"
-fastapi = "^0.111.0"
-requests = "^2.32.3"
-tinydb = "^4.8.0"
-nanoid = "^2.0.0"
-black = "^24.8.0"
-pydantic = "^2.9.2"
-rich = "^13.9.1"
+[tool.ruff]
+lint.select = ['E', 'F', 'W', 'A', 'PLC', 'PLE', 'PLW', 'I']
+lint.ignore = ["E501"] 
+lint.fixable = ["ALL"]
 
-[tool.poetry.scripts]
-scraper = "src.scraper:main"
-
-[build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+[dependency-groups]
+dev = [
+    "ruff>=0.7.3",
+]

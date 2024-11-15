@@ -1,46 +1,29 @@
-# https://github.com/gianfa/poetry/blob/docs/docker-best-practices/docker-examples/poetry-multistage/Dockerfile
+# Use a Python image with uv pre-installed
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
-FROM python:3.12-slim-bookworm AS builder
-
-# --- Install Poetry ---
-ARG POETRY_VERSION=1.8.3
-
-ENV POETRY_HOME=/opt/poetry
-ENV POETRY_NO_INTERACTION=1
-ENV POETRY_VIRTUALENVS_IN_PROJECT=1
-ENV POETRY_VIRTUALENVS_CREATE=1
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-# Tell Poetry where to place its cache and virtual environment
-ENV POETRY_CACHE_DIR=/opt/.cache
-
-RUN pip install "poetry==${POETRY_VERSION}"
-
-# Add poetry to PATH
-ENV PATH="/root/.local/bin:${PATH}"
-
+# Install the project into `/app`
 WORKDIR /app
 
-# --- Reproduce the environment ---
-# You can comment the following two lines if you prefer to manually install
-#   the dependencies from inside the container.
-COPY pyproject.toml .
+# Enable bytecode compilation
+ENV UV_COMPILE_BYTECODE=1
 
-# Install the dependencies and clear the cache afterwards.
-#   This may save some MBs.
-RUN poetry install --no-root && rm -rf $POETRY_CACHE_DIR
+# Copy from the cache instead of linking since it's a mounted volume
+ENV UV_LINK_MODE=copy
 
-# Now let's build the runtime image from the builder.
-#   We'll just copy the env and the PATH reference.
-FROM python:3.12-slim-bookworm AS runtime
+# Install the project's dependencies using the lockfile and settings
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=uv.lock,target=uv.lock \
+    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
+    uv sync --frozen --no-install-project --no-dev
 
-ENV VIRTUAL_ENV=/app/.venv
+# Then, add the rest of the project source code and install it
+# Installing separately from its dependencies allows optimal layer caching
+ADD . /app
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev
+
+# Place executables in the environment at the front of the path
 ENV PATH="/app/.venv/bin:$PATH"
-
-WORKDIR /app
-
-COPY --from=builder ${VIRTUAL_ENV} ${VIRTUAL_ENV}
-COPY . .
 
 EXPOSE 8000
 

@@ -1,7 +1,9 @@
-import requests
 import time
 
 from log_setup import logger
+import json_repair
+import requests
+
 
 class DataFetcher:
     """Fetch data from the course planner API"""
@@ -37,7 +39,7 @@ class DataFetcher:
             print(f"Error: HTTP {response.status_code} - {response.text}")
             return {}
 
-        resp = response.json()
+        resp = json_repair.loads(response.text)
 
         if resp.get("status") != "success":
             print(f"API Error: {resp.get('error', 'Unknown error')}")
