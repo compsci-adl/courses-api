@@ -31,9 +31,7 @@ def setup_logger():
         error_file_handler.setLevel(logging.ERROR)
 
         # Initiaise formatters
-        file_formatter = logging.Formatter(
-            "%(asctime)s - %(levelname)s - %(message)s"
-        )
+        file_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 
         # Set formatters
         error_file_handler.setFormatter(file_formatter)
