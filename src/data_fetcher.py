@@ -3,7 +3,7 @@ import time
 import json_repair
 import requests
 
-from log_setup import logger
+from log import logger
 
 
 class DataFetcher:
