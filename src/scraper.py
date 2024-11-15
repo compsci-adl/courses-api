@@ -15,7 +15,7 @@ def get_short_hash(content: str, even_length=12) -> str:
 def main():
     """Scrape data from the API and store it in a local database"""
 
-    db = TinyDB("db.json")
+    db = TinyDB("src/db.json")
     year = datetime.now().year
 
     with Progress() as progress:
