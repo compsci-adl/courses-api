@@ -1,7 +1,7 @@
 import time
 
-import requests
 import json_repair
+import requests
 
 
 class DataFetcher:
