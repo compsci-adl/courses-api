@@ -58,7 +58,6 @@ Install the git hook scripts:
 ```
 pre-commit install
 ```
-This should be run every time you clone a project
 
 ## License
 
