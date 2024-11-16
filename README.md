@@ -20,6 +20,7 @@ To get started, please follow these steps:
 
     ```sh
     uv sync
+    pre-commit install
     ```
 
 ### Running the API Server
@@ -43,21 +44,6 @@ uv run python3 src/scraper.py
 ## Contributing
 
 We welcome contributions to enhance Courses API! If you find any issues, have suggestions, or want to request a feature, please follow our [Contributing Guidelines](https://github.com/compsci-adl/.github/blob/main/CONTRIBUTING.md).
-
-This repository is configured with a pre-commit hook for automated linting and formatting.
-To perform a commit from local, pre-commit must first be installed:
-```
-pip3 install pre-commit
-```
-OR if performing the action in bash:
-```
-python3 -m pip install pre-commit
-```
-
-Install the git hook scripts:
-```
-pre-commit install
-```
 
 ## License
 
