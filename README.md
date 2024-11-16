@@ -20,6 +20,7 @@ To get started, please follow these steps:
 
     ```sh
     uv sync
+    pre-commit install
     ```
 
 ### Running the API Server
