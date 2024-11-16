@@ -4,17 +4,17 @@ from pathlib import Path
 
 from dotenv import dotenv_values
 
-"""
-Sets up a logger that writes error messages by default to a file (error_{timestamp}.log).
-Depending on the logging level, if it is set to DEBUG, it will also setup a separate debug
-file (debug_{timestamp}.log), which will contain all debug level outputs (debug, info, error, etc.)
-
-Returns:
-    logging.Logger = a customised logger object
-"""
-
 
 def setup_logger() -> logging.Logger:
+    """
+    Sets up a logger that writes error messages by default to a file (error_{timestamp}.log).
+    Depending on the logging level, if it is set to DEBUG, it will also setup a separate debug
+    file (debug_{timestamp}.log), which will contain all debug level outputs (debug, info, error, etc.)
+
+    Returns:
+        logging.Logger = a customised logger object
+    """
+
     logger = logging.getLogger("courseAPICallLogger")
     default_logging_level = dotenv_values().get("DEFAULT_LOGGING_LEVEL")
     logger.setLevel(default_logging_level)
