@@ -3,6 +3,8 @@ import time
 import json_repair
 import requests
 
+from log import logger
+
 
 class DataFetcher:
     """Fetch data from the course planner API"""
@@ -17,8 +19,7 @@ class DataFetcher:
 
     def get(self) -> dict:
         """Get data from the API"""
-        # TODO: Logger
-        # print(f"Fetching {self.endpoint}...")
+        logger.debug(f"Fetching {self.endpoint}...")
         if self.data is not None:
             return self.data
 

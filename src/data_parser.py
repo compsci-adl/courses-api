@@ -1,6 +1,7 @@
 import time
 
 import data_fetcher
+from log import logger
 
 
 def get_subjects(year: int) -> dict[str, list[dict[str, str]]]:
@@ -83,12 +84,16 @@ def get_course_details(course_id: str, term: int, year: int, offer: int, max_ret
                 and details["COURSE_TITLE"]
                 and details["TERM_DESCR"]
             ):
-                # TODO: Logger
-                # print(f"Course Details Not Found")
+                logger.error(
+                    f"Course Details Not Found\n"
+                    f"  Catalog Number: {details['CATALOG_NBR']}\n"
+                    f"  Course Title: {details['COURSE_TITLE']}\n"
+                    f"  Term Description: {details['TERM_DESCR']}\n"
+                )
+
                 return {}
-            # TODO: Logger
-            # name_with_term = f"{details['CATALOG_NBR']} {details['COURSE_TITLE']} {details['TERM_DESCR']}"
-            # print(name_with_term)
+            name_with_term = f"{details['CATALOG_NBR']} {details['COURSE_TITLE']} {details['TERM_DESCR']}"
+            logger.debug(name_with_term)
 
             return data["data"]
 
@@ -122,11 +127,10 @@ def get_course_class_list(course_id: int, offer: int, term: int, session: int):
             )
             return {}
 
-        # TODO: Logger
-        # print(f"{len(data['data'][0]['groups'])} Classes Found")
-
+        logger.debug(f"{len(data['data'][0]['groups'])} Classes Found")
         return data
 
     except Exception as e:
-        print(f"An error occurred while fetching course class list: {e}")
+        logger.error(f"An error occurred while fetching course class list: {e}")
+
         return {}

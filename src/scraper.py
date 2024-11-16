@@ -51,6 +51,24 @@ def main():
                     subject_name = course_details[0]["SUBJECT"]
                     catalog_nbr = course_details[0]["CATALOG_NBR"]
 
+                # Course Custom ID
+                course_cid = get_short_hash(
+                    f"{subject}{catalog_nbr}{year}{term}{course_id}"
+                )
+                db.insert(
+                    {
+                        "id": course_cid,
+                        "course_id": course_id,
+                        "term": term,
+                        "year": year,
+                        "details": course_details,
+                    }
+                )
+
+                if isinstance(course_details, list) and len(course_details) > 0:
+                    subject_name = course_details[0]["SUBJECT"]
+                    catalog_nbr = course_details[0]["CATALOG_NBR"]
+
                     # Course Custom ID
                     course_cid = get_short_hash(
                         f"{subject_name}{catalog_nbr}{year}{term}{course_id}"
