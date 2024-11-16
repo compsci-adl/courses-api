@@ -22,6 +22,8 @@ To get started, please follow these steps:
     uv sync
     ```
 
+3. Make a `.env` file and copy `.env.example` into it
+
 ### Running the API Server
 
 1. Start the FastAPI server:
@@ -39,6 +41,9 @@ Start the scraper (Note: Scraping all the courses may take over an hour):
 ```sh
 uv run python3 src/scraper.py
 ```
+
+#### Debugging
+The output level of the logger can be configured in the `.env`. Set `DEFAULT_LOGGING_LEVEL` to your desires level such as `DEBUG` and `ERROR`. `DEBUG` outputs all logs into a file, including errors. `ERROR` only logs errors into a log file.
 
 ## Contributing
 
