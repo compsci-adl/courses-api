@@ -7,14 +7,14 @@ from dotenv import dotenv_values
 
 def setup_logger() -> logging.Logger:
     """
-    Sets up a logger that writes error messages by default to a file (error_{timestamp}.log).
-    Depending on the logging level, if it is set to DEBUG, it will also setup a separate debug
-    file (debug_{timestamp}.log), which will contain all debug level outputs (debug, info, error, etc.)
-
+    Sets up a logger that writes logs to a file in the form {timestamp}.log
+    The level of logging that is written to the file depends on the environment
+    variable "DEFAULT_LOGGING_LEVEL".
     Returns:
         logging.Logger = a customised logger object
     """
 
+    # Initialise logger
     logger = logging.getLogger("courseAPICallLogger")
     default_logging_level = dotenv_values().get("DEFAULT_LOGGING_LEVEL")
     logger.setLevel(default_logging_level)
@@ -27,35 +27,21 @@ def setup_logger() -> logging.Logger:
         # Each error log sent into separate file
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
 
-        # Error logs file path
-        error_log_file_path = logs_dir / f"error_{timestamp}.log"
+        # Log gile path
+        log_file_path = logs_dir / f"{timestamp}.log"
 
-        # Setup error file handler
-        error_file_handler = logging.FileHandler(
-            error_log_file_path, mode="w", delay=True
-        )
-        error_file_handler.setLevel(
-            dotenv_values().get("ERROR_FILE_HANDLER_LOGGING_LEVEL")
-        )
-        # Initialise error formatter
+        # Setup log file handler
+        log_file_handler = logging.FileHandler(log_file_path, mode="w", delay=True)
+
+        # Set level of file handler
+        log_file_handler.setLevel(default_logging_level)
+
+        # Setup file formatter
         file_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-        error_file_handler.setFormatter(file_formatter)
-        # Add error handler to logger
-        logger.addHandler(error_file_handler)
+        log_file_handler.setFormatter(file_formatter)
 
-        # Debug file only gets created if logging level is DEBUG
-        if default_logging_level == "DEBUG":
-            # Debug logs file path
-            debug_log_file_path = logs_dir / f"debug_{timestamp}.log"
-            # Setup debug file handler
-            debug_file_handler = logging.FileHandler(
-                debug_log_file_path, mode="w", delay=True
-            )
-            # Initialise debug formatter
-            debug_file_handler.setLevel(default_logging_level)
-            debug_file_handler.setFormatter(file_formatter)
-            # Add debug handler to logger
-            logger.addHandler(debug_file_handler)
+        # Add handler to logger
+        logger.addHandler(log_file_handler)
 
     return logger
 
