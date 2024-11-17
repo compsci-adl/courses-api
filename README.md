@@ -20,6 +20,7 @@ To get started, please follow these steps:
 
     ```sh
     uv sync
+    pre-commit install
     ```
 
 3. Make a `.env` file and copy `.env.example` into it
