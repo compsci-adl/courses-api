@@ -1,6 +1,6 @@
-from datetime import datetime
 from hashlib import shake_256
 
+from dotenv import dotenv_values
 from rich.progress import Progress
 from tinydb import TinyDB
 
@@ -16,7 +16,7 @@ def main():
     """Scrape data from the API and store it in a local database"""
 
     db = TinyDB("db.json")
-    year = datetime.now().year
+    year = dotenv_values().get("YEAR")
 
     with Progress() as progress:
         subjects = data_parser.get_subjects(year)

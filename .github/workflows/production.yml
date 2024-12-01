@@ -74,12 +74,14 @@ jobs:
           KEY: ${{ secrets.SSH_EC2_KEY }}
           HOSTNAME: ${{ secrets.SSH_EC2_HOSTNAME }}
           USER: ${{ secrets.SSH_EC2_USER }}
+          YEAR: ${{ secrets.YEAR }}
         run: |
           echo "$KEY" > private_key && chmod 600 private_key
           ssh -v -o StrictHostKeyChecking=no -i private_key ${USER}@${HOSTNAME} '
             cd ~/courses-api
             aws s3 cp s3://${{ secrets.AWS_S3_BUCKET }}/courses-api/courses-api.tar.gz .
             aws s3 cp s3://${{ secrets.AWS_S3_BUCKET }}/courses-api/docker-compose.yml .
+            echo YEAR=${{ secrets.YEAR }} > .env
             docker load -i courses-api.tar.gz
             docker compose up -d
             docker restart courses-api
