@@ -3,6 +3,7 @@ import sys
 from datetime import datetime
 from typing import Union
 
+from dotenv import dotenv_values
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import ValidationError
@@ -40,7 +41,7 @@ app.add_middleware(
 
 def current_year() -> int:
     """Gets the current year."""
-    return datetime.now().year
+    return dotenv_values().get("YEAR")
 
 
 def current_sem() -> str:
