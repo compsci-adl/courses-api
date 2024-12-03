@@ -1,17 +1,15 @@
 import re
 import sys
 from datetime import datetime
-from typing import Union, List, Dict
+from typing import Dict, List, Union
 
 from dotenv import dotenv_values
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import ValidationError
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.orm import Session, sessionmaker
 
-from .models import Base, Subject, Course, CourseDetail, CourseClass, Meetings
-from .schemas import CourseSchema
+from .models import Base, Course, CourseClass, CourseDetail, Subject
 
 # Check if the application is running in development mode
 is_dev_mode = "dev" in sys.argv
@@ -229,7 +227,7 @@ def get_subjects(
     # Collect unique subject codes from course results
     for entry in results:
         code = entry.subject
-        if code: # Skip empty codes
+        if code:  # Skip empty codes
             unique_codes.add(code)
 
     # Add subject descriptions for each unique code

@@ -1,11 +1,13 @@
 import os
 from hashlib import shake_256
+
 from dotenv import dotenv_values
 from rich.progress import Progress
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from models import Base, Subject, Course, CourseClass, CourseDetail, Meetings
+
 import data_parser
+from models import Base, Course, CourseClass, CourseDetail, Meetings, Subject
 
 
 def get_short_hash(content: str, even_length=12) -> str:
@@ -43,7 +45,9 @@ def main():
             subject_cid = get_short_hash(f"{code}{description}")
 
             # Insert subject into the database
-            db_subject = Subject(id=subject_cid, subject_code=code, description=description)
+            db_subject = Subject(
+                id=subject_cid, subject_code=code, description=description
+            )
             session.add(db_subject)
             session.commit()
 
@@ -98,7 +102,7 @@ def main():
 
                 if isinstance(course_details, list) and len(course_details) > 0:
                     for detail in course_details:
-                        subject_name=detail["SUBJECT"]
+                        subject_name = detail["SUBJECT"]
                         # Course Custom ID
                         course_cid = get_short_hash(
                             f"{subject_name}{catalog_nbr}{year}{term}{course_id}"
@@ -135,8 +139,8 @@ def main():
                     )["data"]
 
                     for cls in course_class_list:
-                        for group in cls['groups']:
-                            class_info = group['classes'][0]
+                        for group in cls["groups"]:
+                            class_info = group["classes"][0]
                             # Course Class Custom ID
                             course_class_cid = get_short_hash(
                                 f"{class_info['class_nbr']}{class_info['section']}{class_info['component']}"
@@ -163,7 +167,7 @@ def main():
                             )
                             session.add(db_course_class)
                             session.commit()
-                            if class_info.get('meetings'):
+                            if class_info.get("meetings"):
                                 for meeting in class_info.get("meetings"):
                                     # Meeting Custom ID
                                     meeting_cid = get_short_hash(
