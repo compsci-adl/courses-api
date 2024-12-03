@@ -1,2 +1,0 @@
-* text=auto eol=lf
-src/db.json filter=lfs diff=lfs merge=lfs -text

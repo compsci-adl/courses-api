@@ -1,14 +1,16 @@
 import re
 import sys
 from datetime import datetime
-from typing import Union
+from typing import Union, List, Dict
 
 from dotenv import dotenv_values
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import ValidationError
-from tinydb import Query, TinyDB
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, Session
 
+from .models import Base, Subject, Course, CourseDetail, CourseClass, Meetings
 from .schemas import CourseSchema
 
 # Check if the application is running in development mode
@@ -20,8 +22,11 @@ app = FastAPI(
     redoc_url="/redoc" if is_dev_mode else None,
 )
 
-db = TinyDB("src/db.json")
-Course = Query()
+# Database setup
+DATABASE_URL = "sqlite:///src/db.sqlite3"
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base.metadata.create_all(bind=engine)
 
 # Configure CORS for local development and production
 origins = [
@@ -39,6 +44,14 @@ app.add_middleware(
 )
 
 
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
 def current_year() -> int:
     """Gets the current year."""
     return dotenv_values().get("YEAR")
@@ -49,23 +62,19 @@ def current_sem() -> str:
     return "Semester 1" if datetime.now().month <= 6 else "Semester 2"
 
 
-def get_term_number(year: int, term: str) -> int:
+def get_term_number(db, year: int, term: str) -> int:
     """Gets the term number from the local database."""
 
     # Convert aliases
     term = convert_term_alias(term)
+    courses = db.query(Course).filter(Course.year == year).all()
 
-    course_details_results = db.search(Course.year == year)
-
-    if not course_details_results:
+    if not courses:
         raise Exception(f"No courses found for year: {year}")
 
-    for course_details in course_details_results:
-        details = course_details.get("details", [])
-
-        for detail in details:
-            if detail.get("TERM_DESCR") == term:
-                return detail.get("TERM", None)
+    for course in courses:
+        if course.term_descr == term:
+            return course.term
 
     raise Exception(f"Invalid term: {term} for year: {year}")
 
@@ -100,11 +109,10 @@ def meeting_date_convert(raw_date: str) -> dict[str]:
     end_d, end_m = end.split()
     end_m = str(months.index(end_m) + 1).zfill(2)
 
-    formatted_date = {
+    return {
         "start": f"{start_m}-{start_d.zfill(2)}",
         "end": f"{end_m}-{end_d.zfill(2)}",
     }
-    return formatted_date
 
 
 def meeting_time_convert(raw_time: str) -> str:
@@ -127,8 +135,7 @@ def meeting_time_convert(raw_time: str) -> str:
     elif period == "am" and hour == 12:
         hour = 0
 
-    formatted_time = f"{str(hour).zfill(2)}:{str(minute).zfill(2)}"
-    return formatted_time
+    return f"{str(hour).zfill(2)}:{str(minute).zfill(2)}"
 
 
 def parse_requisites(raw_requisites: str) -> Union[list[str], None]:
@@ -189,8 +196,10 @@ def convert_term_alias(term_alias: str) -> str:
     return converted_alias
 
 
-@app.get("/subjects", response_model=Union[dict, list])
-def get_subjects(year: int = current_year(), term: str = current_sem()):
+@app.get("/subjects", response_model=Union[Dict, List])
+def get_subjects(
+    year: int = current_year(), term: str = current_sem(), db: Session = Depends(get_db)
+):
     """Get all possible subjects for a given year and term, sorted alphabetically.
 
     Args:
@@ -200,9 +209,11 @@ def get_subjects(year: int = current_year(), term: str = current_sem()):
     Returns:
         dict: A dictionary containing a list of subjects.
     """
-    term_number = get_term_number(year, term)
+    term_number = get_term_number(db, year, term)
 
-    results = db.search((Course.year == year) & (Course.term == term_number))
+    results = (
+        db.query(Course).filter(Course.year == year, Course.term == term_number).all()
+    )
 
     if not results:
         raise HTTPException(
@@ -210,27 +221,23 @@ def get_subjects(year: int = current_year(), term: str = current_sem()):
         )
 
     # Extract unique subject codes from the results
-    subject_info = db.all()[0]
-    subjects = subject_info.get("subjects", [])
-
+    subjects = db.query(Subject).all()
     unique_codes = set()
 
     transformed_subjects = {"subjects": []}
 
     # Collect unique subject codes from course results
     for entry in results:
-        details = entry.get("details", [])
-        for detail in details:
-            code = detail.get("SUBJECT", "")
-            if code:  # Skip empty codes
-                unique_codes.add(code)
+        code = entry.subject
+        if code: # Skip empty codes
+            unique_codes.add(code)
 
     # Add subject descriptions for each unique code
     for code in unique_codes:
         for subject in subjects:
-            if subject.get("SUBJECT") == code:
+            if subject.subject_code == code:
                 transformed_subjects["subjects"].append(
-                    {"code": code, "name": subject.get("DESCR")}
+                    {"code": code, "name": subject.description}
                 )
                 break
 
@@ -240,9 +247,12 @@ def get_subjects(year: int = current_year(), term: str = current_sem()):
     return transformed_subjects
 
 
-@app.get("/courses", response_model=Union[dict, list])
+@app.get("/courses", response_model=Union[Dict, List])
 def get_subject_courses(
-    subject: str, year: int = current_year(), term: str = current_sem()
+    subject: str,
+    year: int = current_year(),
+    term: str = current_sem(),
+    db: Session = Depends(get_db),
 ):
     """Gets a list of courses given a subject (and optionally a year and term).
 
@@ -255,11 +265,15 @@ def get_subject_courses(
     Returns:
         list[dict]: A list of courses as dictionaries.
     """
-    term_number = get_term_number(year, term)
-    results = db.search(
-        (Course.details.any(Query().SUBJECT == subject))
-        & (Course.year == year)
-        & (Course.term == term_number)
+    term_number = get_term_number(db, year, term)
+    results = (
+        db.query(Course)
+        .filter(
+            Course.subject == subject,
+            Course.year == year,
+            Course.term == term_number,
+        )
+        .all()
     )
 
     if not results:
@@ -271,27 +285,23 @@ def get_subject_courses(
 
     # Extract necessary information from the results
     for entry in results:
-        nano_id = entry.get("id", "")
-        details = entry.get("details", [])
-
-        for detail in details:
-            subject = detail.get("SUBJECT", "")
-            code = detail.get("CATALOG_NBR", "")
-            title = detail.get("COURSE_TITLE", "")
-
-            transformed_courses["courses"].append(
-                {
-                    "id": nano_id,
-                    "name": {"subject": subject, "code": code, "title": title},
-                }
-            )
+        transformed_courses["courses"].append(
+            {
+                "id": entry.id,
+                "name": {
+                    "subject": entry.subject,
+                    "code": entry.catalog_nbr,
+                    "title": entry.course_title,
+                },
+            }
+        )
 
     return transformed_courses
 
 
 def split_class_type_category(original_type: str):
     CATEGORIES = {"enrolment", "related"}
-    [full_category, class_type] = original_type.split(": ")
+    full_category, class_type = original_type.split(": ")
     class_category = "unknown"
     for category in CATEGORIES:
         if category in full_category.lower():
@@ -300,8 +310,8 @@ def split_class_type_category(original_type: str):
     return {"category": class_category, "type": class_type}
 
 
-@app.get("/courses/{course_cid}", response_model=Union[dict, list])
-def get_course(course_cid: str):
+@app.get("/courses/{course_cid}", response_model=Union[Dict, List])
+def get_course(course_cid: str, db: Session = Depends(get_db)):
     """Course details route, takes in an id returns the courses' info and classes.
 
     Args:
@@ -310,113 +320,93 @@ def get_course(course_cid: str):
     Returns:
         dict: A dictionary containing the course information and classes.
     """
+    course = db.query(Course).filter(Course.id == course_cid).first()
 
-    results = db.search((Course.id == course_cid))
+    course_id = course.course_id
 
-    if not results:
+    if not course:
         raise HTTPException(status_code=404, detail="Course not found")
 
-    course_details = results[0]
-    details = course_details.get("details", [])
+    course_details = (
+        db.query(CourseDetail).filter(CourseDetail.course_id == course_id).first()
+    )
 
     # Extract necessary information from details
-    if details:
-        detail = details[0]
+    if course_details:
         name = {
-            "subject": detail.get("SUBJECT", ""),
-            "code": detail.get("CATALOG_NBR", ""),
-            "title": detail.get("COURSE_TITLE", ""),
+            "subject": course.subject,
+            "code": course.catalog_nbr,
+            "title": course.course_title,
         }
         requirements = {
-            "restriction": parse_requisites(detail.get("RESTRICTION_TXT", "")),
-            "prerequisite": parse_requisites(detail.get("PRE_REQUISITE", "")),
-            "corequisite": parse_requisites(detail.get("CO_REQUISITE", "")),
-            "assumed_knowledge": parse_requisites(detail.get("ASSUMED_KNOWLEDGE", "")),
-            "incompatible": parse_requisites(detail.get("INCOMPATIBLE", "")),
+            "restriction": parse_requisites(course_details.restriction_txt),
+            "prerequisite": parse_requisites(course_details.pre_requisite),
+            "corequisite": parse_requisites(course_details.co_requisite),
+            "assumed_knowledge": parse_requisites(course_details.assumed_knowledge),
+            "incompatible": parse_requisites(course_details.incompatible),
         }
     else:
         name = {"subject": "", "code": "", "title": ""}
         requirements = {}
 
-    course_id = course_details.get("course_id", "")
-    year = course_details.get("year", "")
-
     # Construct the response
     response = {
         "id": course_cid,
-        "course_id": course_id,
+        "course_id": course.course_id,
         "name": name,
-        "class_number": detail.get("CLASS_NBR", ""),
-        "year": year,
-        "term": detail.get("TERM_DESCR", ""),
-        "campus": detail.get("CAMPUS", ""),
-        "units": detail.get("UNITS", 0),
+        "class_number": course.class_nbr,
+        "year": course.year,
+        "term": course.term_descr,
+        "campus": course.campus,
+        "units": course.units,
         "requirements": requirements,
         "class_list": [],
     }
 
     # Fetch classes info and process to match the required structure
-    classes = db.search((Course.id == course_cid))
+    classes = db.query(CourseClass).filter(CourseClass.course_id == course_cid).all()
     if classes:
-        class_details = classes[1]
-        class_list = class_details.get("class_list", [])
-        for class_group in class_list:
-            for group in class_group.get("groups", []):
-                class_list_entry = {
-                    **split_class_type_category(group["type"]),
-                    "id": group["id"],
-                    "classes": [],
+        for class_group in classes:
+            class_list_entry = {
+                **split_class_type_category(class_group.component),
+                "id": class_group.id,
+                "classes": [],
+            }
+            for meeting in class_group.meetings:
+                class_entry = {
+                    "number": str(class_group.class_nbr),
+                    "meetings": [],
                 }
-                for class_info in group.get("classes", []):
-                    class_entry = {
-                        "number": str(class_info["class_nbr"]),
-                        "meetings": [],
+                # Split the meeting days by commas, and handle multiple same-day entries
+                meeting_days = [
+                    day.strip() for day in meeting.days.split(",") if day.strip()
+                ]
+
+                # Flatten the list if the days appear multiple times (e.g., "Monday, Monday")
+                flattened_meeting_days = []
+                for day in meeting_days:
+                    # Append each day individually
+                    flattened_meeting_days.append(day)
+
+                # Skip weekend meetings
+                if any(day in flattened_meeting_days for day in ["Saturday", "Sunday"]):
+                    continue
+
+                # Create meeting entry
+                for day in flattened_meeting_days:
+                    meeting_entry = {
+                        "day": day,
+                        "location": meeting.location,
+                        "date": meeting_date_convert(meeting.dates),
+                        "time": {
+                            "start": meeting_time_convert(meeting.start_time),
+                            "end": meeting_time_convert(meeting.end_time),
+                        },
                     }
-                    for meeting in class_info.get("meetings", []):
-                        # Split the meeting days by commas, and handle multiple same-day entries
-                        meeting_days = [
-                            day.strip()
-                            for day in meeting.get("days", "").split(",")
-                            if day.strip()
-                        ]
+                    class_entry["meetings"].append(meeting_entry)
 
-                        # Flatten the list if the days appear multiple times (e.g., "Monday, Monday")
-                        flattened_meeting_days = []
-                        for day in meeting_days:
-                            # Append each day individually
-                            flattened_meeting_days.append(day)
+                class_list_entry["classes"].append(class_entry)
 
-                        # Skip weekend meetings
-                        if any(
-                            day in flattened_meeting_days
-                            for day in ["Saturday", "Sunday"]
-                        ):
-                            continue
-
-                        # Create meeting entry
-                        for day in flattened_meeting_days:
-                            meeting_entry = {
-                                "day": day,
-                                "location": meeting.get("location", ""),
-                                "date": meeting_date_convert(meeting.get("dates", "")),
-                                "time": {
-                                    "start": meeting_time_convert(
-                                        meeting.get("start_time", "")
-                                    ),
-                                    "end": meeting_time_convert(
-                                        meeting.get("end_time", "")
-                                    ),
-                                },
-                            }
-                            class_entry["meetings"].append(meeting_entry)
-
-                    class_list_entry["classes"].append(class_entry)
-
-                response["class_list"].append(class_list_entry)
-
-    try:
-        CourseSchema.model_validate(response)
-    except ValidationError as e:
-        raise HTTPException(status_code=501, detail=e.errors())
+            response["class_list"].append(class_list_entry)
 
     return response
