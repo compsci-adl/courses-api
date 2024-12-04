@@ -6,10 +6,12 @@ from typing import Dict, List, Union
 from dotenv import dotenv_values
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import ValidationError
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from .models import Base, Course, CourseClass, CourseDetail, Subject
+from .schemas import CourseSchema
 
 # Check if the application is running in development mode
 is_dev_mode = "dev" in sys.argv
@@ -430,5 +432,10 @@ def get_course(course_cid: str, db: Session = Depends(get_db)):
             class_list_entry["classes"].append(class_entry)
 
         response["class_list"] = list(class_groups.values())
+
+    try:
+        CourseSchema.model_validate(response)
+    except ValidationError as e:
+        raise HTTPException(status_code=501, detail=e.errors())
 
     return response
