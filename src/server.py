@@ -65,9 +65,12 @@ app.add_middleware(
 
 
 def get_db():
+    """Get a database session."""
     db = SessionLocal()
     try:
         yield db
+    except Exception as e:
+        print(f"An error occurred while accessing the database: {e}")
     finally:
         db.close()
 
