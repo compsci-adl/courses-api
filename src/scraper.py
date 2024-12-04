@@ -19,10 +19,10 @@ def main():
     """Scrape data from the API and store it in a local database"""
 
     # If db already exists, delete it
-    if os.path.exists("src/db.sqlite3"):
-        os.remove("src/db.sqlite3")
+    if os.path.exists("src/dev.sqlite3"):
+        os.remove("src/dev.sqlite3")
 
-    engine = create_engine("sqlite:///src/db.sqlite3")
+    engine = create_engine("sqlite:///src/dev.sqlite3")
     Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine)
     session = Session()
