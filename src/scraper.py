@@ -140,51 +140,51 @@ def main():
 
                     for cls in course_class_list:
                         for group in cls["groups"]:
-                            class_info = group["classes"][0]
-                            # Course Class Custom ID
-                            course_class_cid = get_short_hash(
-                                f"{class_info['class_nbr']}{class_info['section']}{class_info['component']}"
-                            )
+                            for class_info in group["classes"]:
+                                # Course Class Custom ID
+                                course_class_cid = get_short_hash(
+                                    f"{class_info['class_nbr']}{class_info['section']}{class_info['component']}"
+                                )
 
-                            # Check if Class Custom ID exists, if it does, skip
-                            if (
-                                session.query(CourseClass)
-                                .filter_by(id=course_class_cid)
-                                .first()
-                            ):
-                                progress.update(subject_task, advance=1)
-                                continue
+                                # Check if Class Custom ID exists, if it does, skip
+                                if (
+                                    session.query(CourseClass)
+                                    .filter_by(id=course_class_cid)
+                                    .first()
+                                ):
+                                    progress.update(subject_task, advance=1)
+                                    continue
 
-                            db_course_class = CourseClass(
-                                id=course_class_cid,
-                                class_nbr=class_info["class_nbr"],
-                                section=class_info["section"],
-                                size=class_info["size"],
-                                enrolled=class_info["enrolled"],
-                                available=class_info["available"],
-                                component=class_info["component"],
-                                course_id=db_course.id,
-                            )
-                            session.add(db_course_class)
-                            session.commit()
-                            if class_info.get("meetings"):
-                                for meeting in class_info.get("meetings"):
-                                    # Meeting Custom ID
-                                    meeting_cid = get_short_hash(
-                                        f"{class_info['class_nbr']}{meeting['dates']}{meeting['days']}{meeting['start_time']}{meeting['end_time']}{meeting['location']}{db_course_class.id}"
-                                    )
+                                db_course_class = CourseClass(
+                                    id=course_class_cid,
+                                    class_nbr=class_info["class_nbr"],
+                                    section=class_info["section"],
+                                    size=class_info["size"],
+                                    enrolled=class_info["enrolled"],
+                                    available=class_info["available"],
+                                    component=class_info["component"],
+                                    course_id=db_course.id,
+                                )
+                                session.add(db_course_class)
+                                session.commit()
+                                if class_info.get("meetings"):
+                                    for meeting in class_info.get("meetings"):
+                                        # Meeting Custom ID
+                                        meeting_cid = get_short_hash(
+                                            f"{class_info['class_nbr']}{meeting['dates']}{meeting['days']}{meeting['start_time']}{meeting['end_time']}{meeting['location']}{db_course_class.id}"
+                                        )
 
-                                    db_meeting = Meetings(
-                                        id=meeting_cid,
-                                        dates=meeting["dates"],
-                                        days=meeting["days"],
-                                        start_time=meeting["start_time"],
-                                        end_time=meeting["end_time"],
-                                        location=meeting["location"],
-                                        course_class_id=db_course_class.id,
-                                    )
-                                    session.add(db_meeting)
-                                    session.commit()
+                                        db_meeting = Meetings(
+                                            id=meeting_cid,
+                                            dates=meeting["dates"],
+                                            days=meeting["days"],
+                                            start_time=meeting["start_time"],
+                                            end_time=meeting["end_time"],
+                                            location=meeting["location"],
+                                            course_class_id=db_course_class.id,
+                                        )
+                                        session.add(db_meeting)
+                                        session.commit()
 
                 else:
                     print(f"No data found for course {course_id}, term {term}")

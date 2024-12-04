@@ -364,17 +364,21 @@ def get_course(course_cid: str, db: Session = Depends(get_db)):
     # Fetch classes info and process to match the required structure
     classes = db.query(CourseClass).filter(CourseClass.course_id == course_cid).all()
     if classes:
+        class_groups = {}
         for class_group in classes:
-            class_list_entry = {
-                **split_class_type_category(class_group.component),
-                "id": class_group.id,
-                "classes": [],
+            class_type = split_class_type_category(class_group.component)["type"]
+            if class_type not in class_groups:
+                class_groups[class_type] = {
+                    **split_class_type_category(class_group.component),
+                    "id": class_group.id,
+                    "classes": [],
+                }
+            class_list_entry = class_groups[class_type]
+            class_entry = {
+                "number": str(class_group.class_nbr),
+                "meetings": [],
             }
             for meeting in class_group.meetings:
-                class_entry = {
-                    "number": str(class_group.class_nbr),
-                    "meetings": [],
-                }
                 # Split the meeting days by commas, and handle multiple same-day entries
                 meeting_days = [
                     day.strip() for day in meeting.days.split(",") if day.strip()
@@ -403,8 +407,8 @@ def get_course(course_cid: str, db: Session = Depends(get_db)):
                     }
                     class_entry["meetings"].append(meeting_entry)
 
-                class_list_entry["classes"].append(class_entry)
+            class_list_entry["classes"].append(class_entry)
 
-            response["class_list"].append(class_list_entry)
+        response["class_list"] = list(class_groups.values())
 
     return response
