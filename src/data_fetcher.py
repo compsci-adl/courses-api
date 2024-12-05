@@ -31,8 +31,8 @@ class DataFetcher:
         self.last_response = response
 
         if response.status_code == 429:
-            print("Error: HTTP 429 - Too Many Requests. Waiting for 30 seconds...")
-            time.sleep(30)
+            print("Error: HTTP 429 - Too Many Requests. Waiting for 60 seconds...")
+            time.sleep(60)
             return self.get()
 
         if response.status_code != 200:

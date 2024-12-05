@@ -15,7 +15,8 @@ dependencies = [
     "pydantic>=2.9.2",
     "requests>=2.32.3",
     "rich>=13.9.4",
-    "tinydb>=4.8.2",
+    "sqlalchemy-libsql>=0.1.0",
+    "sqlalchemy>=2.0.36",
 ]
 
 [tool.ruff]
