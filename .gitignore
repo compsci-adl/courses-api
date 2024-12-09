@@ -166,3 +166,5 @@ cython_debug/
 .python-version
 
 dev.sqlite3
+dev.sqlite3.journal
+working_proxies.txt
