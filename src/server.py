@@ -195,12 +195,9 @@ def convert_term_alias(term_alias: str) -> str:
     terms_without_digits = ("summer", "winter")
     aliases = {
         "sem": "Semester",
-        "elc": "ELC Term",
         "tri": "Trimester",
         "term": "Term",
         "ol": "Online Teaching Period",
-        "melb": "Melb Teaching Period",
-        "pce": "PCE Term",
         "summer": "Summer School",
         "winter": "Winter School",
     }
