@@ -91,13 +91,17 @@ def get_term_number(db, year: int, term: str) -> int:
     courses = db.query(Course).filter(Course.year == year).all()
 
     if not courses:
-        raise HTTPException(status_code= 404, detail = f"No courses found for year: {year}")
+        raise HTTPException(
+            status_code=404, detail=f"No courses found for year: {year}"
+        )
 
     for course in courses:
         if course.term_descr == term:
             return course.term
 
-    raise HTTPException(status_code= 404, detail = f"Invalid term: {term} for year: {year}")
+    raise HTTPException(
+        status_code=404, detail=f"Invalid term: {term} for year: {year}"
+    )
 
 
 def meeting_date_convert(raw_date: str) -> dict[str]:
@@ -342,7 +346,7 @@ def get_course(course_cid: str, db: Session = Depends(get_db)):
 
     if not course:
         raise HTTPException(status_code=404, detail="Course not found")
-    
+
     course_id = course.course_id
 
     course_details = (
