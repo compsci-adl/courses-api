@@ -1,0 +1,36 @@
+name: Scraper
+
+on:
+  schedule:
+    - cron: '30 14 * * *'
+  workflow_dispatch:
+
+jobs:
+  run-scraper-docker:
+    runs-on: ubuntu-24.04-arm
+    environment: Scraper
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        run: docker build -f scraper.Dockerfile -t courses-api-scraper:latest .
+
+      - name: Run scraper container (generate dev.sqlite3)
+        run: docker run --rm -v ${{ github.workspace }}/src:/app/src courses-api-scraper:latest
+
+      - name: Install Turso CLI
+        run: |
+          curl -L https://get.turso.io | sh
+          echo "$HOME/.turso/bin" >> $GITHUB_PATH
+
+      - name: Login to Turso CLI
+        env:
+          TURSO_API_TOKEN: ${{ secrets.TURSO_API_TOKEN }}
+        run: turso login --api-token $TURSO_API_TOKEN
+
+      - name: Import SQLite DB to Turso
+        run: turso db import --db courses-api src/dev.sqlite3
