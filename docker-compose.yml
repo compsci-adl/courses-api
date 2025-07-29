@@ -8,6 +8,8 @@ services:
       - PORT=8000
     ports:
       - 8000:8000
+    volumes:
+      - ./local.sqlite3:/app/src/local.sqlite3
     networks:
       - csclub
 
