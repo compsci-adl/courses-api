@@ -1,7 +1,8 @@
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from hashlib import shake_256
-from threading import Lock
+from queue import Queue
+from threading import Lock, Thread
 
 from dotenv import dotenv_values
 from rich.progress import Progress
@@ -12,20 +13,33 @@ import data_parser
 import fetch_proxies
 from models import Base, Course, CourseClass, CourseDetail, Meetings, Subject
 
+# Session and write queue for DB writer thread
+Session = sessionmaker()
+write_queue = Queue()
+
 
 def get_short_hash(content: str, even_length=12) -> str:
     """Generates a short hash from the given content using the shake_256 algorithm."""
     return shake_256(content.encode("utf8")).hexdigest(even_length // 2)
 
 
-def add_to_session_and_commit(session, obj):
-    """Add an object to the session and commit immediately."""
-    try:
-        session.add(obj)
-        session.commit()  # Commit immediately
-        session.refresh(obj)  # Refresh the object to ensure it is bound to the session
-    except Exception as e:
-        print(f"Error committing object {obj}: {e}")
+def db_writer(engine):
+    """Dedicated DB writer thread to serialize all DB operations and prevent locking."""
+    while True:
+        obj = write_queue.get()
+        if obj is None:
+            break  # Stop signal
+
+        session = Session(bind=engine)
+
+        try:
+            session.merge(obj)
+            session.commit()
+        except Exception as e:
+            session.rollback()
+            print(f"[DB ERROR] {e} on {obj}")
+        finally:
+            session.close()
 
 
 def process_course(course, year, subject, engine, progress, subject_task, lock):
@@ -37,29 +51,24 @@ def process_course(course, year, subject, engine, progress, subject_task, lock):
 
         course_details = data_parser.get_course_details(course_id, term, year, offer)
 
-        if isinstance(course_details, list) and len(course_details) > 0:
-            subject_code = course_details[0]["SUBJECT"]
-            catalog_nbr = course_details[0]["CATALOG_NBR"]
-            course_title = course_details[0]["COURSE_TITLE"]
-            term_descr = course_details[0]["TERM_DESCR"]
-            campus = course_details[0]["CAMPUS"]
-            units = course_details[0]["UNITS"]
-            class_nbr = course_details[0]["CLASS_NBR"]
+        if not isinstance(course_details, list) or len(course_details) == 0:
+            progress.update(subject_task, advance=1)
+            return
+
+        subject_code = course_details[0]["SUBJECT"]
+        catalog_nbr = course_details[0]["CATALOG_NBR"]
+        course_title = course_details[0]["COURSE_TITLE"]
+        term_descr = course_details[0]["TERM_DESCR"]
+        campus = course_details[0]["CAMPUS"]
+        units = course_details[0]["UNITS"]
+        class_nbr = course_details[0]["CLASS_NBR"]
 
         # Course Custom ID
         course_cid = get_short_hash(
             f"{subject_code}{catalog_nbr}{course_title}{year}{term}{class_nbr}"
         )
 
-        session = sessionmaker(bind=engine)()
-
-        # Check if Course Custom ID exists, if it does, skip
-        db_course = session.query(Course).filter_by(id=course_cid).first()
-        if db_course:
-            progress.update(subject_task, advance=1)
-            return  # Skip this course if it already exists
-
-        # Insert course into the session and commit immediately
+        # Insert course into the queue
         db_course = Course(
             id=course_cid,
             course_id=course_id,
@@ -74,94 +83,85 @@ def process_course(course, year, subject, engine, progress, subject_task, lock):
             units=units,
             class_nbr=class_nbr,
         )
-        add_to_session_and_commit(session, db_course)
-        progress.update(subject_task, advance=1)
+        write_queue.put(db_course)
 
         # Process course details
-        if isinstance(course_details, list) and len(course_details) > 0:
-            for detail in course_details:
-                subject_name = detail["SUBJECT"]
-                course_cid = get_short_hash(
-                    f"{subject_name}{catalog_nbr}{year}{term}{course_id}"
-                )
+        for detail in course_details:
+            subject_name = detail["SUBJECT"]
+            detail_catalog_nbr = detail["CATALOG_NBR"]
+            detail_cid = get_short_hash(
+                f"{subject_name}{detail_catalog_nbr}{year}{term}{course_id}"
+            )
 
-                db_course_detail = CourseDetail(
-                    id=course_cid,
-                    year=detail["YEAR"],
-                    course_id=course_id,
-                    course_offer_nbr=offer,
-                    term=term,
-                    term_descr=detail["TERM_DESCR"],
-                    course_title=detail["COURSE_TITLE"],
-                    campus=detail["CAMPUS"],
-                    campus_cd=detail["CAMPUS_CD"],
-                    subject=subject_name,
-                    catalog_nbr=detail["CATALOG_NBR"],
-                    restriction=detail["RESTRICTION"],
-                    restriction_txt=detail.get("RESTRICTION_TXT", ""),
-                    pre_requisite=detail.get("PRE_REQUISITE", ""),
-                    co_requisite=detail.get("CO_REQUISITE", ""),
-                    assumed_knowledge=detail.get("ASSUMED_KNOWLEDGE", ""),
-                    incompatible=detail.get("INCOMPATIBLE", ""),
-                    syllabus=detail["SYLLABUS"],
-                    url=detail["URL"],
-                )
-                add_to_session_and_commit(session, db_course_detail)
+            db_course_detail = CourseDetail(
+                id=detail_cid,
+                year=detail["YEAR"],
+                course_id=course_id,
+                course_offer_nbr=offer,
+                term=term,
+                term_descr=detail["TERM_DESCR"],
+                course_title=detail["COURSE_TITLE"],
+                campus=detail["CAMPUS"],
+                campus_cd=detail["CAMPUS_CD"],
+                subject=subject_name,
+                catalog_nbr=detail["CATALOG_NBR"],
+                restriction=detail["RESTRICTION"],
+                restriction_txt=detail.get("RESTRICTION_TXT", ""),
+                pre_requisite=detail.get("PRE_REQUISITE", ""),
+                co_requisite=detail.get("CO_REQUISITE", ""),
+                assumed_knowledge=detail.get("ASSUMED_KNOWLEDGE", ""),
+                incompatible=detail.get("INCOMPATIBLE", ""),
+                syllabus=detail["SYLLABUS"],
+                url=detail["URL"],
+            )
+            write_queue.put(db_course_detail)
 
-            # Process course classes and meetings
-            session_code = course_details[0].get("SESSION_CD", "N/A")
-            course_class_list = data_parser.get_course_class_list(
-                course_id, offer, term, session_code
-            )["data"]
+        # Process course classes and meetings
+        session_code = course_details[0].get("SESSION_CD", "N/A")
+        course_class_list = data_parser.get_course_class_list(
+            course_id, offer, term, session_code
+        )["data"]
 
-            for cls in course_class_list:
-                for group in cls["groups"]:
-                    for class_info in group["classes"]:
-                        course_class_cid = get_short_hash(
-                            f"{class_info['class_nbr']}{class_info['section']}{class_info['component']}"
+        for cls in course_class_list:
+            for group in cls["groups"]:
+                for class_info in group["classes"]:
+                    class_nbr = class_info["class_nbr"]
+                    section = class_info["section"]
+                    component = class_info["component"]
+
+                    course_class_cid = get_short_hash(
+                        f"{class_nbr}{section}{component}"
+                    )
+
+                    db_course_class = CourseClass(
+                        id=course_class_cid,
+                        class_nbr=class_nbr,
+                        section=section,
+                        size=class_info["size"],
+                        enrolled=class_info["enrolled"],
+                        available=class_info["available"],
+                        component=component,
+                        course_id=course_cid,
+                    )
+                    write_queue.put(db_course_class)
+
+                    for meeting in class_info.get("meetings", []):
+                        meeting_cid = get_short_hash(
+                            f"{class_nbr}{meeting['dates']}{meeting['days']}{meeting['start_time']}{meeting['end_time']}{meeting['location']}{course_class_cid}"
                         )
 
-                        # Open a new session just before inserting data
-                        session = sessionmaker(bind=engine)()
-
-                        # Check if Class Custom ID exists, if it does, skip
-                        db_course_class = (
-                            session.query(CourseClass)
-                            .filter_by(id=course_class_cid)
-                            .first()
+                        db_meeting = Meetings(
+                            id=meeting_cid,
+                            dates=meeting["dates"],
+                            days=meeting["days"],
+                            start_time=meeting["start_time"],
+                            end_time=meeting["end_time"],
+                            location=meeting["location"],
+                            course_class_id=course_class_cid,
                         )
-                        if db_course_class:
-                            progress.update(subject_task, advance=1)
-                            continue
+                        write_queue.put(db_meeting)
 
-                        db_course_class = CourseClass(
-                            id=course_class_cid,
-                            class_nbr=class_info["class_nbr"],
-                            section=class_info["section"],
-                            size=class_info["size"],
-                            enrolled=class_info["enrolled"],
-                            available=class_info["available"],
-                            component=class_info["component"],
-                            course_id=db_course.id,
-                        )
-                        add_to_session_and_commit(session, db_course_class)
-
-                        if class_info.get("meetings"):
-                            for meeting in class_info.get("meetings"):
-                                meeting_cid = get_short_hash(
-                                    f"{class_info['class_nbr']}{meeting['dates']}{meeting['days']}{meeting['start_time']}{meeting['end_time']}{meeting['location']}{db_course_class.id}"
-                                )
-
-                                db_meeting = Meetings(
-                                    id=meeting_cid,
-                                    dates=meeting["dates"],
-                                    days=meeting["days"],
-                                    start_time=meeting["start_time"],
-                                    end_time=meeting["end_time"],
-                                    location=meeting["location"],
-                                    course_class_id=db_course_class.id,
-                                )
-                                add_to_session_and_commit(session, db_meeting)
+        progress.update(subject_task, advance=1)
 
     except Exception as e:
         print(f"Error processing course {course['course_id']}: {e}")
@@ -178,19 +178,18 @@ def process_subject(subject, year, engine, progress, all_task, lock):
         subject_cid = get_short_hash(f"{code}{description}")
 
         # Open a new session just before inserting data
-        session = sessionmaker(bind=engine)()
+        session = Session(bind=engine)
 
-        # Insert subject into the session and commit immediately
+        # Insert subject into the queue
         db_subject = Subject(id=subject_cid, subject_code=code, description=description)
-        add_to_session_and_commit(session, db_subject)
+        session.close()
+        write_queue.put(db_subject)
 
         courses = data_parser.get_course_ids(code, year)
         progress.update(subject_task, total=len(courses["courses"]))
 
         # Process each course concurrently
-        with ThreadPoolExecutor(
-            max_workers=25
-        ) as executor:  # Adjust the number of workers as needed
+        with ThreadPoolExecutor(max_workers=50) as executor:
             futures = []
             for course in courses["courses"]:
                 future = executor.submit(
@@ -233,11 +232,16 @@ def main():
         pool_timeout=30,  # Set the pool timeout to 30 seconds
     )
     Base.metadata.create_all(engine)
+    Session.configure(bind=engine)
 
     year = dotenv_values().get("YEAR")
 
     # Create lock for thread-safe operations
     lock = Lock()
+
+    # Start DB writer thread
+    writer_thread = Thread(target=db_writer, args=(engine,))
+    writer_thread.start()
 
     with Progress() as progress:
         subjects = data_parser.get_subjects(year)
@@ -258,6 +262,10 @@ def main():
             # Wait for all threads to complete
             for future in as_completed(futures):
                 future.result()
+
+    # Signal DB writer to stop and wait
+    write_queue.put(None)
+    writer_thread.join()
 
 
 if __name__ == "__main__":
