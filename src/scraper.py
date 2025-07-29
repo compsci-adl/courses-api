@@ -189,7 +189,7 @@ def process_subject(subject, year, engine, progress, all_task, lock):
 
         # Process each course concurrently
         with ThreadPoolExecutor(
-            max_workers=50
+            max_workers=25
         ) as executor:  # Adjust the number of workers as needed
             futures = []
             for course in courses["courses"]:
