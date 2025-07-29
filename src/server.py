@@ -69,8 +69,6 @@ def get_db():
     db = SessionLocal()
     try:
         yield db
-    except Exception as e:
-        print(f"An error occurred while accessing the database: {e}")
     finally:
         db.close()
 
@@ -93,13 +91,17 @@ def get_term_number(db, year: int, term: str) -> int:
     courses = db.query(Course).filter(Course.year == year).all()
 
     if not courses:
-        raise Exception(f"No courses found for year: {year}")
+        raise HTTPException(
+            status_code=404, detail=f"No courses found for year: {year}"
+        )
 
     for course in courses:
         if course.term_descr == term:
             return course.term
 
-    raise Exception(f"Invalid term: {term} for year: {year}")
+    raise HTTPException(
+        status_code=404, detail=f"Invalid term: {term} for year: {year}"
+    )
 
 
 def meeting_date_convert(raw_date: str) -> dict[str]:
@@ -195,12 +197,9 @@ def convert_term_alias(term_alias: str) -> str:
     terms_without_digits = ("summer", "winter")
     aliases = {
         "sem": "Semester",
-        "elc": "ELC Term",
         "tri": "Trimester",
         "term": "Term",
         "ol": "Online Teaching Period",
-        "melb": "Melb Teaching Period",
-        "pce": "PCE Term",
         "summer": "Summer School",
         "winter": "Winter School",
     }
@@ -345,10 +344,10 @@ def get_course(course_cid: str, db: Session = Depends(get_db)):
     """
     course = db.query(Course).filter(Course.id == course_cid).first()
 
-    course_id = course.course_id
-
     if not course:
         raise HTTPException(status_code=404, detail="Course not found")
+
+    course_id = course.course_id
 
     course_details = (
         db.query(CourseDetail).filter(CourseDetail.course_id == course_id).first()
