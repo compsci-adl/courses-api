@@ -5,6 +5,9 @@ on:
     - cron: '30 14 * * *'
   workflow_dispatch:
 
+env:
+  AWS_REGION: ap-southeast-2
+
 jobs:
   run-scraper:
     name: Run Scraper
@@ -14,9 +17,21 @@ jobs:
     env:
       DEFAULT_LOGGING_LEVEL: ${{ secrets.DEFAULT_LOGGING_LEVEL }}
       YEAR: ${{ secrets.YEAR }}
+    
+    permissions:
+      id-token: write
+      contents: read
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          role-session-name: ${{ secrets.AWS_ROLE_SESSION_NAME }}
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -29,23 +44,30 @@ jobs:
       - name: Build Docker image
         run: docker build -f scraper.Dockerfile -t courses-api-scraper:latest .
 
-      - name: Install Turso CLI
-        run: |
-          curl -sSfL https://get.tur.so/install.sh | bash
-          echo "$HOME/.turso/bin" >> $GITHUB_PATH
-
-      - name: Login to Turso CLI
-        env:
-          TURSO_API_TOKEN: ${{ secrets.TURSO_API_TOKEN }}
-        run: turso auth login --api-token "$TURSO_API_TOKEN"
-
       - name: Run scraper
         run: |
           docker run --rm \
-          -v ${{ github.workspace }}/src:/app/src \
-          -e DEFAULT_LOGGING_LEVEL=${{ env.DEFAULT_LOGGING_LEVEL }} \
-          -e YEAR=${{ env.YEAR }} \
-          courses-api-scraper:latest
+            -v ${{ github.workspace }}/src:/app/src \
+            -e DEFAULT_LOGGING_LEVEL=${{ env.DEFAULT_LOGGING_LEVEL }} \
+            -e YEAR=${{ env.YEAR }} \
+            courses-api-scraper:latest
 
-      - name: Import SQLite DB to Turso
-        run: turso db import --db courses-api src/dev.sqlite3
+      - name: Rename SQLite DB to local.sqlite3
+        run: mv src/dev.sqlite3 src/local.sqlite3
+
+      - name: Upload DB to S3
+        run: |
+          aws s3 cp src/local.sqlite3 s3://${{ secrets.AWS_S3_BUCKET }}/courses-api/
+
+      - name: Download DB and restart courses-api container on EC2
+        env:
+          KEY: ${{ secrets.SSH_EC2_KEY }}
+          HOSTNAME: ${{ secrets.SSH_EC2_HOSTNAME }}
+          USER: ${{ secrets.SSH_EC2_USER }}
+        run: |
+          echo "$KEY" > private_key && chmod 600 private_key
+          ssh -v -o StrictHostKeyChecking=no -i private_key ${USER}@${HOSTNAME} '
+            cd ~/courses-api
+            aws s3 cp s3://${{ secrets.AWS_S3_BUCKET }}/courses-api/local.sqlite3 .
+            docker restart courses-api
+          '
