@@ -6,7 +6,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  run-scraper-docker:
+  run-scraper:
+    name: Run Scraper
     runs-on: ubuntu-24.04-arm
     environment: Scraper
 
@@ -19,6 +20,11 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+
+      - name: Create .env file
+        run: |
+          echo "DEFAULT_LOGGING_LEVEL=${{ env.DEFAULT_LOGGING_LEVEL }}" > src/.env
+          echo "YEAR=${{ env.YEAR }}" >> src/.env
 
       - name: Build Docker image
         run: docker build -f scraper.Dockerfile -t courses-api-scraper:latest .
