@@ -9,6 +9,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 import data_parser
+import fetch_proxies
 from models import Base, Course, CourseClass, CourseDetail, Meetings, Subject
 
 
@@ -217,6 +218,9 @@ def process_subject(subject, year, engine, progress, all_task, lock):
 
 def main():
     """Scrape data from the API and store it in a local database"""
+
+    # Run proxy fetching and testing
+    fetch_proxies.main()
 
     # If db already exists, delete it
     if os.path.exists("src/dev.sqlite3"):
