@@ -23,8 +23,10 @@ jobs:
       - name: Build Docker image
         run: docker build -f scraper.Dockerfile -t courses-api-scraper:latest .
 
-      - name: Run scraper container (generate dev.sqlite3)
-        run: docker run --rm -v ${{ github.workspace }}/src:/app/src \
+      - name: Run scraper
+        run: |
+          docker run --rm \
+          -v ${{ github.workspace }}/src:/app/src \
           -e DEFAULT_LOGGING_LEVEL=${{ env.DEFAULT_LOGGING_LEVEL }} \
           -e YEAR=${{ env.YEAR }} \
           courses-api-scraper:latest
