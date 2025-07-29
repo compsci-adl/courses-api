@@ -29,6 +29,16 @@ jobs:
       - name: Build Docker image
         run: docker build -f scraper.Dockerfile -t courses-api-scraper:latest .
 
+      - name: Install Turso CLI
+        run: |
+          curl -sSfL https://get.tur.so/install.sh | bash
+          echo "$HOME/.turso/bin" >> $GITHUB_PATH
+
+      - name: Login to Turso CLI
+        env:
+          TURSO_API_TOKEN: ${{ secrets.TURSO_API_TOKEN }}
+        run: turso login --api-token $TURSO_API_TOKEN
+
       - name: Run scraper
         run: |
           docker run --rm \
@@ -36,16 +46,6 @@ jobs:
           -e DEFAULT_LOGGING_LEVEL=${{ env.DEFAULT_LOGGING_LEVEL }} \
           -e YEAR=${{ env.YEAR }} \
           courses-api-scraper:latest
-
-      - name: Install Turso CLI
-        run: |
-          curl -L https://get.turso.io | sh
-          echo "$HOME/.turso/bin" >> $GITHUB_PATH
-
-      - name: Login to Turso CLI
-        env:
-          TURSO_API_TOKEN: ${{ secrets.TURSO_API_TOKEN }}
-        run: turso login --api-token $TURSO_API_TOKEN
 
       - name: Import SQLite DB to Turso
         run: turso db import --db courses-api src/dev.sqlite3
