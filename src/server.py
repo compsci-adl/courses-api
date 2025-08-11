@@ -75,7 +75,10 @@ def get_db():
 
 def current_year() -> int:
     """Gets the current year."""
-    return dotenv_values().get("YEAR")
+    year_str = dotenv_values().get("YEAR")
+    if year_str is None:
+        return datetime.now().year
+    return int(year_str)
 
 
 def current_sem() -> str:
@@ -104,7 +107,7 @@ def get_term_number(db, year: int, term: str) -> int:
     )
 
 
-def meeting_date_convert(raw_date: str) -> dict[str]:
+def meeting_date_convert(raw_date: str) -> dict[str, str]:
     """Converts the date format given in the meetings to "MM-DD"
     Args:
         raw_date (str): The given meeting date in the format of "DD {3-char weekday}
@@ -400,6 +403,7 @@ def get_course(course_cid: str, db: Session = Depends(get_db)):
             class_list_entry = class_groups[class_type]
             class_entry = {
                 "number": str(class_group.class_nbr),
+                "available_seats": str(class_group.available),
                 "meetings": [],
             }
             for meeting in class_group.meetings:
