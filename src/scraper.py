@@ -234,7 +234,10 @@ def main():
     Base.metadata.create_all(engine)
     Session.configure(bind=engine)
 
-    year = dotenv_values().get("YEAR")
+    year_str = dotenv_values().get("YEAR")
+    if year_str is None:
+        raise ValueError("YEAR environment variable is not set")
+    year = int(year_str)
 
     # Create lock for thread-safe operations
     lock = Lock()
