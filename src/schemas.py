@@ -32,6 +32,7 @@ class MeetingSchema(BaseModel):
 
 class ClassSchema(BaseModel):
     number: str
+    section: str #Return class section
     available_seats: str
     meetings: List[MeetingSchema]
 
