@@ -45,6 +45,9 @@ else:
     DATABASE_URL = "sqlite:///src/local.sqlite3"
     engine = create_engine(DATABASE_URL)
 
+print("DB_TYPE:", DB_TYPE)
+print("DATABASE_URL:", DATABASE_URL)
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base.metadata.create_all(bind=engine)
 
@@ -403,6 +406,7 @@ def get_course(course_cid: str, db: Session = Depends(get_db)):
             class_list_entry = class_groups[class_type]
             class_entry = {
                 "number": str(class_group.class_nbr),
+                "section": class_group.section, #Returns class section
                 "available_seats": str(class_group.available),
                 "meetings": [],
             }
