@@ -406,7 +406,7 @@ def get_course(course_cid: str, db: Session = Depends(get_db)):
             class_list_entry = class_groups[class_type]
             class_entry = {
                 "number": str(class_group.class_nbr),
-                "section": class_group.section, #Returns class section
+                "section": class_group.section,  # Returns class section
                 "available_seats": str(class_group.available),
                 "meetings": [],
             }
