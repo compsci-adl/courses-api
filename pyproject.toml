@@ -15,6 +15,7 @@ dependencies = [
     "pydantic>=2.9.2",
     "requests>=2.32.3",
     "rich>=13.9.4",
+    "ruff>=0.7.3",
     "sqlalchemy-libsql>=0.1.0",
     "sqlalchemy>=2.0.36",
 ]
