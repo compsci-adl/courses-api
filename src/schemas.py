@@ -1,6 +1,6 @@
-from typing import Any, List, Literal
+from typing import List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, root_validator
 
 
 class NameSchema(BaseModel):
@@ -24,7 +24,15 @@ class TimeRageSchema(BaseModel):
 
 
 class MeetingSchema(BaseModel):
-    day: Literal["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+    day: Literal[
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+        "Sunday",
+    ]
     location: str
     date: DateRageSchema
     time: TimeRageSchema
@@ -39,19 +47,34 @@ class ClassSchema(BaseModel):
 
 class ClassTypeSchema(BaseModel):
     id: str
-    category: Literal["enrolment", "related", "unknown"]
-    type: str
+    category: Optional[Literal["enrolment", "related", "unknown"]] = "unknown"
+    type: Optional[str] = None
+    component: Optional[str] = None
     classes: List[ClassSchema]
+
+    @root_validator(pre=True)
+    def ensure_component_or_type(cls, values):
+        if not values.get("component") and values.get("type"):
+            values["component"] = values.get("type")
+        if not values.get("type") and values.get("component"):
+            values["type"] = values.get("component")
+        return values
+
+
+class RequirementsSchema(BaseModel):
+    prerequisites: Optional[List[str]] = None
+    corequisites: Optional[List[str]] = None
+    antirequisites: Optional[List[str]] = None
 
 
 class CourseSchema(BaseModel):
     id: str
-    course_id: str
+    course_id: int
     name: NameSchema
-    class_number: int
-    year: int
+    class_number: Optional[int] = None
+    year: str
     term: str
     campus: str
     units: int
-    requirements: Any
+    requirements: RequirementsSchema
     class_list: List[ClassTypeSchema]
