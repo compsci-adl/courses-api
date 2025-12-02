@@ -79,6 +79,7 @@ def process_course(course, year, subject, engine, progress, subject_task, lock):
         try:
             db_course = Course(
                 id=course_cid,
+                course_id=course_details.get("course_id", 0),
                 year=year,
                 terms=join_str_if_iterable(terms),
                 subject=name,

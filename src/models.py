@@ -20,6 +20,7 @@ class Subject(Base):
 class Course(Base):
     __tablename__ = "courses"
     id = Column(String, primary_key=True)
+    course_id = Column(Integer, unique=True, nullable=False)
     year = Column(String, nullable=False)
     terms = Column(String, nullable=False)
     subject = Column(String, ForeignKey("subjects.name"), nullable=False)
