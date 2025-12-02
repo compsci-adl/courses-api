@@ -207,7 +207,9 @@ def parse_course_class_list(text: str) -> list[dict]:
 
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     parsed_classes = []
-    current_class = {}
+    current_class = None
+    # Current component context for classes within a "Class details" block.
+    current_component = "unknown"
     i = 0
 
     def _is_date_line(s: str) -> bool:
@@ -223,57 +225,59 @@ def parse_course_class_list(text: str) -> list[dict]:
                 i += 1
             continue
 
-        # Start parsing class details: initialise a new current_class dict and accept optional campus/enrolment header
+        # Start parsing class details: reset the context for a new set of classes and components
         if line.startswith("Class details"):
-            if current_class:
+            # Commit any prior orphaned class (if it has a class number)
+            if current_class and current_class.get("class_number"):
                 parsed_classes.append(current_class)
-            current_class = {"meetings": []}
-            i += 1
-            # Optional campus header (e.g., 'Adelaide City Campus West') and component (Enrolment/Related)
-            # Sometimes the campus appears before the component and sometimes after; handle both orders.
-            if i < len(lines):
-                # If next line is the component, capture it first
-                if lines[i].lower().startswith("enrolment class") or lines[
-                    i
-                ].lower().startswith("related class"):
-                    parts = lines[i].split(":", 1)
-                    current_class["component"] = (
-                        parts[1].strip() if len(parts) > 1 else parts[0].strip()
-                    )
-                    i += 1
-                    # If campus follows, capture it
-                    if i < len(lines) and "Campus" in lines[i]:
-                        current_class["campus"] = lines[i]
-                        i += 1
-                else:
-                    # If next line is campus, capture it first
-                    if "Campus" in lines[i]:
-                        current_class["campus"] = lines[i]
-                        i += 1
-                        # Try to capture a component immediately after campus
-                        if i < len(lines) and (
-                            lines[i].lower().startswith("enrolment class")
-                            or lines[i].lower().startswith("related class")
-                        ):
-                            parts = lines[i].split(":", 1)
-                            current_class["component"] = (
-                                parts[1].strip() if len(parts) > 1 else parts[0].strip()
-                            )
-                            i += 1
+            current_class = None
+            # Reset the current component and attempt a lookahead for the first component
+            current_component = "unknown"
+            lookahead = 1
+            max_look = 24
+            while i + lookahead < len(lines) and lookahead <= max_look:
+                candidate = lines[i + lookahead].strip()
+                if candidate.lower().startswith(
+                    "enrolment class"
+                ) or candidate.lower().startswith("related class"):
+                    parts = candidate.split(":", 1)
+                    if len(parts) > 1 and parts[1].strip():
+                        current_component = parts[0].strip() + ": " + parts[1].strip()
                     else:
-                        # Neither campus nor component on the next line; try to look ahead one line for component
-                        if i + 1 < len(lines) and (
-                            lines[i + 1].lower().startswith("enrolment class")
-                            or lines[i + 1].lower().startswith("related class")
-                        ):
-                            parts = lines[i + 1].split(":", 1)
-                            current_class["component"] = (
-                                parts[1].strip() if len(parts) > 1 else parts[0].strip()
-                            )
-                            i += 2
+                        # If value is next line and not a class number, use it
+                        next_val = (
+                            lines[i + lookahead + 1].strip()
+                            if i + lookahead + 1 < len(lines)
+                            else ""
+                        )
+                        if next_val and not next_val.lower().startswith("class number"):
+                            current_component = parts[0].strip() + ": " + next_val
+                    break
+                # If the block restarts, stop searching
+                if candidate.startswith("Class details"):
+                    break
+                lookahead += 1
+            i += 1
             continue
 
         # Parse other class attributes
+        # Detect inline component labels anywhere in the Class details block
+        if line.lower().startswith("enrolment class") or line.lower().startswith(
+            "related class"
+        ):
+            parts = line.split(":", 1)
+            if len(parts) > 1 and parts[1].strip():
+                current_component = parts[0].strip() + ": " + parts[1].strip()
+            else:
+                next_val = lines[i + 1].strip() if i + 1 < len(lines) else ""
+                if next_val and not next_val.lower().startswith("class number"):
+                    current_component = parts[0].strip() + ": " + next_val
+                    i += 1
+            if current_class and not current_class.get("class_number"):
+                current_class["component"] = current_component
+            i += 1
+            continue
+
         if line.startswith("Class number"):
             # If we already have a class with a class_number, start a new class and append the old one
             if current_class and current_class.get("class_number"):
@@ -282,22 +286,35 @@ def parse_course_class_list(text: str) -> list[dict]:
                 current_class = {
                     "meetings": [],
                     "campus": current_class.get("campus"),
-                    "component": current_class.get("component"),
+                    "component": current_component or current_class.get("component"),
                 }
             elif not current_class:
                 current_class = {"meetings": []}
             current_class["class_number"] = line.split("Class number")[-1].strip()
+            # Ensure the class has a component set (inherit from block context)
+            if "component" not in current_class or not current_class.get("component"):
+                current_class["component"] = current_component or "unknown"
             i += 1
             continue
+
         if line.startswith("Section"):
+            if not current_class:
+                current_class = {"meetings": []}
+                current_class["component"] = current_component or "unknown"
             current_class["section"] = line.split("Section")[-1].strip()
             i += 1
             continue
         if line.startswith("Size"):
+            if not current_class:
+                current_class = {"meetings": []}
+                current_class["component"] = current_component or "unknown"
             current_class["size"] = line.split("Size")[-1].strip()
             i += 1
             continue
         if line.startswith("Available"):
+            if not current_class:
+                current_class = {"meetings": []}
+                current_class["component"] = current_component or "unknown"
             if line.split("Available")[-1].strip().isdigit():
                 current_class["available"] = line.split("Available")[-1].strip()
             i += 1
@@ -335,6 +352,9 @@ def parse_course_class_list(text: str) -> list[dict]:
                     "campus": campus_val,
                     "location": location_val,
                 }
+                if not current_class:
+                    current_class = {"meetings": []}
+                    current_class["component"] = current_component or "unknown"
                 current_class.setdefault("meetings", []).append(meeting)
                 i = next_i
             continue
