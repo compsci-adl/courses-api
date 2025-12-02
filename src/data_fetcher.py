@@ -78,6 +78,7 @@ class DataFetcher:
             try:
                 logger.debug(f"Using proxy: {proxy}")
                 response = requests.get(self.url, proxies=proxy, timeout=5)
+                time.sleep(5)  # Sleep to avoid rate-limiting
                 self.last_response = response
 
                 if response.status_code == 429:
