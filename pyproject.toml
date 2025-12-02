@@ -1,7 +1,7 @@
 [project]
 name = "courses-api"
 version = "2.0.0"
-description = "API for getting University of Adelaide course information"
+description = "API for getting Adelaide University course information"
 authors = [
     { name = "CS Club Open Source Team", email = "dev@csclub.org.au" }
 ]
