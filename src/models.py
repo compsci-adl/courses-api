@@ -58,6 +58,6 @@ class CourseClass(Base):
     section = Column(String, nullable=False)
     size = Column(Integer, nullable=False)
     available = Column(Integer, nullable=False)
-    component = Column(String, nullable=True)
+    component = Column(String, nullable=False)
     meetings = relationship("Meetings", backref="course_class")
     course_id = Column(String, ForeignKey("courses.id"), nullable=False)

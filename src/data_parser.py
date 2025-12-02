@@ -229,16 +229,48 @@ def parse_course_class_list(text: str) -> list[dict]:
                 parsed_classes.append(current_class)
             current_class = {"meetings": []}
             i += 1
-            # Optional campus header (e.g., 'Adelaide City Campus West') next
-            if i < len(lines) and "Campus" in lines[i]:
-                current_class["campus"] = lines[i]
-                i += 1
-            # Optional Enrolment class line (e.g., 'Enrolment class: Seminar')
-            if i < len(lines) and lines[i].lower().startswith("enrolment class"):
-                parts = lines[i].split(":", 1)
-                if len(parts) > 1:
-                    current_class["component"] = parts[1].strip()
-                i += 1
+            # Optional campus header (e.g., 'Adelaide City Campus West') and component (Enrolment/Related)
+            # Sometimes the campus appears before the component and sometimes after; handle both orders.
+            if i < len(lines):
+                # If next line is the component, capture it first
+                if lines[i].lower().startswith("enrolment class") or lines[
+                    i
+                ].lower().startswith("related class"):
+                    parts = lines[i].split(":", 1)
+                    current_class["component"] = (
+                        parts[1].strip() if len(parts) > 1 else parts[0].strip()
+                    )
+                    i += 1
+                    # If campus follows, capture it
+                    if i < len(lines) and "Campus" in lines[i]:
+                        current_class["campus"] = lines[i]
+                        i += 1
+                else:
+                    # If next line is campus, capture it first
+                    if "Campus" in lines[i]:
+                        current_class["campus"] = lines[i]
+                        i += 1
+                        # Try to capture a component immediately after campus
+                        if i < len(lines) and (
+                            lines[i].lower().startswith("enrolment class")
+                            or lines[i].lower().startswith("related class")
+                        ):
+                            parts = lines[i].split(":", 1)
+                            current_class["component"] = (
+                                parts[1].strip() if len(parts) > 1 else parts[0].strip()
+                            )
+                            i += 1
+                    else:
+                        # Neither campus nor component on the next line; try to look ahead one line for component
+                        if i + 1 < len(lines) and (
+                            lines[i + 1].lower().startswith("enrolment class")
+                            or lines[i + 1].lower().startswith("related class")
+                        ):
+                            parts = lines[i + 1].split(":", 1)
+                            current_class["component"] = (
+                                parts[1].strip() if len(parts) > 1 else parts[0].strip()
+                            )
+                            i += 2
             continue
 
         # Parse other class attributes
