@@ -123,7 +123,7 @@ def process_course(course, year, subject, engine, progress, subject_task, lock):
                         size=int(individual_class.get("size", 0)),
                         available=int(individual_class.get("available", 0)),
                         component=class_type,
-                        course_code=course_code[0],
+                        course_id=course_cid,
                     )
                     write_queue.put(db_course_class)
                 except Exception as e:

@@ -60,4 +60,4 @@ class CourseClass(Base):
     available = Column(Integer, nullable=False)
     component = Column(String, nullable=True)
     meetings = relationship("Meetings", backref="course_class")
-    course_code = Column(String, ForeignKey("courses.course_code"), nullable=False)
+    course_id = Column(String, ForeignKey("courses.id"), nullable=False)
