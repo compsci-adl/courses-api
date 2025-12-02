@@ -23,7 +23,7 @@ def fetch_proxies(url):
 
 def test_proxy(
     proxy,
-    test_url="https://courseplanner-api.adelaide.edu.au/api/course-planner-query/v1/?target=/system/SUBJECTS_BY_YEAR/queryx&virtual=Y&year_from=2025&year_to=2025",
+    test_url="https://uosa-search.funnelback.squiz.cloud/s/search.html?collection=uosa~sp-aem-prod&form=json&num_ranks=1",
     timeout=5,
     retries=2,  # Number of retries
 ):
