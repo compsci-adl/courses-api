@@ -14,8 +14,17 @@ def get_subjects(year: int) -> dict[str, list[dict[str, str]]]:
 
     try:
         data = subjects.get()
-        if subjects.last_response.status_code != 200 or data is None:
-            print(f"Error: {subjects.last_response.status_code} - {data}")
+        if (
+            subjects.last_response is None
+            or subjects.last_response.status_code != 200
+            or data is None
+        ):
+            status = (
+                subjects.last_response.status_code
+                if subjects.last_response
+                else "NO_RESPONSE"
+            )
+            print(f"Error: {status} - {data}")
             return {"subjects": []}
 
         subject_list = []
@@ -41,8 +50,17 @@ def get_course_codes(subject: str, year: int):
     try:
         data = courses.get()
         logger.debug(f"Course data: {data}")
-        if courses.last_response.status_code != 200 or data is None:
-            print(f"Error: {courses.last_response.status_code} - {data}")
+        if (
+            courses.last_response is None
+            or courses.last_response.status_code != 200
+            or data is None
+        ):
+            status = (
+                courses.last_response.status_code
+                if courses.last_response
+                else "NO_RESPONSE"
+            )
+            print(f"Error: {status} - {data}")
             return {"courses": []}
         results = data.get("resultPacket", []).get("results", [])
         logger.debug(f"Number of courses found: {len(results)}")
@@ -83,6 +101,16 @@ def get_course_details(course_code: str, max_retries=3):
         )
         try:
             data = course_details.get()
+            if course_details.last_response is None:
+                logger.error(
+                    f"No HTTP response available for {course_code}. Data: {data}"
+                )
+                # Make sure to return a dictionary with expected keys so caller won't crash
+                return {
+                    "code": code_str,
+                    "title": data.get("h1", "") if isinstance(data, dict) else "",
+                    "course_id": None,
+                }
             if course_details.last_response.status_code != 200:
                 print(
                     f"Error: {course_details.last_response.status_code} - "
@@ -182,12 +210,27 @@ def get_course_class_list(course_code: int):
 
     try:
         data = course_details.get()
-        if course_details.last_response.status_code != 200:
-            print(
-                f"Error: {course_details.last_response.status_code} - "
-                f"{course_details.last_response.text}"
+        if (
+            course_details.last_response is None
+            or course_details.last_response.status_code != 200
+        ):
+            status = (
+                course_details.last_response.status_code
+                if course_details.last_response
+                else "NO_RESPONSE"
             )
-            return {}
+            text = (
+                course_details.last_response.text
+                if course_details.last_response
+                else ""
+            )
+            print(f"Error: {status} - {text}")
+            # Return a minimal dict so callers don't KeyError when accessing title/course_id
+            return {
+                "code": code_str,
+                "title": data.get("h1", "") if isinstance(data, dict) else "",
+                "course_id": None,
+            }
         # Return plain text string without extra newlines
         text = data.get("data", "")
 

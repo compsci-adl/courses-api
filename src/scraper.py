@@ -57,12 +57,16 @@ def process_course(course, year, subject, engine, progress, subject_task, lock):
     """Process a single course and insert data into the database."""
     try:
         logger.debug(f"Processing course {course['code']}...")
-        course_code = course["code"]
+        course_code = course.get("code")
+        if not course_code:
+            print(f"Skipping course with missing code: {course}")
+            progress.update(subject_task, advance=1)
+            return
         course_details = data_parser.get_course_details(course_code)
 
         name = subject["subject"]
-        title = course_details["title"]
-        terms = course["terms"]
+        title = course_details.get("title", "")
+        terms = course.get("terms")
         campus = course_details["campus"]
 
         # Course Custom ID
@@ -83,7 +87,9 @@ def process_course(course, year, subject, engine, progress, subject_task, lock):
                 year=year,
                 terms=join_str_if_iterable(terms),
                 subject=name,
-                course_code=course_code[0],
+                course_code=course_code[0]
+                if isinstance(course_code, (list, tuple))
+                else course_code,
                 title=title,
                 campus=join_str_if_iterable(campus),
                 level_of_study=course_details.get("level_of_study", "N/A"),
@@ -186,12 +192,13 @@ def process_subject(subject, year, engine, progress, all_task, lock):
         # Encode & in subject name
         encoded_name = name.replace("&", "%26")
         courses = data_parser.get_course_codes(encoded_name, year)
-        progress.update(subject_task, total=len(courses["courses"]))
+        course_list = courses.get("courses", []) if isinstance(courses, dict) else []
+        progress.update(subject_task, total=len(course_list))
 
         # Process each course concurrently
         with ThreadPoolExecutor(max_workers=50) as executor:
             futures = []
-            for course in courses["courses"]:
+            for course in course_list:
                 future = executor.submit(
                     process_course,
                     course,

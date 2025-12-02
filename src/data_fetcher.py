@@ -72,30 +72,46 @@ class DataFetcher:
 
         max_retries = 50  # Maximum number of retries
         retries = 0
+        # Clear previous last_response to avoid stale values in callers
+        self.last_response = None
 
+        # Exponential backoff base, increase gently, capped to avoid huge sleeps.
+        backoff_base = 1.5
         while retries < max_retries:
             proxy = self.get_random_proxy()
             try:
                 logger.debug(f"Using proxy: {proxy}")
-                response = requests.get(self.url, proxies=proxy, timeout=5)
-                time.sleep(5)  # Sleep to avoid rate-limiting
+                response = requests.get(self.url, proxies=proxy, timeout=10)
                 self.last_response = response
 
                 if response.status_code == 429:
+                    # Handle rate limiting properly, use Retry-After if available
+                    logger.warning("HTTP 429 - Too Many Requests.")
+                    retry_after = response.headers.get("Retry-After")
+                    if retry_after:
+                        try:
+                            wait_seconds = int(retry_after)
+                        except ValueError:
+                            # Retry-After may be a HTTP-date; fall back to default
+                            wait_seconds = min(60, int(backoff_base**retries))
+                    else:
+                        wait_seconds = min(60, int(backoff_base**retries))
+
                     logger.warning(
-                        "HTTP 429 - Too Many Requests. Trying another proxy..."
+                        f"Sleeping for {wait_seconds} seconds due to 429 response"
                     )
-                    proxy = self.get_random_proxy()  # Try another proxy
-                    if retries % 3 == 0:  # Wait after every 3 attempts
-                        logger.warning(
-                            "Waiting for 60 seconds due to repeated 429 errors..."
-                        )
-                        time.sleep(60)
+                    time.sleep(wait_seconds)
+                    # Try another proxy for the next attempt
+                    proxy = self.get_random_proxy()
                     retries += 1
                     continue
 
                 if response.status_code != 200:
                     logger.error(f"HTTP {response.status_code} - {response.text}")
+                    # Small backoff for other HTTP errors
+                    wait_seconds = min(10, int(backoff_base**retries))
+                    logger.debug(f"Waiting for {wait_seconds}s before retrying")
+                    time.sleep(wait_seconds)
                     retries += 1
                     continue
 
@@ -129,12 +145,16 @@ class DataFetcher:
             except requests.exceptions.ProxyError:
                 logger.error(f"Proxy error with proxy: {proxy}")
                 retries += 1
+                # Reduce retry flurry by sleeping a moment
+                time.sleep(min(3, backoff_base**retries))
             except requests.exceptions.RequestException as e:
                 logger.error(f"Request failed: {e}")
                 retries += 1
+                time.sleep(min(3, backoff_base**retries))
             except Exception as e:
                 logger.error(f"Unexpected error: {e}")
                 retries += 1
+                time.sleep(min(3, backoff_base**retries))
 
         logger.error(
             f"Failed to fetch data from {self.url} after {max_retries} retries."
