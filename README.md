@@ -1,5 +1,5 @@
 # Courses API
-Courses API is a tool to scrape course information from the University of Adelaide website and provide course data to other CS Club Open Source Team projects via an API endpoint.
+Courses API is a tool to scrape course information from the Adelaide University website and provide course data to other CS Club Open Source Team projects via an API endpoint.
 
 ## Getting Started
 

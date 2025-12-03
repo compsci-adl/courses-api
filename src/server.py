@@ -10,7 +10,7 @@ from pydantic import ValidationError
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from .models import Base, Course, CourseClass, CourseDetail, Subject
+from .models import Base, Course, CourseClass, Subject
 from .schemas import CourseSchema
 
 # Check if the application is running in development mode
@@ -89,7 +89,7 @@ def current_sem() -> str:
     return "Semester 1" if datetime.now().month <= 6 else "Semester 2"
 
 
-def get_term_number(db, year: int, term: str) -> int:
+def get_term_number(db, year: int, term: str) -> str:
     """Gets the term number from the local database."""
 
     # Convert aliases
@@ -102,8 +102,8 @@ def get_term_number(db, year: int, term: str) -> int:
         )
 
     for course in courses:
-        if course.term_descr == term:
-            return course.term
+        if term in (course.terms or ""):
+            return term
 
     raise HTTPException(
         status_code=404, detail=f"Invalid term: {term} for year: {year}"
@@ -203,11 +203,11 @@ def convert_term_alias(term_alias: str) -> str:
     terms_without_digits = ("summer", "winter")
     aliases = {
         "sem": "Semester",
-        "tri": "Trimester",
+        "summer": "summer",
+        "winter": "Winter",
+        "online": "Online Term",
         "term": "Term",
-        "ol": "Online Teaching Period",
-        "summer": "Summer School",
-        "winter": "Winter School",
+        "uao": "UAO Teaching Period",
     }
 
     # Convert the alias, append its digit to the end if the term needs a digit at the end
@@ -224,7 +224,7 @@ def convert_term_alias(term_alias: str) -> str:
     return converted_alias
 
 
-@app.get("/subjects", response_model=Union[Dict, List])
+@app.get("/subjects", response_model=List[str])
 def get_subjects(
     year: int = current_year(), term: str = current_sem(), db: Session = Depends(get_db)
 ):
@@ -240,7 +240,9 @@ def get_subjects(
     term_number = get_term_number(db, year, term)
 
     results = (
-        db.query(Course).filter(Course.year == year, Course.term == term_number).all()
+        db.query(Course)
+        .filter(Course.year == year, Course.terms.contains(term_number))
+        .all()
     )
 
     if not results:
@@ -250,29 +252,23 @@ def get_subjects(
 
     # Extract unique subject codes from the results
     subjects = db.query(Subject).all()
-    unique_codes = set()
+    unique_names = set()
 
-    transformed_subjects = {"subjects": []}
+    subjects: list[str] = []
 
     # Collect unique subject codes from course results
     for entry in results:
-        code = entry.subject
-        if code:  # Skip empty codes
-            unique_codes.add(code)
+        name = entry.subject
+        if name:  # Skip empty names
+            unique_names.add(name)
 
-    # Add subject descriptions for each unique code
-    for code in unique_codes:
-        for subject in subjects:
-            if subject.subject_code == code:
-                transformed_subjects["subjects"].append(
-                    {"code": code, "name": subject.description}
-                )
-                break
+    # Add subject name for each unique name
+    for name in unique_names:
+        subjects.append(name)
 
-    # Sort the subjects alphabetically by the code
-    transformed_subjects["subjects"].sort(key=lambda x: x["code"])
-
-    return transformed_subjects
+    # Sort the subjects alphabetically
+    subjects.sort()
+    return subjects
 
 
 @app.get("/courses", response_model=Union[Dict, List])
@@ -299,8 +295,9 @@ def get_subject_courses(
         .filter(
             Course.subject == subject,
             Course.year == year,
-            Course.term == term_number,
+            Course.terms.contains(term_number),
         )
+        .order_by(Course.course_code)
         .all()
     )
 
@@ -318,12 +315,16 @@ def get_subject_courses(
                 "id": entry.id,
                 "name": {
                     "subject": entry.subject,
-                    "code": entry.catalog_nbr,
-                    "title": entry.course_title,
+                    "code": entry.course_code,
+                    "title": entry.title,
                 },
             }
         )
 
+    # Sort courses by course code alphabetically
+    transformed_courses["courses"].sort(
+        key=lambda x: x["name"]["code"].lower() if x["name"]["code"] else ""
+    )
     return transformed_courses
 
 
@@ -355,23 +356,19 @@ def get_course(course_cid: str, db: Session = Depends(get_db)):
 
     course_id = course.course_id
 
-    course_details = (
-        db.query(CourseDetail).filter(CourseDetail.course_id == course_id).first()
-    )
+    course_details = db.query(Course).filter(Course.course_id == course_id).first()
 
     # Extract necessary information from details
     if course_details:
         name = {
             "subject": course.subject,
-            "code": course.catalog_nbr,
-            "title": course.course_title,
+            "code": course.course_code,
+            "title": course.title,
         }
         requirements = {
-            "restriction": parse_requisites(course_details.restriction_txt),
-            "prerequisite": parse_requisites(course_details.pre_requisite),
-            "corequisite": parse_requisites(course_details.co_requisite),
-            "assumed_knowledge": parse_requisites(course_details.assumed_knowledge),
-            "incompatible": parse_requisites(course_details.incompatible),
+            "prerequisites": parse_requisites(course_details.prerequisites),
+            "corequisites": parse_requisites(course_details.corequisites),
+            "antirequisites": parse_requisites(course_details.antirequisites),
         }
     else:
         name = {"subject": "", "code": "", "title": ""}
@@ -382,9 +379,8 @@ def get_course(course_cid: str, db: Session = Depends(get_db)):
         "id": course_cid,
         "course_id": course.course_id,
         "name": name,
-        "class_number": course.class_nbr,
         "year": course.year,
-        "term": course.term_descr,
+        "term": course.terms,
         "campus": course.campus,
         "units": course.units,
         "requirements": requirements,
@@ -431,6 +427,7 @@ def get_course(course_cid: str, db: Session = Depends(get_db)):
                     meeting_entry = {
                         "day": day,
                         "location": meeting.location,
+                        "campus": meeting.campus,
                         "date": meeting_date_convert(meeting.dates),
                         "time": {
                             "start": meeting_time_convert(meeting.start_time),
