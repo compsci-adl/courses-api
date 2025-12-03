@@ -11,7 +11,7 @@ env:
 jobs:
   run-scraper:
     name: Run Scraper
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-latest
     environment: Scraper
 
     env:
