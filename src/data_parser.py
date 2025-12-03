@@ -44,7 +44,7 @@ def get_subjects(year: int) -> dict[str, list[dict[str, str]]]:
 def get_course_codes(subject: str, year: int):
     """Return a list of course codes for a given subject code and year."""
     courses = data_fetcher.DataFetcher(
-        f"?f.Tabs%7Ctype=Degrees+%26+Courses&form=json&f.Year%7Cyear={year}&num_ranks=100&profile=site-search&query=&f.Area+of+study%7CstudyArea={subject}&collection=uosa%7Esp-aem-prod&f.Study+type%7CstudyType=Course"
+        f"?f.Tabs%7Ctype=Degrees+%26+Courses&form=json&f.Year%7Cyear={year}&num_ranks=1000&profile=site-search&query=&f.Area+of+study%7CstudyArea={subject}&collection=uosa%7Esp-aem-prod&f.Study+type%7CstudyType=Course"
     )
 
     try:
