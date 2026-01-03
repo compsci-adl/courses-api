@@ -1,2 +1,14 @@
-.git
-.github
+# Ignore everything by default
+*
+
+# Keep Dockerfile and build lockfiles
+!/.dockerignore
+!Dockerfile
+!pyproject.toml
+!uv.lock
+
+# Keep the source directory needed at build/runtime
+!/src
+
+# Ignore Python cache files
+**/__pycache__/
