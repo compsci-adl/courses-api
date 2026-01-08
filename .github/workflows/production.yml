@@ -77,8 +77,6 @@ jobs:
           USER: ${{ secrets.SSH_EC2_USER }}
           YEAR: ${{ secrets.YEAR }}
           DB_TYPE: ${{ secrets.DB_TYPE }}
-          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
-          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
         run: |
           echo "$KEY" > private_key && chmod 600 private_key
           ssh -v -o StrictHostKeyChecking=no -i private_key ${USER}@${HOSTNAME} '
@@ -87,8 +85,6 @@ jobs:
             aws s3 cp s3://${{ secrets.AWS_S3_BUCKET }}/courses-api/docker-compose.yml .
             echo YEAR=${{ secrets.YEAR }} > .env
             echo DB_TYPE=${{ secrets.DB_TYPE }} >> .env
-            echo TURSO_DATABASE_URL=${{ secrets.TURSO_DATABASE_URL }} >> .env
-            echo TURSO_AUTH_TOKEN=${{ secrets.TURSO_AUTH_TOKEN }} >> .env
             docker load -i courses-api.tar.gz
             docker compose up -d
           '

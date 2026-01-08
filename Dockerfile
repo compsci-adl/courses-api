@@ -17,6 +17,10 @@ ENV UV_NO_DEV=1
 # across both images.
 ENV UV_PYTHON_DOWNLOADS=0
 
+# Ensure system build tools are available
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential pkg-config libssl-dev libsqlite3-dev ca-certificates curl && rm -rf /var/lib/apt/lists/*
+
 # Install the project's dependencies using the lockfile and settings
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=uv.lock,target=uv.lock \

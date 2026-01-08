@@ -26,17 +26,7 @@ app = FastAPI(
 DB_TYPE = dotenv_values().get("DB_TYPE")
 
 
-if DB_TYPE == "libsql":
-    # Use LibSQL
-    TURSO_DATABASE_URL = dotenv_values().get("TURSO_DATABASE_URL")
-    TURSO_AUTH_TOKEN = dotenv_values().get("TURSO_AUTH_TOKEN")
-    DATABASE_URL = (
-        f"sqlite+{TURSO_DATABASE_URL}/?authToken={TURSO_AUTH_TOKEN}&secure=true"
-    )
-    engine = create_engine(
-        DATABASE_URL, connect_args={"check_same_thread": False}, echo=True
-    )
-elif DB_TYPE == "dev":
+if DB_TYPE == "dev":
     # Use dev db
     DATABASE_URL = "sqlite:///src/dev.sqlite3"
     engine = create_engine(DATABASE_URL)
