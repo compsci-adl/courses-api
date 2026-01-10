@@ -1,6 +1,7 @@
 import random
 import re
 import time
+from typing import Any
 
 import json_repair
 import requests
@@ -22,6 +23,18 @@ class DataFetcher:
     BASE_URL = "https://uosa-search.funnelback.squiz.cloud/s/search.html"
     BASE_INFO_URL = "https://adelaideuni.edu.au"
     PROXY_FILE = "src/working_proxies.txt"
+
+    @staticmethod
+    def _sanitise_for_log(value: Any) -> str:
+        """Sanitise a value for safe logging to avoid log injection.
+
+        Removes newlines and truncates long values.
+        """
+        s = str(value)
+        s = s.replace("\r", "").replace("\n", "")
+        if len(s) > 200:
+            s = s[:200] + "...(truncated)"
+        return s
 
     def __init__(self, endpoint: str, use_class_url: bool = False) -> None:
         self.endpoint = endpoint
@@ -62,7 +75,7 @@ class DataFetcher:
 
     def get(self) -> dict:
         """Fetch data from the API, handling retries and rate-limiting."""
-        logger.debug(f"Fetching {self.endpoint}...")
+        logger.debug("Fetching %s...", self._sanitise_for_log(self.endpoint))
         if self.data is not None:
             return self.data
 
@@ -80,7 +93,7 @@ class DataFetcher:
         while retries < max_retries:
             proxy = self.get_random_proxy()
             try:
-                logger.debug(f"Using proxy: {proxy}")
+                logger.debug("Using proxy: %s", self._sanitise_for_log(proxy))
                 response = requests.get(self.url, proxies=proxy, timeout=10)
                 self.last_response = response
 
@@ -143,16 +156,18 @@ class DataFetcher:
                     return self.data
 
             except requests.exceptions.ProxyError:
-                logger.error(f"Proxy error with proxy: {proxy}")
+                logger.error(
+                    "Proxy error with proxy: %s", self._sanitise_for_log(proxy)
+                )
                 retries += 1
                 # Reduce retry flurry by sleeping a moment
                 time.sleep(min(3, backoff_base**retries))
             except requests.exceptions.RequestException as e:
-                logger.error(f"Request failed: {e}")
+                logger.error("Request failed: %s", self._sanitise_for_log(e))
                 retries += 1
                 time.sleep(min(3, backoff_base**retries))
             except Exception as e:
-                logger.error(f"Unexpected error: {e}")
+                logger.error("Unexpected error: %s", self._sanitise_for_log(e))
                 retries += 1
                 time.sleep(min(3, backoff_base**retries))
 
