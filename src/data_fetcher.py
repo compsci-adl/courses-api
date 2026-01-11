@@ -90,11 +90,25 @@ class DataFetcher:
 
         # Exponential backoff base, increase gently, capped to avoid huge sleeps.
         backoff_base = 1.5
+
+        # Avoid cached responses from intermediary proxies
+        headers = {
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+        }
         while retries < max_retries:
             proxy = self.get_random_proxy()
+            # When fetching course pages, add a cache-buster
+            request_url = self.url
+            if self.use_class_url:
+                cache_buster = f"_={int(time.time() * 1000)}"
+                sep = "&" if "?" in request_url else "?"
+                request_url = f"{request_url}{sep}{cache_buster}"
             try:
                 logger.debug("Using proxy: %s", self._sanitise_for_log(proxy))
-                response = requests.get(self.url, proxies=proxy, timeout=10)
+                response = requests.get(
+                    request_url, proxies=proxy, headers=headers, timeout=10
+                )
                 self.last_response = response
 
                 if response.status_code == 429:
