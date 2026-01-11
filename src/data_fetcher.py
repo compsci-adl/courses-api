@@ -101,7 +101,7 @@ class DataFetcher:
             # When fetching course pages, add a cache-buster
             request_url = self.url
             if self.use_class_url:
-                cache_buster = f"_={int(time.time()*1000)}"
+                cache_buster = f"_={int(time.time() * 1000)}"
                 sep = "&" if "?" in request_url else "?"
                 request_url = f"{request_url}{sep}{cache_buster}"
             try:
