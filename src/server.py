@@ -374,6 +374,9 @@ def get_course(course_cid: str, db: Session = Depends(get_db)):
         "campus": course.campus,
         "units": course.units,
         "university_wide_elective": course.university_wide_elective,
+        "course_coordinator": course.course_coordinator,
+        "course_overview": course.course_overview,
+        "level_of_study": course.level_of_study,
         "requirements": requirements,
         "class_list": [],
     }
