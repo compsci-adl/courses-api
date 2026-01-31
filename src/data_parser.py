@@ -141,6 +141,13 @@ def get_course_details(course_code: str, max_retries=3):
                 "prerequisites": parsed.get("prerequisites"),
                 "corequisites": parsed.get("corequisites"),
                 "antirequisites": parsed.get("antirequisites"),
+                "university_wide_elective": (
+                    True
+                    if parsed.get("university_wide_elective") == "Yes"
+                    else False
+                    if parsed.get("university_wide_elective") == "No"
+                    else parsed.get("university_wide_elective")
+                ),
             }
 
             logger.debug("Course details extracted successfully.")
@@ -174,6 +181,7 @@ def parse_course_text(text: str) -> dict:
         "prerequisite(s)": "prerequisites",
         "corequisite(s)": "corequisites",
         "antirequisite(s)": "antirequisites",
+        "university-wide elective course": "university_wide_elective",
     }
 
     parsed = {v: None for v in labels.values()}

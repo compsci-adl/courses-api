@@ -1,4 +1,5 @@
 from sqlalchemy import (
+    Boolean,
     Column,
     ForeignKey,
     Integer,
@@ -35,6 +36,7 @@ class Course(Base):
     prerequisites = Column(String, nullable=False)
     corequisites = Column(String, nullable=False)
     antirequisites = Column(String, nullable=False)
+    university_wide_elective = Column(Boolean, nullable=False)
     url = Column(String, nullable=False)
     course_classes = relationship("CourseClass", backref="course")
 

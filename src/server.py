@@ -373,6 +373,7 @@ def get_course(course_cid: str, db: Session = Depends(get_db)):
         "term": course.terms,
         "campus": course.campus,
         "units": course.units,
+        "university_wide_elective": course.university_wide_elective,
         "requirements": requirements,
         "class_list": [],
     }

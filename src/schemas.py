@@ -76,5 +76,6 @@ class CourseSchema(BaseModel):
     term: str
     campus: str
     units: int
+    university_wide_elective: bool
     requirements: RequirementsSchema
     class_list: List[ClassTypeSchema]
