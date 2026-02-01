@@ -313,6 +313,8 @@ def get_subject_courses(
                     "code": entry.course_code,
                     "title": entry.title,
                 },
+                "university_wide_elective": entry.university_wide_elective,
+                "level_of_study": entry.level_of_study,
             }
         )
 
