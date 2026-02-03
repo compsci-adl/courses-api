@@ -100,6 +100,9 @@ def process_course(course, year, subject, engine, progress, subject_task, lock):
                 prerequisites=course_details.get("prerequisites", "N/A"),
                 corequisites=course_details.get("corequisites", "N/A"),
                 antirequisites=course_details.get("antirequisites", "N/A"),
+                university_wide_elective=course_details.get(
+                    "university_wide_elective", False
+                ),
                 url="https://adelaideuni.edu.au/study/courses/" + encoded_course_code,
             )
             write_queue.put(db_course)
