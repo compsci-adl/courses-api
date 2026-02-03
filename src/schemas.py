@@ -76,5 +76,9 @@ class CourseSchema(BaseModel):
     term: str
     campus: str
     units: int
+    university_wide_elective: bool
+    course_coordinator: Optional[str] = None
+    course_overview: str
+    level_of_study: str
     requirements: RequirementsSchema
     class_list: List[ClassTypeSchema]

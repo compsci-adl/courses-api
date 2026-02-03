@@ -1,7 +1,7 @@
 import re
 import sys
 from datetime import datetime
-from typing import Dict, List, Union
+from typing import Dict, List, Optional, Union
 
 from dotenv import dotenv_values
 from fastapi import Depends, FastAPI, HTTPException
@@ -266,30 +266,35 @@ def get_subject_courses(
     subject: str,
     year: int = current_year(),
     term: str = current_sem(),
+    university_wide_elective: Optional[bool] = None,
+    level_of_study: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
-    """Gets a list of courses given a subject (and optionally a year and term).
+    """Gets a list of courses, optionally filtered by subject, year, term, university_wide_elective and level_of_study.
+
+    Examples:
+        /courses?year=2026&term=online1&subject=Accounting&university_wide_elective=false&level_of_study=Undergraduate
 
     Args:
-        subject (str, required): The subject code to search for.
-        year (int, optional): The year of the courses from 2006 to
-        the current year. Defaults to current year.
+        subject (str, optional): The subject code to search for. If omitted, all subjects are included.
+        year (int, optional): The year of the courses. Defaults to current year.
         term (str, optional): The term of the courses. Defaults to current semester.
+        university_wide_elective (bool, optional): Filter courses by whether they're an university-wide elective.
+        level_of_study (str, optional): Filter courses by level of study (e.g., 'Undergraduate').
 
     Returns:
         list[dict]: A list of courses as dictionaries.
     """
     term_number = get_term_number(db, year, term)
-    results = (
-        db.query(Course)
-        .filter(
-            Course.subject == subject,
-            Course.year == year,
-            Course.terms.contains(term_number),
-        )
-        .order_by(Course.course_code)
-        .all()
-    )
+    filters = [Course.year == year, Course.terms.contains(term_number)]
+    if subject:
+        filters.append(Course.subject == subject)
+    if university_wide_elective is not None:
+        filters.append(Course.university_wide_elective == university_wide_elective)
+    if level_of_study:
+        filters.append(Course.level_of_study == level_of_study)
+
+    results = db.query(Course).filter(*filters).order_by(Course.course_code).all()
 
     if not results:
         raise HTTPException(
@@ -308,6 +313,9 @@ def get_subject_courses(
                     "code": entry.course_code,
                     "title": entry.title,
                 },
+                "university_wide_elective": entry.university_wide_elective,
+                "level_of_study": entry.level_of_study,
+                "campus": entry.campus,
             }
         )
 
@@ -373,6 +381,10 @@ def get_course(course_cid: str, db: Session = Depends(get_db)):
         "term": course.terms,
         "campus": course.campus,
         "units": course.units,
+        "university_wide_elective": course.university_wide_elective,
+        "course_coordinator": course.course_coordinator,
+        "course_overview": course.course_overview,
+        "level_of_study": course.level_of_study,
         "requirements": requirements,
         "class_list": [],
     }
