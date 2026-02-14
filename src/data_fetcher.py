@@ -173,7 +173,11 @@ class DataFetcher:
                     # Grab H1 text if present as a separate field to help parsers
                     h1_tag = soup.find("h1")
                     h1_text = h1_tag.get_text().strip() if h1_tag else ""
-                    self.data = {"h1": h1_text, "data": re.sub(r"\n+", "\n", text)}
+                    self.data = {
+                        "h1": h1_text,
+                        "data": re.sub(r"\n+", "\n", text),
+                        "html": response.text,
+                    }
                     return self.data
 
             except requests.exceptions.ProxyError:

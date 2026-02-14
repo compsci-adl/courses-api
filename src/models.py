@@ -79,6 +79,7 @@ class Meetings(Base):
     end_time = Column(String, nullable=False)
     campus = Column(String, nullable=False)
     location = Column(String, nullable=False)
+    instructor = Column(String, nullable=True)
     course_class_id = Column(String, ForeignKey("course_classes.id"), nullable=False)
 
 

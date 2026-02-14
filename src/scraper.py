@@ -251,19 +251,20 @@ def process_course(course, year, subject, engine, progress, subject_task, lock):
                         # Extract start and end time from time string
                         time_str = meeting.get("time", "")
                         start_time = (
-                            time_str.split("-")[0].strip() if "-" in time_str else "N/A"
+                            time_str.split("-")[0].strip() if "-" in time_str else ""
                         )
                         end_time = (
-                            time_str.split("-")[1].strip() if "-" in time_str else "N/A"
+                            time_str.split("-")[1].strip() if "-" in time_str else ""
                         )
                         db_meeting = Meetings(
                             id=meeting_cid,
-                            dates=meeting.get("dates", "N/A"),
-                            days=meeting.get("days", "N/A"),
+                            dates=meeting.get("dates", ""),
+                            days=meeting.get("days", ""),
                             start_time=start_time,
                             end_time=end_time,
-                            campus=meeting.get("campus", "N/A"),
-                            location=meeting.get("location", "N/A"),
+                            campus=meeting.get("campus", ""),
+                            location=meeting.get("location", ""),
+                            instructor=meeting.get("instructor"),
                             course_class_id=class_cid,
                         )
                         write_queue.put(db_meeting)
