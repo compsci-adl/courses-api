@@ -417,3 +417,126 @@ def parse_course_class_list(text: str) -> list[dict]:
     if current_class and current_class.get("class_number"):
         parsed_classes.append(current_class)
     return parsed_classes
+
+
+def parse_course_outline(html_content: str) -> dict:
+    """
+    Parse the course outline.
+    Extracts:
+    - Aim (from Course Overview)
+    - Learning Outcomes
+    - Learning Resources (Textbooks)
+    - Assessments
+    """
+    if not html_content:
+        return {}
+
+    soup = BeautifulSoup(html_content, "html.parser")
+    result = {
+        "aim": None,
+        "learning_outcomes": [],
+        "textbooks": None,
+        "assessments": [],
+    }
+
+    # Helper to find section content based on header
+    def get_section_text(header_text):
+        header = soup.find(
+            lambda tag: tag.name in ["h2", "h3", "h4"]
+            and header_text.lower() in tag.get_text().lower()
+        )
+        if header:
+            content = []
+            curr = header.find_next_sibling()
+            while curr and curr.name not in ["h2", "h3", "h4"]:
+                text = curr.get_text(strip=True, separator=" ")
+                if text:
+                    content.append(text)
+                curr = curr.find_next_sibling()
+            return "\n\n".join(content)
+        return None
+
+    aim_text = get_section_text("Aim")
+    if not aim_text:
+        pass
+    result["aim"] = aim_text
+
+    lo_header = soup.find(
+        lambda tag: tag.name in ["h2", "h3"] and "Learning Outcomes" in tag.get_text()
+    )
+    if lo_header:
+        lo_table = lo_header.find_next("table")
+        if lo_table:
+            rows = lo_table.find_all("tr")
+            for row in rows:
+                cols = row.find_all("td")
+                if len(cols) >= 2:
+                    text = cols[1].get_text(strip=True)
+                    if text.startswith("Course Learning Outcome"):
+                        text = text[len("Course Learning Outcome") :].strip()
+                    result["learning_outcomes"].append(text)
+        else:
+            lo_list = lo_header.find_next("ul") or lo_header.find_next("ol")
+            if lo_list:
+                for li in lo_list.find_all("li"):
+                    text = li.get_text(strip=True)
+                    if text.startswith("Course Learning Outcome"):
+                        text = text[len("Course Learning Outcome") :].strip()
+                    result["learning_outcomes"].append(text)
+
+    text_res = get_section_text("Learning Resources")
+    if text_res:
+        pass
+    result["textbooks"] = text_res
+
+    assess_header = soup.find(
+        lambda tag: tag.name in ["h2", "h3"]
+        and "Assessment Descriptions" in tag.get_text()
+    )
+    if assess_header:
+        assess_table = assess_header.find_next("table")
+        if assess_table:
+            headers = [
+                th.get_text(strip=True).lower() for th in assess_table.find_all("th")
+            ]
+            idx_title = 0
+            idx_weight = -1
+            idx_hurdle = -1
+            idx_lo = -1
+
+            for i, h in enumerate(headers):
+                if "title" in h:
+                    idx_title = i
+                elif "weight" in h:
+                    idx_weight = i
+                elif "hurdle" in h:
+                    idx_hurdle = i
+                elif "learning outcome" in h:
+                    idx_lo = i
+
+            rows = assess_table.find_all("tr")[1:]  # Skip header
+            for row in rows:
+                cols = row.find_all("td")
+                if not cols:
+                    continue
+
+                # Helper to safely get cleaned text
+                def get_col_text(idx, prefix=None):
+                    if idx >= 0 and idx < len(cols):
+                        text = cols[idx].get_text(strip=True)
+                        if prefix and text.startswith(prefix):
+                            text = text[len(prefix) :].strip()
+                        return text
+                    return None
+
+                assessment = {
+                    "title": get_col_text(idx_title, "Title"),
+                    "weighting": get_col_text(idx_weight, "Weighting"),
+                    "hurdle": get_col_text(idx_hurdle, "Hurdle"),
+                    "learning_outcomes": get_col_text(idx_lo, "Learning Outcomes"),
+                }
+
+                if assessment["title"]:
+                    result["assessments"].append(assessment)
+
+    return result

@@ -5,6 +5,7 @@ from hashlib import shake_256
 from queue import Queue
 from threading import Lock, Thread
 
+import requests
 from dotenv import dotenv_values
 from rich.progress import Progress
 from sqlalchemy import create_engine
@@ -13,7 +14,16 @@ from sqlalchemy.orm import sessionmaker
 import data_parser
 import fetch_proxies
 from log import logger
-from models import Base, Course, CourseClass, Meetings, Subject
+from models import (
+    Assessment,
+    Base,
+    Course,
+    CourseClass,
+    LearningOutcome,
+    Meetings,
+    Subject,
+)
+from term_utils import get_term_code
 
 # Session and write queue for DB writer thread
 Session = sessionmaker()
@@ -104,7 +114,100 @@ def process_course(course, year, subject, engine, progress, subject_task, lock):
                     "university_wide_elective", False
                 ),
                 url="https://adelaideuni.edu.au/study/courses/" + encoded_course_code,
+                course_outline_url=None,
             )
+
+            # Generate course outline URL if term and year are valid
+            # Format: https://apps.adelaide.edu.au/public/courseoutline?courseInstanceId={year_short}{term_code}_{subject}_{code}_2
+            # Example: 2620_MATH_X311_2
+            term_str = join_str_if_iterable(terms)
+            term_code = get_term_code(term_str)
+
+            if not term_code and term_str:
+                # Try first term if multiple (e.g. "Semester 1, Semester 2")
+                first_term = term_str.split(",")[0].strip()
+                term_code = get_term_code(first_term)
+
+            if term_code:
+                year_short = str(year)[-2:]
+                formatted_code = re.sub(r"([a-zA-Z]+)\s*(\d+)", r"\1_\2", str(code_str))
+                formatted_code = formatted_code.replace(" ", "_")
+
+                # Brute-force suffixes _1 to _6 to find the valid course outline
+                found_valid_outline = False
+                for suffix in range(1, 7):
+                    course_instance_id = (
+                        f"{year_short}{term_code}_{formatted_code}_{suffix}"
+                    )
+                    outline_url = f"https://apps.adelaide.edu.au/public/courseoutline?courseInstanceId={course_instance_id}"
+
+                    try:
+                        headers = {
+                            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                        }
+                        resp = requests.get(outline_url, headers=headers, timeout=5)
+
+                        if resp.status_code == 200:
+                            text = resp.text.lower()
+                            if "course overview" in text or "subject area" in text:
+                                logger.debug(
+                                    f"Found valid course outline at {outline_url}"
+                                )
+                                db_course.course_outline_url = outline_url
+
+                                parsed_outline = data_parser.parse_course_outline(
+                                    resp.text
+                                )
+
+                                if parsed_outline.get("aim"):
+                                    db_course.course_overview = parsed_outline["aim"]
+
+                                # Populate Learning Outcomes
+                                for index, lo_text in enumerate(
+                                    parsed_outline.get("learning_outcomes", []), start=1
+                                ):
+                                    lo_id = get_short_hash(f"{course_cid}lo{lo_text}")
+                                    db_lo = LearningOutcome(
+                                        id=lo_id,
+                                        course_id=course_cid,
+                                        description=lo_text,
+                                        outcome_index=index,
+                                    )
+                                    write_queue.put(db_lo)
+
+                                db_course.textbooks = parsed_outline.get("textbooks")
+
+                                # Populate Assessments
+                                for assess in parsed_outline.get("assessments", []):
+                                    assess_title = assess.get("title")
+                                    assess_id = get_short_hash(
+                                        f"{course_cid}assess{assess_title}"
+                                    )
+                                    db_assess = Assessment(
+                                        id=assess_id,
+                                        course_id=course_cid,
+                                        title=assess_title,
+                                        weighting=assess.get("weighting"),
+                                        hurdle=assess.get("hurdle"),
+                                        learning_outcomes=assess.get(
+                                            "learning_outcomes"
+                                        ),
+                                    )
+                                    write_queue.put(db_assess)
+
+                                found_valid_outline = True
+                                break
+                    except Exception as e:
+                        logger.debug(f"Failed check for {outline_url}: {e}")
+                        pass
+
+                if not found_valid_outline:
+                    logger.debug(
+                        f"No valid course outline found for {course_code} (suffixes 1-6)"
+                    )
+
+            write_queue.put(db_course)
+
             write_queue.put(db_course)
         except Exception as e:
             print(f"Error inserting course {course_code}: {e}")

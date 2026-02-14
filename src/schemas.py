@@ -67,6 +67,13 @@ class RequirementsSchema(BaseModel):
     antirequisites: Optional[List[str]] = None
 
 
+class AssessmentSchema(BaseModel):
+    title: str
+    weighting: Optional[str] = None
+    hurdle: Optional[str] = None
+    learning_outcomes: Optional[str] = None
+
+
 class CourseSchema(BaseModel):
     id: str
     course_id: int
@@ -80,5 +87,9 @@ class CourseSchema(BaseModel):
     course_coordinator: Optional[str] = None
     course_overview: str
     level_of_study: str
+    course_outline_url: Optional[str] = None
+    learning_outcomes: Optional[List[str]] = None
+    textbooks: Optional[str] = None
+    assessments: Optional[List[AssessmentSchema]] = None
     requirements: RequirementsSchema
     class_list: List[ClassTypeSchema]

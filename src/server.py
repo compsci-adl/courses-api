@@ -316,6 +316,7 @@ def get_subject_courses(
                 "university_wide_elective": entry.university_wide_elective,
                 "level_of_study": entry.level_of_study,
                 "campus": entry.campus,
+                "course_outline_url": entry.course_outline_url,
             }
         )
 
@@ -385,6 +386,10 @@ def get_course(course_cid: str, db: Session = Depends(get_db)):
         "course_coordinator": course.course_coordinator,
         "course_overview": course.course_overview,
         "level_of_study": course.level_of_study,
+        "course_outline_url": course.course_outline_url,
+        "learning_outcomes": course.learning_outcomes,
+        "textbooks": course.textbooks,
+        "assessments": course.assessments,
         "requirements": requirements,
         "class_list": [],
     }
