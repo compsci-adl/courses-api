@@ -239,8 +239,8 @@ def get_course_class_list(course_code: int):
                 "title": data.get("h1", "") if isinstance(data, dict) else "",
                 "course_id": None,
             }
-        # Return plain text string without extra newlines
-        text = data.get("data", "")
+        # Use raw HTML for BeautifulSoup parsing
+        text = data.get("html", "") or data.get("data", "")
 
         # Parse the plain-body text for class list details
         parsed_classes = parse_course_class_list(text)
@@ -256,164 +256,208 @@ def parse_course_class_list(text: str) -> list[dict]:
     if not isinstance(text, str):
         return []
 
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    soup = BeautifulSoup(text, "html.parser")
     parsed_classes = []
-    current_class = None
-    # Current component context for classes within a "Class details" block.
-    current_component = "unknown"
-    i = 0
 
-    def _is_date_line(s: str) -> bool:
-        # matches things like '3 Aug - 21 Sep' or '12 Oct - 9 Nov'
-        return bool(re.search(r"^\d{1,2} [A-Za-z]+\s*-\s*\d{1,2} [A-Za-z]+$", s))
+    # Find all component containers (e.g. Enrolment class, Related class)
+    # The structure: .cmp-course-accordion__class-details -> .cmp-course-accordion -> .cmp-course-accordion--group
+    # -> .cmp-course-accordion--container (this holds the component title)
+    #    -> .cmp-course-accordion--container-content
+    #       -> .cmp-course-accordion--container-session (one or more, these hold the class)
 
-    while i < len(lines):
-        line = lines[i]
+    # Iterate over all .cmp-course-accordion--container-session to find classes
 
-        # Look for "Availability" and skip until "Class details" – content prior to class details is not needed
-        if "Availability" in line:
-            while i < len(lines) and not lines[i].startswith("Class details"):
-                i += 1
-            continue
+    sessions = soup.select(".cmp-course-accordion--container-session")
+    for session in sessions:
+        class_info = {
+            "meetings": [],
+            "component": "unknown",
+            "class_number": None,
+            "section": None,
+            "size": None,
+            "available": None,
+        }
 
-        # Start parsing class details: reset the context for a new set of classes and components
-        if line.startswith("Class details"):
-            # Commit any prior orphaned class (if it has a class number)
-            if current_class and current_class.get("class_number"):
-                parsed_classes.append(current_class)
-            current_class = None
-            # Reset the current component and attempt a lookahead for the first component
-            current_component = "unknown"
-            lookahead = 1
-            max_look = 24
-            while i + lookahead < len(lines) and lookahead <= max_look:
-                candidate = lines[i + lookahead].strip()
-                if candidate.lower().startswith(
-                    "enrolment class"
-                ) or candidate.lower().startswith("related class"):
-                    parts = candidate.split(":", 1)
-                    if len(parts) > 1 and parts[1].strip():
-                        current_component = parts[0].strip() + ": " + parts[1].strip()
-                    else:
-                        # If value is next line and not a class number, use it
-                        next_val = (
-                            lines[i + lookahead + 1].strip()
-                            if i + lookahead + 1 < len(lines)
-                            else ""
-                        )
-                        if next_val and not next_val.lower().startswith("class number"):
-                            current_component = parts[0].strip() + ": " + next_val
-                    break
-                # If the block restarts, stop searching
-                if candidate.startswith("Class details"):
-                    break
-                lookahead += 1
-            i += 1
-            continue
+        # Find component name from parent container
+        # session -> content -> container -> h5(title)
+        container = session.find_parent("div", class_="cmp-course-accordion--container")
+        if container:
+            title_el = container.select_one(".cmp-course-accordion__title")
+            if title_el:
+                class_info["component"] = title_el.get_text(strip=True)
 
-        # Parse other class attributes
-        # Detect inline component labels anywhere in the Class details block
-        if line.lower().startswith("enrolment class") or line.lower().startswith(
-            "related class"
-        ):
-            parts = line.split(":", 1)
-            if len(parts) > 1 and parts[1].strip():
-                current_component = parts[0].strip() + ": " + parts[1].strip()
-            else:
-                next_val = lines[i + 1].strip() if i + 1 < len(lines) else ""
-                if next_val and not next_val.lower().startswith("class number"):
-                    current_component = parts[0].strip() + ": " + next_val
-                    i += 1
-            if current_class and not current_class.get("class_number"):
-                current_class["component"] = current_component
-            i += 1
-            continue
+        # Parse cards for class details
+        cards = session.select(".cmp-course-accordion--card-text")
+        for card in cards:
+            text = card.get_text(strip=True)
+            if "Class number" in text:
+                class_info["class_number"] = text.replace("Class number", "").strip()
+            elif "Section" in text:
+                class_info["section"] = text.replace("Section", "").strip()
+            elif "Size" in text:
+                class_info["size"] = text.replace("Size", "").strip()
+            elif "Available" in text:
+                class_info["available"] = text.replace("Available", "").strip()
 
-        if line.startswith("Class number"):
-            # If we already have a class with a class_number, start a new class and append the old one
-            if current_class and current_class.get("class_number"):
-                parsed_classes.append(current_class)
-                # Carry over campus/header values
-                current_class = {
-                    "meetings": [],
-                    "campus": current_class.get("campus"),
-                    "component": current_component or current_class.get("component"),
-                }
-            elif not current_class:
-                current_class = {"meetings": []}
-            current_class["class_number"] = line.split("Class number")[-1].strip()
-            # Ensure the class has a component set (inherit from block context)
-            if "component" not in current_class or not current_class.get("component"):
-                current_class["component"] = current_component or "unknown"
-            i += 1
-            continue
+        # Parse meetings table
+        rows = session.select("table tbody tr")
+        for row in rows:
+            cols = row.select("td")
+            if not cols:
+                continue
 
-        if line.startswith("Section"):
-            if not current_class:
-                current_class = {"meetings": []}
-                current_class["component"] = current_component or "unknown"
-            current_class["section"] = line.split("Section")[-1].strip()
-            i += 1
-            continue
-        if line.startswith("Size"):
-            if not current_class:
-                current_class = {"meetings": []}
-                current_class["component"] = current_component or "unknown"
-            current_class["size"] = line.split("Size")[-1].strip()
-            i += 1
-            continue
-        if line.startswith("Available"):
-            if not current_class:
-                current_class = {"meetings": []}
-                current_class["component"] = current_component or "unknown"
-            if line.split("Available")[-1].strip().isdigit():
-                current_class["available"] = line.split("Available")[-1].strip()
-            i += 1
-            continue
+            def get_val(col):
+                # Attempt to find .table-content div first (used in responsive tables)
+                content = col.select_one(".table-content")
+                if content:
+                    val = content.get_text(separator=" ", strip=True)
+                else:
+                    val = col.get_text(separator=" ", strip=True)
 
-        # Detect meeting table header
-        headers = ["Dates", "Days", "Time", "Campus", "Location", "Instructor"]
-        if all(
-            i + j < len(lines) and lines[i + j] == headers[j]
-            for j in range(len(headers))
-        ):
-            # Skip header row
-            i += len(headers)
-            # Read meeting rows until next class starts
-            while (
-                i < len(lines)
-                and not lines[i].startswith("Class number")
-                and not lines[i].startswith("Class details")
-            ):
-                # Need at least a date, day, time, campus, location, instructor to be a valid row
-                if not _is_date_line(lines[i]):
-                    break
-                # Attempt to parse row segments
-                dates_val = lines[i]
-                days_val = lines[i + 1] if i + 1 < len(lines) else ""
-                time_val = lines[i + 2] if i + 2 < len(lines) else ""
-                campus_val = lines[i + 3] if i + 3 < len(lines) else ""
-                location_val = lines[i + 4] if i + 4 < len(lines) else ""
-                next_i = i + 5
+                # Clean up specific placeholders like "-", ",", "N/A"
+                if val in ["-", ",", "N/A"]:
+                    return ""
+                return val
 
+            # Expected order: Dates, Days, Time, Campus, Location, Instructor
+            # Verify headers if possible, but structure seems consistent.
+            if len(cols) >= 5:  # Some might miss Instructor
                 meeting = {
-                    "dates": dates_val,
-                    "days": days_val,
-                    "time": time_val,
-                    "campus": campus_val,
-                    "location": location_val,
+                    "dates": get_val(cols[0]),
+                    "days": get_val(cols[1]),
+                    "time": get_val(cols[2]),
+                    "campus": get_val(cols[3]),
+                    "location": get_val(cols[4]),
                 }
-                if not current_class:
-                    current_class = {"meetings": []}
-                    current_class["component"] = current_component or "unknown"
-                current_class.setdefault("meetings", []).append(meeting)
-                i = next_i
-            continue
+                if len(cols) >= 6:
+                    meeting["instructor"] = get_val(cols[5])
 
-        # Fallback: advance
-        i += 1
+                class_info["meetings"].append(meeting)
 
-    # Append the last class if it contains a class number
-    if current_class and current_class.get("class_number"):
-        parsed_classes.append(current_class)
+        if class_info.get("class_number"):
+            parsed_classes.append(class_info)
+
     return parsed_classes
+
+
+def parse_course_outline(html_content: str) -> dict:
+    """
+    Parse the course outline.
+    Extracts:
+    - Aim (from Course Overview)
+    - Learning Outcomes
+    - Learning Resources (Textbooks)
+    - Assessments
+    """
+    if not html_content:
+        return {}
+
+    soup = BeautifulSoup(html_content, "html.parser")
+    result = {
+        "aim": None,
+        "learning_outcomes": [],
+        "textbooks": None,
+        "assessments": [],
+    }
+
+    # Helper to find section content based on header
+    def get_section_text(header_text):
+        header = soup.find(
+            lambda tag: tag.name in ["h2", "h3", "h4"]
+            and header_text.lower() in tag.get_text().lower()
+        )
+        if header:
+            content = []
+            curr = header.find_next_sibling()
+            while curr and curr.name not in ["h2", "h3", "h4"]:
+                text = curr.get_text(strip=True, separator=" ")
+                if text:
+                    content.append(text)
+                curr = curr.find_next_sibling()
+            return "\n\n".join(content)
+        return None
+
+    aim_text = get_section_text("Aim")
+    if not aim_text:
+        pass
+    result["aim"] = aim_text
+
+    lo_header = soup.find(
+        lambda tag: tag.name in ["h2", "h3"] and "Learning Outcomes" in tag.get_text()
+    )
+    if lo_header:
+        lo_table = lo_header.find_next("table")
+        if lo_table:
+            rows = lo_table.find_all("tr")
+            for row in rows:
+                cols = row.find_all("td")
+                if len(cols) >= 2:
+                    text = cols[1].get_text(strip=True)
+                    if text.startswith("Course Learning Outcome"):
+                        text = text[len("Course Learning Outcome") :].strip()
+                    result["learning_outcomes"].append(text)
+        else:
+            lo_list = lo_header.find_next("ul") or lo_header.find_next("ol")
+            if lo_list:
+                for li in lo_list.find_all("li"):
+                    text = li.get_text(strip=True)
+                    if text.startswith("Course Learning Outcome"):
+                        text = text[len("Course Learning Outcome") :].strip()
+                    result["learning_outcomes"].append(text)
+
+    text_res = get_section_text("Learning Resources")
+    if text_res:
+        pass
+    result["textbooks"] = text_res
+
+    assess_header = soup.find(
+        lambda tag: tag.name in ["h2", "h3"]
+        and "Assessment Descriptions" in tag.get_text()
+    )
+    if assess_header:
+        assess_table = assess_header.find_next("table")
+        if assess_table:
+            headers = [
+                th.get_text(strip=True).lower() for th in assess_table.find_all("th")
+            ]
+            idx_title = 0
+            idx_weight = -1
+            idx_hurdle = -1
+            idx_lo = -1
+
+            for i, h in enumerate(headers):
+                if "title" in h:
+                    idx_title = i
+                elif "weight" in h:
+                    idx_weight = i
+                elif "hurdle" in h:
+                    idx_hurdle = i
+                elif "learning outcome" in h:
+                    idx_lo = i
+
+            rows = assess_table.find_all("tr")[1:]  # Skip header
+            for row in rows:
+                cols = row.find_all("td")
+                if not cols:
+                    continue
+
+                # Helper to safely get cleaned text
+                def get_col_text(idx, prefix=None):
+                    if idx >= 0 and idx < len(cols):
+                        text = cols[idx].get_text(strip=True)
+                        if prefix and text.startswith(prefix):
+                            text = text[len(prefix) :].strip()
+                        return text
+                    return None
+
+                assessment = {
+                    "title": get_col_text(idx_title, "Title"),
+                    "weighting": get_col_text(idx_weight, "Weighting"),
+                    "hurdle": get_col_text(idx_hurdle, "Hurdle"),
+                    "learning_outcomes": get_col_text(idx_lo, "Learning Outcomes"),
+                }
+
+                if assessment["title"]:
+                    result["assessments"].append(assessment)
+
+    return result

@@ -36,10 +36,18 @@ class DataFetcher:
             s = s[:200] + "...(truncated)"
         return s
 
-    def __init__(self, endpoint: str, use_class_url: bool = False) -> None:
+    def __init__(
+        self,
+        endpoint: str,
+        use_class_url: bool = False,
+        full_url: str = None,
+        use_proxy: bool = True,
+    ) -> None:
         self.endpoint = endpoint
         self.use_class_url = use_class_url
-        if self.use_class_url:
+        if full_url:
+            self.url = full_url
+        elif self.use_class_url:
             # Build a full URL for course page content. Ensure endpoint is a path.
             path = (
                 self.endpoint if self.endpoint.startswith("/") else f"/{self.endpoint}"
@@ -49,7 +57,7 @@ class DataFetcher:
             self.url = self.BASE_URL + endpoint
         self.data = None
         self.last_response = None
-        self.proxies = self.load_proxies()
+        self.proxies = self.load_proxies() if use_proxy else []
 
     def load_proxies(self) -> list:
         """Load proxies from the file."""
@@ -73,7 +81,7 @@ class DataFetcher:
             "https": f"http://{proxy}",
         }
 
-    def get(self) -> dict:
+    def get(self, max_retries: int = 50) -> dict:
         """Fetch data from the API, handling retries and rate-limiting."""
         logger.debug("Fetching %s...", self._sanitise_for_log(self.endpoint))
         if self.data is not None:
@@ -83,7 +91,6 @@ class DataFetcher:
             logger.error("Error: No URL provided.")
             return {}
 
-        max_retries = 50  # Maximum number of retries
         retries = 0
         # Clear previous last_response to avoid stale values in callers
         self.last_response = None
@@ -166,7 +173,11 @@ class DataFetcher:
                     # Grab H1 text if present as a separate field to help parsers
                     h1_tag = soup.find("h1")
                     h1_text = h1_tag.get_text().strip() if h1_tag else ""
-                    self.data = {"h1": h1_text, "data": re.sub(r"\n+", "\n", text)}
+                    self.data = {
+                        "h1": h1_text,
+                        "data": re.sub(r"\n+", "\n", text),
+                        "html": response.text,
+                    }
                     return self.data
 
             except requests.exceptions.ProxyError:

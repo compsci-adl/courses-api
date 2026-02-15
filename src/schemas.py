@@ -1,6 +1,6 @@
 from typing import List, Literal, Optional
 
-from pydantic import BaseModel, Field, root_validator
+from pydantic import BaseModel, root_validator
 
 
 class NameSchema(BaseModel):
@@ -9,33 +9,22 @@ class NameSchema(BaseModel):
     title: str
 
 
-DateField = Field(pattern=r"\d{2}-\d{2}")
-TimeField = Field(pattern=r"\d{2}:\d{2}")
-
-
 class DateRageSchema(BaseModel):
-    start: str = DateField
-    end: str = DateField
+    start: Optional[str] = None
+    end: Optional[str] = None
 
 
 class TimeRageSchema(BaseModel):
-    start: str = TimeField
-    end: str = TimeField
+    start: Optional[str] = None
+    end: Optional[str] = None
 
 
 class MeetingSchema(BaseModel):
-    day: Literal[
-        "Monday",
-        "Tuesday",
-        "Wednesday",
-        "Thursday",
-        "Friday",
-        "Saturday",
-        "Sunday",
-    ]
-    location: str
-    date: DateRageSchema
-    time: TimeRageSchema
+    day: Optional[str] = None
+    location: Optional[str] = None
+    instructor: Optional[str] = None
+    date: Optional[DateRageSchema] = None
+    time: Optional[TimeRageSchema] = None
 
 
 class ClassSchema(BaseModel):
@@ -67,6 +56,18 @@ class RequirementsSchema(BaseModel):
     antirequisites: Optional[List[str]] = None
 
 
+class AssessmentSchema(BaseModel):
+    title: str
+    weighting: Optional[str] = None
+    hurdle: Optional[str] = None
+    learning_outcomes: Optional[str] = None
+
+
+class LearningOutcomeSchema(BaseModel):
+    description: str
+    outcome_index: int
+
+
 class CourseSchema(BaseModel):
     id: str
     course_id: int
@@ -80,5 +81,9 @@ class CourseSchema(BaseModel):
     course_coordinator: Optional[str] = None
     course_overview: str
     level_of_study: str
+    course_outline_url: Optional[str] = None
+    learning_outcomes: Optional[List[LearningOutcomeSchema]] = None
+    textbooks: Optional[str] = None
+    assessments: Optional[List[AssessmentSchema]] = None
     requirements: RequirementsSchema
     class_list: List[ClassTypeSchema]

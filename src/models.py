@@ -38,7 +38,36 @@ class Course(Base):
     antirequisites = Column(String, nullable=False)
     university_wide_elective = Column(Boolean, nullable=False)
     url = Column(String, nullable=False)
-    course_classes = relationship("CourseClass", backref="course")
+    course_outline_url = Column(String, nullable=True)
+    textbooks = Column(String, nullable=True)
+
+    learning_outcomes = relationship(
+        "LearningOutcome", backref="course", cascade="all, delete-orphan"
+    )
+    assessments = relationship(
+        "Assessment", backref="course", cascade="all, delete-orphan"
+    )
+    course_classes = relationship(
+        "CourseClass", backref="course", cascade="all, delete-orphan"
+    )
+
+
+class LearningOutcome(Base):
+    __tablename__ = "learning_outcomes"
+    id = Column(String, primary_key=True)
+    course_id = Column(String, ForeignKey("courses.id"), nullable=False)
+    description = Column(String, nullable=False)
+    outcome_index = Column(Integer, nullable=False)
+
+
+class Assessment(Base):
+    __tablename__ = "assessments"
+    id = Column(String, primary_key=True)
+    course_id = Column(String, ForeignKey("courses.id"), nullable=False)
+    title = Column(String, nullable=False)
+    weighting = Column(String, nullable=True)
+    hurdle = Column(String, nullable=True)
+    learning_outcomes = Column(String, nullable=True)
 
 
 class Meetings(Base):
@@ -50,6 +79,7 @@ class Meetings(Base):
     end_time = Column(String, nullable=False)
     campus = Column(String, nullable=False)
     location = Column(String, nullable=False)
+    instructor = Column(String, nullable=True)
     course_class_id = Column(String, ForeignKey("course_classes.id"), nullable=False)
 
 

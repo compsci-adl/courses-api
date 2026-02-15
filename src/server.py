@@ -108,32 +108,38 @@ def meeting_date_convert(raw_date: str) -> dict[str, str]:
     Returns:
         formatted_date (dict[str]): The formatted meeting date in the format of "MM-DD"
     """
-    months = [
-        "Jan",
-        "Feb",
-        "Mar",
-        "Apr",
-        "May",
-        "Jun",
-        "Jul",
-        "Aug",
-        "Sep",
-        "Oct",
-        "Nov",
-        "Dec",
-    ]
-    start, end = raw_date.split(" - ")
+    if not raw_date or raw_date.strip() == "":
+        return {"start": None, "end": None}
 
-    start_d, start_m = start.split()
-    start_m = str(months.index(start_m) + 1).zfill(2)
+    try:
+        months = [
+            "Jan",
+            "Feb",
+            "Mar",
+            "Apr",
+            "May",
+            "Jun",
+            "Jul",
+            "Aug",
+            "Sep",
+            "Oct",
+            "Nov",
+            "Dec",
+        ]
+        start, end = raw_date.split(" - ")
 
-    end_d, end_m = end.split()
-    end_m = str(months.index(end_m) + 1).zfill(2)
+        start_d, start_m = start.split()
+        start_m = str(months.index(start_m) + 1).zfill(2)
 
-    return {
-        "start": f"{start_m}-{start_d.zfill(2)}",
-        "end": f"{end_m}-{end_d.zfill(2)}",
-    }
+        end_d, end_m = end.split()
+        end_m = str(months.index(end_m) + 1).zfill(2)
+
+        return {
+            "start": f"{start_m}-{start_d.zfill(2)}",
+            "end": f"{end_m}-{end_d.zfill(2)}",
+        }
+    except Exception:
+        return {"start": None, "end": None}
 
 
 def meeting_time_convert(raw_time: str) -> str:
@@ -143,20 +149,27 @@ def meeting_time_convert(raw_time: str) -> str:
     Returns:
         formatted_time (str): The formatted meeting time in the format of "HH:mm"
     """
-    if ":" in raw_time:
-        time_part, period = raw_time[:-2], raw_time[-2:].lower()
-        hour, minute = map(int, time_part.split(":"))
-    else:
-        period = raw_time[-2:].lower()
-        hour = int(raw_time[:-2])
-        minute = 0
+    if not raw_time or raw_time.strip() == "":
+        return None
 
-    if period == "pm" and hour != 12:
-        hour += 12
-    elif period == "am" and hour == 12:
-        hour = 0
+    try:
+        raw_time = raw_time.strip()
+        if ":" in raw_time:
+            time_part, period = raw_time[:-2], raw_time[-2:].lower()
+            hour, minute = map(int, time_part.split(":"))
+        else:
+            period = raw_time[-2:].lower()
+            hour = int(raw_time[:-2])
+            minute = 0
 
-    return f"{str(hour).zfill(2)}:{str(minute).zfill(2)}"
+        if period == "pm" and hour != 12:
+            hour += 12
+        elif period == "am" and hour == 12:
+            hour = 0
+
+        return f"{str(hour).zfill(2)}:{str(minute).zfill(2)}"
+    except Exception:
+        return None
 
 
 def parse_requisites(raw_requisites: str) -> Union[list[str], None]:
@@ -372,6 +385,21 @@ def get_course(course_cid: str, db: Session = Depends(get_db)):
         name = {"subject": "", "code": "", "title": ""}
         requirements = {}
 
+    learning_outcomes = [
+        {"description": lo.description, "outcome_index": lo.outcome_index}
+        for lo in course.learning_outcomes
+    ]
+
+    assessments = [
+        {
+            "title": assess.title,
+            "weighting": assess.weighting,
+            "hurdle": assess.hurdle,
+            "learning_outcomes": assess.learning_outcomes,
+        }
+        for assess in course.assessments
+    ]
+
     # Construct the response
     response = {
         "id": course_cid,
@@ -385,6 +413,11 @@ def get_course(course_cid: str, db: Session = Depends(get_db)):
         "course_coordinator": course.course_coordinator,
         "course_overview": course.course_overview,
         "level_of_study": course.level_of_study,
+        "course_url": course.url,
+        "course_outline_url": course.course_outline_url,
+        "learning_outcomes": learning_outcomes,
+        "textbooks": course.textbooks,
+        "assessments": assessments,
         "requirements": requirements,
         "class_list": [],
     }
@@ -431,6 +464,7 @@ def get_course(course_cid: str, db: Session = Depends(get_db)):
                         "day": day,
                         "location": meeting.location,
                         "campus": meeting.campus,
+                        "instructor": meeting.instructor,
                         "date": meeting_date_convert(meeting.dates),
                         "time": {
                             "start": meeting_time_convert(meeting.start_time),
