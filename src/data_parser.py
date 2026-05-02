@@ -363,8 +363,10 @@ def parse_course_outline(html_content: str) -> dict:
     # Helper to find section content based on header
     def get_section_text(header_text):
         header = soup.find(
-            lambda tag: tag.name in ["h2", "h3", "h4"]
-            and header_text.lower() in tag.get_text().lower()
+            lambda tag: (
+                tag.name in ["h2", "h3", "h4"]
+                and header_text.lower() in tag.get_text().lower()
+            )
         )
         if header:
             content = []
@@ -411,8 +413,9 @@ def parse_course_outline(html_content: str) -> dict:
     result["textbooks"] = text_res
 
     assess_header = soup.find(
-        lambda tag: tag.name in ["h2", "h3"]
-        and "Assessment Descriptions" in tag.get_text()
+        lambda tag: (
+            tag.name in ["h2", "h3"] and "Assessment Descriptions" in tag.get_text()
+        )
     )
     if assess_header:
         assess_table = assess_header.find_next("table")
