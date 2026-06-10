@@ -143,13 +143,13 @@ def process_course(course, year, subject, engine, progress, subject_task, lock):
 
                     try:
                         headers = {
-                            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
                         }
                         resp = requests.get(
                             outline_url,
                             headers=headers,
                             timeout=5,
-                            impersonate="chrome120",
+                            impersonate="chrome149",
                         )
 
                         if resp.status_code == 200:
