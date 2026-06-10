@@ -5,7 +5,7 @@ from hashlib import shake_256
 from queue import Queue
 from threading import Lock, Thread
 
-import requests
+from curl_cffi import requests
 from dotenv import dotenv_values
 from rich.progress import Progress
 from sqlalchemy import create_engine
@@ -143,9 +143,14 @@ def process_course(course, year, subject, engine, progress, subject_task, lock):
 
                     try:
                         headers = {
-                            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
                         }
-                        resp = requests.get(outline_url, headers=headers, timeout=5)
+                        resp = requests.get(
+                            outline_url,
+                            headers=headers,
+                            timeout=5,
+                            impersonate="chrome149",
+                        )
 
                         if resp.status_code == 200:
                             text = resp.text.lower()

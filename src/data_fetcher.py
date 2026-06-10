@@ -4,8 +4,8 @@ import time
 from typing import Any
 
 import json_repair
-import requests
 from bs4 import BeautifulSoup
+from curl_cffi import requests
 
 from log import logger
 
@@ -114,7 +114,11 @@ class DataFetcher:
             try:
                 logger.debug("Using proxy: %s", self._sanitise_for_log(proxy))
                 response = requests.get(
-                    request_url, proxies=proxy, headers=headers, timeout=10
+                    request_url,
+                    proxies=proxy,
+                    headers=headers,
+                    timeout=10,
+                    impersonate="chrome149",
                 )
                 self.last_response = response
 
