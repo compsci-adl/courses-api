@@ -118,7 +118,7 @@ class DataFetcher:
                     proxies=proxy,
                     headers=headers,
                     timeout=10,
-                    impersonate="chrome149",
+                    impersonate="chrome146",
                 )
                 self.last_response = response
 

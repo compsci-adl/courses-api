@@ -12,7 +12,6 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 import data_parser
-import fetch_proxies
 from log import logger
 from models import (
     Assessment,
@@ -143,13 +142,13 @@ def process_course(course, year, subject, engine, progress, subject_task, lock):
 
                     try:
                         headers = {
-                            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
+                            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
                         }
                         resp = requests.get(
                             outline_url,
                             headers=headers,
                             timeout=5,
-                            impersonate="chrome149",
+                            impersonate="chrome146",
                         )
 
                         if resp.status_code == 200:
@@ -338,7 +337,7 @@ def main():
     """Scrape data from the API and store it in a local database"""
 
     # Run proxy fetching and testing
-    fetch_proxies.main()
+    # fetch_proxies.main()
 
     # If db already exists, delete it
     if os.path.exists("src/dev.sqlite3"):
