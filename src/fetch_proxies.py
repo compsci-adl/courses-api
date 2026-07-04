@@ -23,7 +23,7 @@ def fetch_proxies(url):
 
 def test_proxy(
     proxy,
-    test_url="https://uosa-search.funnelback.squiz.cloud/s/search.html?collection=uosa~sp-aem-prod&form=json&num_ranks=1",
+    test_url="https://adelaideuni.edu.au/study/courses/",
     timeout=5,
     retries=2,  # Number of retries
 ):
@@ -34,14 +34,24 @@ def test_proxy(
     }
     for attempt in range(retries + 1):  # Retry logic
         try:
-            response = requests.get(test_url, proxies=proxies, timeout=timeout)
+            # Use realistic User-Agent to avoid WAF block
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            }
+            response = requests.get(
+                test_url, proxies=proxies, headers=headers, timeout=timeout
+            )
             if response.status_code == 200:
                 return proxy  # Return the working proxy
+            elif response.status_code == 403:
+                # WAF block, skip immediately
+                return None
         except (RequestException, Timeout):
             if attempt < retries:
                 continue  # Retry on failure
             else:
                 return None  # Skip the proxy if all retries fail
+    return None
 
 
 def save_working_proxies(proxies, filename="src/working_proxies.txt"):
