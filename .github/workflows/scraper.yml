@@ -58,6 +58,16 @@ jobs:
       - name: Rename SQLite DB to local.sqlite3
         run: mv src/dev.sqlite3 src/local.sqlite3
 
+      - name: Validate Database Size
+        run: |
+          DB_SIZE=$(stat -c%s "src/local.sqlite3" 2>/dev/null || stat -f%z "src/local.sqlite3")
+          LIMIT=$((15 * 1024 * 1024))
+          echo "Database size: $DB_SIZE bytes (Required limit: $LIMIT bytes)"
+          if [ "$DB_SIZE" -lt "$LIMIT" ]; then
+            echo "Error: Database file size is less than 15MB. Scraping might have failed or been blocked."
+            exit 1
+          fi
+
       - name: Upload DB to S3
         run: |
           aws s3 cp src/local.sqlite3 s3://${{ secrets.AWS_S3_BUCKET }}/courses-api/
