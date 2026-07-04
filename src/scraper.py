@@ -12,6 +12,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 import data_parser
+import fetch_proxies
 from log import logger
 from models import (
     Assessment,
@@ -22,7 +23,6 @@ from models import (
     Meetings,
     Subject,
 )
-from src.fetch_proxies import fetch_proxies
 from term_utils import get_term_code
 
 # Session and write queue for DB writer thread
