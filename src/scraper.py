@@ -22,6 +22,7 @@ from models import (
     Meetings,
     Subject,
 )
+from src.fetch_proxies import fetch_proxies
 from term_utils import get_term_code
 
 # Session and write queue for DB writer thread
@@ -72,11 +73,17 @@ def process_course(course, year, subject, engine, progress, subject_task, lock):
             progress.update(subject_task, advance=1)
             return
         course_details = data_parser.get_course_details(course_code)
+        if not course_details:
+            logger.error(
+                f"Failed to fetch course details for {course_code}. Skipping course."
+            )
+            progress.update(subject_task, advance=1)
+            return
 
         name = subject["subject"]
         title = course_details.get("title", "")
         terms = course.get("terms")
-        campus = course_details["campus"]
+        campus = course_details.get("campus")
 
         # Course Custom ID
         course_cid = get_short_hash(f"{name}{course_code}{title}{year}{terms}{campus}")
@@ -337,7 +344,7 @@ def main():
     """Scrape data from the API and store it in a local database"""
 
     # Run proxy fetching and testing
-    # fetch_proxies.main()
+    fetch_proxies.main()
 
     # If db already exists, delete it
     if os.path.exists("src/dev.sqlite3"):

@@ -1,5 +1,6 @@
 import random
 import re
+import threading
 import time
 from typing import Any
 
@@ -23,6 +24,10 @@ class DataFetcher:
     BASE_URL = "https://uosa-search.funnelback.squiz.cloud/s/search.html"
     BASE_INFO_URL = "https://adelaideuni.edu.au"
     PROXY_FILE = "src/working_proxies.txt"
+
+    # Global proxy list and lock to share working proxies across all scraper threads
+    _proxies = None
+    _proxy_lock = threading.Lock()
 
     @staticmethod
     def _sanitise_for_log(value: Any) -> str:
@@ -57,7 +62,12 @@ class DataFetcher:
             self.url = self.BASE_URL + endpoint
         self.data = None
         self.last_response = None
-        self.proxies = self.load_proxies() if use_proxy else []
+        self.use_proxy = use_proxy
+
+        # Load proxies globally if not already loaded
+        with DataFetcher._proxy_lock:
+            if DataFetcher._proxies is None:
+                DataFetcher._proxies = self.load_proxies()
 
     def load_proxies(self) -> list:
         """Load proxies from the file."""
@@ -72,14 +82,34 @@ class DataFetcher:
 
     def get_random_proxy(self) -> dict:
         """Get a random proxy from the loaded list."""
-        if not self.proxies:
-            logger.warning("No proxies available. Proceeding without a proxy.")
+        if not self.use_proxy:
             return None
-        proxy = random.choice(self.proxies)
+        with DataFetcher._proxy_lock:
+            if not DataFetcher._proxies:
+                logger.warning("No proxies available. Proceeding without a proxy.")
+                return None
+            proxy = random.choice(DataFetcher._proxies)
         return {
             "http": f"http://{proxy}",
             "https": f"http://{proxy}",
         }
+
+    def remove_proxy(self, proxy: dict) -> None:
+        """Remove a bad/blocked proxy from the global list."""
+        if not proxy:
+            return
+        proxy_str = proxy.get("http", "").replace("http://", "")
+        if not proxy_str:
+            return
+        with DataFetcher._proxy_lock:
+            if DataFetcher._proxies and proxy_str in DataFetcher._proxies:
+                try:
+                    DataFetcher._proxies.remove(proxy_str)
+                    logger.info(
+                        f"Removed bad proxy: {proxy_str}. Remaining proxies: {len(DataFetcher._proxies)}"
+                    )
+                except ValueError:
+                    pass
 
     def get(self, max_retries: int = 50) -> dict:
         """Fetch data from the API, handling retries and rate-limiting."""
@@ -92,25 +122,39 @@ class DataFetcher:
             return {}
 
         retries = 0
-        # Clear previous last_response to avoid stale values in callers
         self.last_response = None
-
-        # Exponential backoff base, increase gently, capped to avoid huge sleeps.
         backoff_base = 1.5
 
-        # Avoid cached responses from intermediary proxies
-        headers = {
-            "Cache-Control": "no-cache, no-store, must-revalidate",
-            "Pragma": "no-cache",
-        }
+        # Flexible headers depending on target endpoint (html page vs json api)
+        if self.use_class_url:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache",
+                "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+                "Sec-Ch-Ua-Mobile": "?0",
+                "Sec-Ch-Ua-Platform": '"macOS"',
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
+                "Upgrade-Insecure-Requests": "1",
+            }
+        else:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache",
+                "X-Requested-With": "XMLHttpRequest",
+            }
+
         while retries < max_retries:
             proxy = self.get_random_proxy()
-            # When fetching course pages, add a cache-buster
             request_url = self.url
-            if self.use_class_url:
-                cache_buster = f"_={int(time.time() * 1000)}"
-                sep = "&" if "?" in request_url else "?"
-                request_url = f"{request_url}{sep}{cache_buster}"
             try:
                 logger.debug("Using proxy: %s", self._sanitise_for_log(proxy))
                 response = requests.get(
@@ -139,14 +183,22 @@ class DataFetcher:
                         f"Sleeping for {wait_seconds} seconds due to 429 response"
                     )
                     time.sleep(wait_seconds)
-                    # Try another proxy for the next attempt
-                    proxy = self.get_random_proxy()
+                    retries += 1
+                    continue
+
+                if response.status_code == 404:
+                    logger.warning(f"HTTP 404 - Not Found: {request_url}")
+                    return {}
+
+                if response.status_code == 403:
+                    logger.warning(f"HTTP 403 - Forbidden for proxy: {proxy}")
+                    self.remove_proxy(proxy)
                     retries += 1
                     continue
 
                 if response.status_code != 200:
-                    logger.error(f"HTTP {response.status_code} - {response.text}")
                     # Small backoff for other HTTP errors
+                    logger.error(f"HTTP {response.status_code} - {response.text[:200]}")
                     wait_seconds = min(10, int(backoff_base**retries))
                     logger.debug(f"Waiting for {wait_seconds}s before retrying")
                     time.sleep(wait_seconds)
@@ -188,11 +240,13 @@ class DataFetcher:
                 logger.error(
                     "Proxy error with proxy: %s", self._sanitise_for_log(proxy)
                 )
+                self.remove_proxy(proxy)
                 retries += 1
                 # Reduce retry flurry by sleeping a moment
                 time.sleep(min(3, backoff_base**retries))
             except requests.exceptions.RequestException as e:
                 logger.error("Request failed: %s", self._sanitise_for_log(e))
+                self.remove_proxy(proxy)
                 retries += 1
                 time.sleep(min(3, backoff_base**retries))
             except Exception as e:

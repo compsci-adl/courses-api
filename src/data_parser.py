@@ -87,80 +87,70 @@ def get_course_codes(subject: str, year: int):
 def get_course_details(course_code: str, max_retries=3):
     """Return the details for a given course."""
     logger.debug(f"Fetching details for course {course_code}")
-    for _ in range(max_retries):
-        # Encode course code to match URL format
-        code_str = (
-            course_code[0] if isinstance(course_code, (list, tuple)) else course_code
-        )
-        encoded_course_code = re.sub(
-            r"([a-zA-Z]+)([0-9]+)", r"\1-\2", str(code_str)
-        ).lower()
+    code_str = course_code[0] if isinstance(course_code, (list, tuple)) else course_code
+    encoded_course_code = re.sub(
+        r"([a-zA-Z]+)([0-9]+)", r"\1-\2", str(code_str)
+    ).lower()
 
-        course_details = data_fetcher.DataFetcher(
-            f"/study/courses/{encoded_course_code}/", use_class_url=True
-        )
-        try:
-            data = course_details.get()
-            if course_details.last_response is None:
-                logger.error(
-                    f"No HTTP response available for {course_code}. Data: {data}"
-                )
-                # Make sure to return a dictionary with expected keys so caller won't crash
-                return {
-                    "code": code_str,
-                    "title": data.get("h1", "") if isinstance(data, dict) else "",
-                    "course_id": None,
-                }
-            if course_details.last_response.status_code != 200:
-                print(
-                    f"Error: {course_details.last_response.status_code} - "
-                    f"{course_details.last_response.text}"
-                )
-                return {}
-            # Return plain text string without extra newlines
-            text = data.get("data", "")
-
-            # Strip HTML tags
-            soup = BeautifulSoup(text, "html.parser")
-            body_text = soup.get_text() if soup else text
-
-            # Parse the plain-body text for label/value pairs
-            parsed = parse_course_text(body_text)
-
-            # Return a dict with the parsed fields and the canonical code string
-            course_details = {
-                "code": code_str,
-                "title": data.get("h1", ""),
-                "course_id": parsed.get("course_id"),
-                "campus": parsed.get("campus"),
-                "level_of_study": parsed.get("level_of_study"),
-                "units": parsed.get("units"),
-                "course_coordinator": parsed.get("course_coordinator"),
-                "course_level": parsed.get("course_level"),
-                "course_overview": parsed.get("course_overview"),
-                "prerequisites": parsed.get("prerequisites"),
-                "corequisites": parsed.get("corequisites"),
-                "antirequisites": parsed.get("antirequisites"),
-                "university_wide_elective": (
-                    True
-                    if parsed.get("university_wide_elective") == "Yes"
-                    else False
-                    if parsed.get("university_wide_elective") == "No"
-                    else parsed.get("university_wide_elective")
-                ),
-            }
-
-            logger.debug("Course details extracted successfully.")
-            return course_details
-
-        except Exception as e:
-            print(f"An error occurred while fetching course details: {e}")
-            return {}
-
-    print(
-        f"Failed to retrieve course details for course {course_code} after {max_retries} attempts."
+    course_details = data_fetcher.DataFetcher(
+        f"/study/courses/{encoded_course_code}/", use_class_url=True
     )
-    return {}
+    try:
+        data = course_details.get()
+        if (
+            course_details.last_response is None
+            or course_details.last_response.status_code != 200
+            or not data
+        ):
+            status = (
+                course_details.last_response.status_code
+                if course_details.last_response
+                else "NO_RESPONSE"
+            )
+            logger.error(
+                f"Error fetching course details for {course_code}: Status {status}"
+            )
+            return None
+
+        # Return plain text string without extra newlines
+        text = data.get("data", "")
+
+        # Strip HTML tags
+        soup = BeautifulSoup(text, "html.parser")
+        body_text = soup.get_text() if soup else text
+
+        # Parse the plain-body text for label/value pairs
+        parsed = parse_course_text(body_text)
+
+        # Return a dict with the parsed fields and the canonical code string
+        course_details = {
+            "code": code_str,
+            "title": data.get("h1", ""),
+            "course_id": parsed.get("course_id"),
+            "campus": parsed.get("campus"),
+            "level_of_study": parsed.get("level_of_study"),
+            "units": parsed.get("units"),
+            "course_coordinator": parsed.get("course_coordinator"),
+            "course_level": parsed.get("course_level"),
+            "course_overview": parsed.get("course_overview"),
+            "prerequisites": parsed.get("prerequisites"),
+            "corequisites": parsed.get("corequisites"),
+            "antirequisites": parsed.get("antirequisites"),
+            "university_wide_elective": (
+                True
+                if parsed.get("university_wide_elective") == "Yes"
+                else False
+                if parsed.get("university_wide_elective") == "No"
+                else parsed.get("university_wide_elective")
+            ),
+        }
+
+        logger.debug("Course details extracted successfully.")
+        return course_details
+
+    except Exception as e:
+        print(f"An error occurred while fetching course details for {course_code}: {e}")
+        return None
 
 
 def parse_course_text(text: str) -> dict:
@@ -234,10 +224,14 @@ def get_course_class_list(course_code: int):
             )
             print(f"Error: {status} - {text}")
             # Return a minimal dict so callers don't KeyError when accessing title/course_id
+            title = ""
+            if isinstance(data, dict):
+                title = data.get("h1", "")
             return {
                 "code": code_str,
-                "title": data.get("h1", "") if isinstance(data, dict) else "",
+                "title": title,
                 "course_id": None,
+                "classes": [],
             }
         # Use raw HTML for BeautifulSoup parsing
         text = data.get("html", "") or data.get("data", "")
