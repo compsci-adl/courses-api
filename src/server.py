@@ -454,10 +454,6 @@ def get_course(course_cid: str, db: Session = Depends(get_db)):
                     # Append each day individually
                     flattened_meeting_days.append(day)
 
-                # Skip weekend meetings
-                if any(day in flattened_meeting_days for day in ["Saturday", "Sunday"]):
-                    continue
-
                 # Create meeting entry
                 for day in flattened_meeting_days:
                     meeting_entry = {
