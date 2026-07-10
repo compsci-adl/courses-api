@@ -47,7 +47,7 @@ jobs:
         run: docker build -f scraper.Dockerfile -t courses-api-scraper:latest .
 
       - name: Run scraper
-        timeout-minutes: 30
+        timeout-minutes: 60
         run: |
           docker run --rm \
             -v ${{ github.workspace }}/src:/app/src \
