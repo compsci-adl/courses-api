@@ -235,8 +235,9 @@ def process_course(course, year, subject, engine, progress, subject_task, lock):
                 class_type = individual_class.get("component")
                 class_nbr = individual_class.get("class_number")
                 section = individual_class.get("section")
+                group_name = individual_class.get("group")
                 class_cid = get_short_hash(
-                    f"{course_cid}{class_type}{class_nbr}{section}"
+                    f"{course_cid}{class_type}{class_nbr}{section}{group_name or ''}"
                 )
                 try:
                     db_course_class = CourseClass(
@@ -246,6 +247,7 @@ def process_course(course, year, subject, engine, progress, subject_task, lock):
                         size=int(individual_class.get("size", 0)),
                         available=int(individual_class.get("available", 0)),
                         component=class_type,
+                        group=group_name,
                         course_id=course_cid,
                     )
                     write_queue.put(db_course_class)

@@ -31,6 +31,7 @@ class ClassSchema(BaseModel):
     number: str
     section: str  # Return class section
     available_seats: str
+    group: Optional[str] = None
     meetings: List[MeetingSchema]
 
 

@@ -266,11 +266,32 @@ def parse_course_class_list(text: str) -> list[dict]:
         class_info = {
             "meetings": [],
             "component": "unknown",
+            "group": None,
             "class_number": None,
             "section": None,
             "size": None,
             "available": None,
         }
+
+        # Find group name if session is inside a group container
+        group_el = session.find_parent("div", class_="cmp-course-accordion--group")
+        if group_el:
+            title_text_el = group_el.select_one(
+                ".cmp-course-accordion--group-title-text"
+            )
+            raw_group = ""
+            if title_text_el:
+                raw_group = title_text_el.get_text(strip=True)
+            else:
+                group_title_el = group_el.select_one(
+                    ".cmp-course-accordion--group-title"
+                )
+                if group_title_el:
+                    raw_group = group_title_el.get_text(strip=True)
+
+            if raw_group:
+                clean_group = re.sub(r"(?i)^group\s*", "", raw_group).strip()
+                class_info["group"] = clean_group if clean_group else raw_group
 
         # Find component name from parent container
         # session -> content -> container -> h5(title)

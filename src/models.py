@@ -91,5 +91,6 @@ class CourseClass(Base):
     size = Column(Integer, nullable=False)
     available = Column(Integer, nullable=False)
     component = Column(String, nullable=False)
+    group = Column(String, nullable=True)
     meetings = relationship("Meetings", backref="course_class")
     course_id = Column(String, ForeignKey("courses.id"), nullable=False)
