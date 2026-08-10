@@ -85,7 +85,9 @@ def get_course_codes(subject: str, year: int):
         return {"courses": []}
 
 
-def _build_course_paths(course_code: str, year: int | None = None) -> tuple[str, list[str]]:
+def _build_course_paths(
+    course_code: str, year: int | None = None
+) -> tuple[str, list[str]]:
     """Return the URL-encoded course identifier and candidate course page paths."""
     code_str = course_code[0] if isinstance(course_code, (list, tuple)) else course_code
     encoded_course_code = re.sub(
@@ -165,10 +167,14 @@ def get_course_details(course_code: str, year: int | None = None, max_retries=3)
             return course_details
 
         except Exception as e:
-            print(f"An error occurred while fetching course details for {course_code}: {e}")
+            print(
+                f"An error occurred while fetching course details for {course_code}: {e}"
+            )
             continue
 
-    logger.error(f"Failed to fetch course details for {course_code} after trying {len(paths)} paths.")
+    logger.error(
+        f"Failed to fetch course details for {course_code} after trying {len(paths)} paths."
+    )
     return None
 
 
