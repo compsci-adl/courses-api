@@ -30,6 +30,17 @@ Session = sessionmaker()
 write_queue = Queue()
 
 
+def parse_units(raw) -> int:
+    """Parse a unit value from scraped text. Default 6 if missing or non-numeric."""
+    if raw is None:
+        return 6
+    text = str(raw)
+    match = re.search(r"\d+", text)
+    if not match:
+        return 6
+    return int(match.group(0))
+
+
 def get_short_hash(content: str, even_length=12) -> str:
     """Generates a short hash from the given content using the shake_256 algorithm."""
     return shake_256(content.encode("utf8")).hexdigest(even_length // 2)
@@ -109,7 +120,7 @@ def process_course(course, year, subject, engine, progress, subject_task, lock):
                 title=title,
                 campus=join_str_if_iterable(campus),
                 level_of_study=course_details.get("level_of_study", "N/A"),
-                units=int(course_details.get("unit_value", "6")),
+                units=parse_units(course_details.get("units")),
                 course_coordinator=course_details.get("course_coordinator", "N/A"),
                 course_level=course_details.get("course_level", "N/A"),
                 course_overview=course_details.get("course_overview", "N/A"),
