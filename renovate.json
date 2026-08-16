@@ -1,0 +1,76 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "docker:pinDigests",
+    "helpers:pinGitHubActionDigests",
+    ":pinDevDependencies",
+    ":maintainLockFilesWeekly"
+  ],
+  "configMigration": true,
+  "automerge": true,
+  "automergeType": "pr",
+  "autoApprove": true,
+  "prConcurrentLimit": 1,
+  "prHourlyLimit": 0,
+  "separateMinorPatch": false,
+  "separateMultipleMajor": false,
+  "packageRules": [
+    {
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["major"],
+      "groupName": "GitHub Actions updates",
+      "groupSlug": "github-actions-major-updates",
+      "minimumReleaseAge": "7 days"
+    },
+    {
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["pin"],
+      "groupName": "GitHub Actions updates",
+      "groupSlug": "github-actions-pin-updates",
+      "minimumReleaseAge": "3 days"
+    },
+    {
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["security"],
+      "groupName": "GitHub Actions updates",
+      "groupSlug": "github-actions-security-updates"
+    },
+    {
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "enabled": false
+    },
+    {
+      "matchManagers": ["pep621", "pep723", "pre-commit"],
+      "matchUpdateTypes": ["security", "pin"],
+      "groupName": "python updates",
+      "groupSlug": "python-security-updates"
+    },
+    {
+      "matchManagers": ["pep621", "pep723", "pre-commit"],
+      "matchUpdateTypes": ["major", "minor", "patch", "digest"],
+      "enabled": false
+    },
+    {
+      "matchDatasources": ["docker"],
+      "matchUpdateTypes": ["security", "pin"],
+      "groupName": "docker updates",
+      "groupSlug": "docker-security-updates"
+    },
+    {
+      "matchDatasources": ["docker"],
+      "matchUpdateTypes": ["major", "minor", "patch", "digest"],
+      "enabled": false
+    }
+  ],
+  "pep723": {
+    "managerFilePatterns": [
+      "/(^|/)[^/]*\\.py$/"
+    ]
+  },
+  "vulnerabilityAlerts": {
+    "enabled": true
+  },
+  "osvVulnerabilityAlerts": true
+}
