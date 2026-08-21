@@ -63,6 +63,21 @@ def join_str_if_iterable(value):
     return str(value)
 
 
+def parse_units(value, default: int = 6) -> int:
+    """Parse a scraped unit value into an int.
+
+    The scraped text can contain non-digit characters (e.g. "3 units"
+    instead of a bare "3"), so only the leading run of digits is used.
+    Falls back to `default` if `value` is missing or contains no digits.
+    """
+    if value is None:
+        return default
+    match = re.search(r"\d+", str(value))
+    if not match:
+        return default
+    return int(match.group())
+
+
 def process_course(course, year, subject, engine, progress, subject_task, lock):
     """Process a single course and insert data into the database."""
     try:
@@ -109,7 +124,7 @@ def process_course(course, year, subject, engine, progress, subject_task, lock):
                 title=title,
                 campus=join_str_if_iterable(campus),
                 level_of_study=course_details.get("level_of_study", "N/A"),
-                units=int(course_details.get("unit_value", "6")),
+                units=parse_units(course_details.get("units")),
                 course_coordinator=course_details.get("course_coordinator", "N/A"),
                 course_level=course_details.get("course_level", "N/A"),
                 course_overview=course_details.get("course_overview", "N/A"),
