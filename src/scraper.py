@@ -72,7 +72,7 @@ def process_course(course, year, subject, engine, progress, subject_task, lock):
             print(f"Skipping course with missing code: {course}")
             progress.update(subject_task, advance=1)
             return
-        course_details = data_parser.get_course_details(course_code)
+        course_details = data_parser.get_course_details(course_code, year=year)
         if not course_details:
             logger.error(
                 f"Failed to fetch course details for {course_code}. Skipping course."
@@ -97,6 +97,10 @@ def process_course(course, year, subject, engine, progress, subject_task, lock):
         ).lower()
 
         try:
+            course_url = course_details.get(
+                "url",
+                f"https://adelaideuni.edu.au/study/courses/{year}/{encoded_course_code}/",
+            )
             db_course = Course(
                 id=course_cid,
                 course_id=course_details.get("course_id", 0),
@@ -119,7 +123,7 @@ def process_course(course, year, subject, engine, progress, subject_task, lock):
                 university_wide_elective=course_details.get(
                     "university_wide_elective", False
                 ),
-                url="https://adelaideuni.edu.au/study/courses/" + encoded_course_code,
+                url=course_url,
                 course_outline_url=None,
             )
 
@@ -226,7 +230,7 @@ def process_course(course, year, subject, engine, progress, subject_task, lock):
             return
 
         if terms:
-            class_list = data_parser.get_course_class_list(course_code)
+            class_list = data_parser.get_course_class_list(course_code, year=year)
             class_items = (
                 class_list.get("classes", []) if isinstance(class_list, dict) else []
             )
