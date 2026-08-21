@@ -82,6 +82,7 @@ class CourseSchema(BaseModel):
     course_coordinator: Optional[str] = None
     course_overview: str
     level_of_study: str
+    course_level: str
     course_outline_url: Optional[str] = None
     learning_outcomes: Optional[List[LearningOutcomeSchema]] = None
     textbooks: Optional[str] = None
