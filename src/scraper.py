@@ -97,10 +97,6 @@ def process_course(course, year, subject, engine, progress, subject_task, lock):
         ).lower()
 
         try:
-            course_url = course_details.get(
-                "url",
-                f"https://adelaideuni.edu.au/study/courses/{year}/{encoded_course_code}/",
-            )
             db_course = Course(
                 id=course_cid,
                 course_id=course_details.get("course_id", 0),
@@ -123,7 +119,10 @@ def process_course(course, year, subject, engine, progress, subject_task, lock):
                 university_wide_elective=course_details.get(
                     "university_wide_elective", False
                 ),
-                url=course_url,
+                url=course_details.get(
+                    "url",
+                    f"https://adelaideuni.edu.au/study/courses/{year}/{encoded_course_code}/",
+                ),
                 course_outline_url=None,
             )
 
