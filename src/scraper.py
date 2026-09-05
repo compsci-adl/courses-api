@@ -121,7 +121,7 @@ def process_course(course, year, subject, engine, progress, subject_task, lock):
                 ),
                 url=course_details.get(
                     "url",
-                    f"https://adelaideuni.edu.au/study/courses/{year}/{encoded_course_code}/",
+                    f"https://adelaide.edu.au/study/courses/{year}/{encoded_course_code}/",
                 ),
                 course_outline_url=None,
             )

@@ -22,7 +22,7 @@ class DataFetcher:
     """
 
     BASE_URL = "https://uosa-search.funnelback.squiz.cloud/s/search.html"
-    BASE_INFO_URL = "https://adelaideuni.edu.au"
+    BASE_INFO_URL = "https://adelaide.edu.au"
     PROXY_FILE = "src/working_proxies.txt"
 
     # Global proxy list and lock to share working proxies across all scraper threads

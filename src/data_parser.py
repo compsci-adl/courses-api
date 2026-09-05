@@ -1,5 +1,4 @@
 import re
-from datetime import datetime
 
 from bs4 import BeautifulSoup
 
@@ -95,8 +94,13 @@ def _build_course_paths(
     ).lower()
 
     if year is None:
-        year = datetime.now().year
+        return encoded_course_code, [f"/study/courses/{encoded_course_code}/"]
 
+    # The year-specific page is tried first; the undated page is only a fallback
+    # for transient failures. A 404 on the year page means the course is not
+    # offered that year, and callers must stop rather than fall back - the
+    # undated page serves whichever year the course is next offered in, which
+    # would file the course under a year it is not actually offered in.
     paths = [
         f"/study/courses/{year}/{encoded_course_code}/",
         f"/study/courses/{encoded_course_code}/",
@@ -124,6 +128,11 @@ def get_course_details(course_code: str, year: int | None = None, max_retries=3)
                     if course_details.last_response
                     else "NO_RESPONSE"
                 )
+                if status == 404 and year is not None:
+                    logger.info(
+                        f"Course {course_code} is not offered in {year}: {path} returned 404. Skipping."
+                    )
+                    return None
                 logger.warning(
                     f"Course detail path failed for {course_code}: {path} status={status}"
                 )
@@ -223,6 +232,7 @@ def get_course_class_list(course_code: int, year: int | None = None):
     code_str = course_code[0] if isinstance(course_code, (list, tuple)) else course_code
     _, paths = _build_course_paths(course_code, year)
 
+    data = None
     for path in paths:
         course_details = data_fetcher.DataFetcher(path, use_class_url=True)
         try:
@@ -236,6 +246,11 @@ def get_course_class_list(course_code: int, year: int | None = None):
                     if course_details.last_response
                     else "NO_RESPONSE"
                 )
+                if status == 404 and year is not None:
+                    logger.info(
+                        f"Course {course_code} is not offered in {year}: {path} returned 404. Skipping."
+                    )
+                    break
                 logger.warning(
                     f"Course class path failed for {course_code}: {path} status={status}"
                 )

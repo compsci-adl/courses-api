@@ -23,7 +23,7 @@ def fetch_proxies(url):
 
 def test_proxy(
     proxy,
-    test_url="https://adelaideuni.edu.au/study/courses/",
+    test_url="https://adelaide.edu.au/study/courses/",
     timeout=5,
     retries=2,  # Number of retries
 ):
