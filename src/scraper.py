@@ -83,6 +83,9 @@ def process_course(course, year, subject, engine, progress, subject_task, lock):
         name = subject["subject"]
         title = course_details.get("title", "")
         terms = course.get("terms")
+        class_list = data_parser.get_course_class_list(course_code, year=year)
+        if not terms and isinstance(class_list, dict):
+            terms = class_list.get("terms")
         campus = course_details.get("campus")
 
         # Course Custom ID
@@ -221,73 +224,69 @@ def process_course(course, year, subject, engine, progress, subject_task, lock):
                     )
 
             write_queue.put(db_course)
-
-            write_queue.put(db_course)
         except Exception as e:
             print(f"Error inserting course {course_code}: {e}")
             progress.update(subject_task, advance=1)
             return
 
-        if terms:
-            class_list = data_parser.get_course_class_list(course_code, year=year)
-            class_items = (
-                class_list.get("classes", []) if isinstance(class_list, dict) else []
+        class_items = (
+            class_list.get("classes", []) if isinstance(class_list, dict) else []
+        )
+
+        for individual_class in class_items:
+            class_type = individual_class.get("component")
+            class_nbr = individual_class.get("class_number")
+            section = individual_class.get("section")
+            group_name = individual_class.get("group")
+            class_cid = get_short_hash(
+                f"{course_cid}{class_type}{class_nbr}{section}{group_name or ''}"
             )
-
-            for individual_class in class_items:
-                class_type = individual_class.get("component")
-                class_nbr = individual_class.get("class_number")
-                section = individual_class.get("section")
-                group_name = individual_class.get("group")
-                class_cid = get_short_hash(
-                    f"{course_cid}{class_type}{class_nbr}{section}{group_name or ''}"
+            try:
+                db_course_class = CourseClass(
+                    id=class_cid,
+                    class_nbr=class_nbr,
+                    section=section,
+                    size=int(individual_class.get("size", 0)),
+                    available=int(individual_class.get("available", 0)),
+                    component=class_type,
+                    group=group_name,
+                    course_id=course_cid,
                 )
-                try:
-                    db_course_class = CourseClass(
-                        id=class_cid,
-                        class_nbr=class_nbr,
-                        section=section,
-                        size=int(individual_class.get("size", 0)),
-                        available=int(individual_class.get("available", 0)),
-                        component=class_type,
-                        group=group_name,
-                        course_id=course_cid,
-                    )
-                    write_queue.put(db_course_class)
-                except Exception as e:
-                    print(f"Error inserting class for course {course_code}: {e}")
-                    print(individual_class)
+                write_queue.put(db_course_class)
+            except Exception as e:
+                print(f"Error inserting class for course {course_code}: {e}")
+                print(individual_class)
 
-                meetings = individual_class.get("meetings", [])
-                for meeting in meetings:
-                    try:
-                        meeting_cid = get_short_hash(
-                            f"{class_cid}{meeting.get('dates')}{meeting.get('days')}{meeting.get('time')}{meeting.get('campus')}{meeting.get('location')}"
-                        )
-                        # Extract start and end time from time string
-                        time_str = meeting.get("time", "")
-                        start_time = (
-                            time_str.split("-")[0].strip() if "-" in time_str else ""
-                        )
-                        end_time = (
-                            time_str.split("-")[1].strip() if "-" in time_str else ""
-                        )
-                        db_meeting = Meetings(
-                            id=meeting_cid,
-                            dates=meeting.get("dates", ""),
-                            days=meeting.get("days", ""),
-                            start_time=start_time,
-                            end_time=end_time,
-                            campus=meeting.get("campus", ""),
-                            location=meeting.get("location", ""),
-                            instructor=meeting.get("instructor"),
-                            course_class_id=class_cid,
-                        )
-                        write_queue.put(db_meeting)
-                    except Exception as e:
-                        print(
-                            f"Error inserting meeting for class {class_nbr} of course {course_code}: {e}"
-                        )
+            meetings = individual_class.get("meetings", [])
+            for meeting in meetings:
+                try:
+                    meeting_cid = get_short_hash(
+                        f"{class_cid}{meeting.get('dates')}{meeting.get('days')}{meeting.get('time')}{meeting.get('campus')}{meeting.get('location')}"
+                    )
+                    # Extract start and end time from time string
+                    time_str = meeting.get("time", "")
+                    start_time = (
+                        time_str.split("-")[0].strip() if "-" in time_str else ""
+                    )
+                    end_time = (
+                        time_str.split("-")[1].strip() if "-" in time_str else ""
+                    )
+                    db_meeting = Meetings(
+                        id=meeting_cid,
+                        dates=meeting.get("dates", ""),
+                        days=meeting.get("days", ""),
+                        start_time=start_time,
+                        end_time=end_time,
+                        campus=meeting.get("campus", ""),
+                        location=meeting.get("location", ""),
+                        instructor=meeting.get("instructor"),
+                        course_class_id=class_cid,
+                    )
+                    write_queue.put(db_meeting)
+                except Exception as e:
+                    print(
+                        f"Error inserting meeting for class {class_nbr} of course {course_code}: {e}"
+                    )
 
         progress.update(subject_task, advance=1)
 
