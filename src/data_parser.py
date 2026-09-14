@@ -224,7 +224,6 @@ def parse_course_text(text: str) -> dict:
 
 def get_course_class_list(course_code: int, year: int | None = None):
     """Return the class list of a course for a given course code."""
-    code_str = course_code[0] if isinstance(course_code, (list, tuple)) else course_code
     _, paths = _build_course_paths(course_code, year)
 
     data = None
