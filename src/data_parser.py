@@ -232,7 +232,10 @@ def get_course_class_list(course_code: int, year: int | None = None):
         course_details = data_fetcher.DataFetcher(path, use_class_url=True)
         try:
             data = course_details.get()
-            if isinstance(data, dict) and data.get("h1", "").lower() == "page not found":
+            if (
+                isinstance(data, dict)
+                and data.get("h1", "").lower() == "page not found"
+            ):
                 logger.info(f"Course {course_code} returned a soft 404 at {path}.")
                 break
             if (
@@ -264,11 +267,14 @@ def get_course_class_list(course_code: int, year: int | None = None):
                 ".cmp-course-accordion__title"
             ):
                 title_text = title.get_text(" ", strip=True)
-                if re.search(
-                    r"\b(?:semester|summer|winter|trimester)\b",
-                    title_text,
-                    re.IGNORECASE,
-                ) and title_text not in terms:
+                if (
+                    re.search(
+                        r"\b(?:semester|summer|winter|trimester)\b",
+                        title_text,
+                        re.IGNORECASE,
+                    )
+                    and title_text not in terms
+                ):
                     terms.append(title_text)
             return {"classes": parsed_classes, "terms": terms}
 

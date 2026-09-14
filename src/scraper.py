@@ -268,9 +268,7 @@ def process_course(course, year, subject, engine, progress, subject_task, lock):
                     start_time = (
                         time_str.split("-")[0].strip() if "-" in time_str else ""
                     )
-                    end_time = (
-                        time_str.split("-")[1].strip() if "-" in time_str else ""
-                    )
+                    end_time = time_str.split("-")[1].strip() if "-" in time_str else ""
                     db_meeting = Meetings(
                         id=meeting_cid,
                         dates=meeting.get("dates", ""),
