@@ -24,9 +24,11 @@ class DataFetcher:
     BASE_URL = "https://uosa-search.funnelback.squiz.cloud/s/search.html"
     BASE_INFO_URL = "https://adelaide.edu.au"
     PROXY_FILE = "src/working_proxies.txt"
+    MAX_PROXY_FAILURES = 3
 
     # Global proxy list and lock to share working proxies across all scraper threads
     _proxies = None
+    _proxy_failures = {}
     _proxy_lock = threading.Lock()
 
     @staticmethod
@@ -86,6 +88,8 @@ class DataFetcher:
             return None
         with DataFetcher._proxy_lock:
             if not DataFetcher._proxies:
+                DataFetcher._proxies = self.load_proxies()
+            if not DataFetcher._proxies:
                 logger.warning("No proxies available. Proceeding without a proxy.")
                 return None
             proxy = random.choice(DataFetcher._proxies)
@@ -95,16 +99,24 @@ class DataFetcher:
         }
 
     def remove_proxy(self, proxy: dict) -> None:
-        """Remove a bad/blocked proxy from the global list."""
+        """Retire a proxy after repeated failures."""
         if not proxy:
             return
         proxy_str = proxy.get("http", "").replace("http://", "")
         if not proxy_str:
             return
         with DataFetcher._proxy_lock:
+            failures = DataFetcher._proxy_failures.get(proxy_str, 0) + 1
+            DataFetcher._proxy_failures[proxy_str] = failures
+            if failures < self.MAX_PROXY_FAILURES:
+                logger.info(
+                    f"Proxy failure {failures}/{self.MAX_PROXY_FAILURES}: {proxy_str}"
+                )
+                return
             if DataFetcher._proxies and proxy_str in DataFetcher._proxies:
                 try:
                     DataFetcher._proxies.remove(proxy_str)
+                    DataFetcher._proxy_failures.pop(proxy_str, None)
                     logger.info(
                         f"Removed bad proxy: {proxy_str}. Remaining proxies: {len(DataFetcher._proxies)}"
                     )
@@ -194,6 +206,7 @@ class DataFetcher:
                     logger.warning(f"HTTP 403 - Forbidden for proxy: {proxy}")
                     self.remove_proxy(proxy)
                     retries += 1
+                    time.sleep(min(10, int(backoff_base**retries)))
                     continue
 
                 if response.status_code != 200:
