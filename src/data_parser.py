@@ -96,16 +96,7 @@ def _build_course_paths(
     if year is None:
         return encoded_course_code, [f"/study/courses/{encoded_course_code}/"]
 
-    # The year-specific page is tried first; the undated page is only a fallback
-    # for transient failures. A 404 on the year page means the course is not
-    # offered that year, and callers must stop rather than fall back - the
-    # undated page serves whichever year the course is next offered in, which
-    # would file the course under a year it is not actually offered in.
-    paths = [
-        f"/study/courses/{year}/{encoded_course_code}/",
-        f"/study/courses/{encoded_course_code}/",
-    ]
-    return encoded_course_code, paths
+    return encoded_course_code, [f"/study/courses/{year}/{encoded_course_code}/"]
 
 
 def get_course_details(course_code: str, year: int | None = None, max_retries=3):
@@ -137,6 +128,10 @@ def get_course_details(course_code: str, year: int | None = None, max_retries=3)
                     f"Course detail path failed for {course_code}: {path} status={status}"
                 )
                 continue
+
+            if data.get("h1", "").lower() == "page not found":
+                logger.info(f"Course {course_code} returned a soft 404 at {path}.")
+                return None
 
             # Return plain text string without extra newlines
             text = data.get("data", "")
@@ -237,6 +232,9 @@ def get_course_class_list(course_code: int, year: int | None = None):
         course_details = data_fetcher.DataFetcher(path, use_class_url=True)
         try:
             data = course_details.get()
+            if isinstance(data, dict) and data.get("h1", "").lower() == "page not found":
+                logger.info(f"Course {course_code} returned a soft 404 at {path}.")
+                break
             if (
                 course_details.last_response is None
                 or course_details.last_response.status_code != 200
@@ -261,21 +259,24 @@ def get_course_class_list(course_code: int, year: int | None = None):
 
             # Parse the plain-body text for class list details
             parsed_classes = parse_course_class_list(text)
-            return {"classes": parsed_classes}
+            terms = []
+            for title in BeautifulSoup(text, "html.parser").select(
+                ".cmp-course-accordion__title"
+            ):
+                title_text = title.get_text(" ", strip=True)
+                if re.search(
+                    r"\b(?:semester|summer|winter|trimester)\b",
+                    title_text,
+                    re.IGNORECASE,
+                ) and title_text not in terms:
+                    terms.append(title_text)
+            return {"classes": parsed_classes, "terms": terms}
 
         except Exception as e:
             print(f"An error occurred while fetching course class list: {e}")
             continue
 
-    title = ""
-    if isinstance(data, dict):
-        title = data.get("h1", "")
-    return {
-        "code": code_str,
-        "title": title,
-        "course_id": None,
-        "classes": [],
-    }
+    return {"classes": []}
 
 
 def parse_course_class_list(text: str) -> list[dict]:
