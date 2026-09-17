@@ -238,7 +238,9 @@ def process_course(course, year, subject, engine, progress, subject_task, lock):
             progress.update(subject_task, advance=1)
             return
 
-        class_list = data_parser.get_course_class_list(course_code, year=year)
+        class_list = data_parser.get_course_class_list(
+            course_code, year=year, raw_html=course_details.get("html")
+        )
         class_items = (
             class_list.get("classes", []) if isinstance(class_list, dict) else []
         )
@@ -326,7 +328,7 @@ def process_subject(subject, year, engine, progress, all_task, lock):
         progress.update(subject_task, total=len(course_list))
 
         # Process each course concurrently
-        with ThreadPoolExecutor(max_workers=50) as executor:
+        with ThreadPoolExecutor(max_workers=10) as executor:
             futures = []
             for course in course_list:
                 future = executor.submit(
@@ -391,7 +393,7 @@ def main():
         )
 
         # Create a thread pool with multiple threads
-        with ThreadPoolExecutor(max_workers=50) as executor:
+        with ThreadPoolExecutor(max_workers=10) as executor:
             futures = []
             for subject in subjects["subjects"]:
                 future = executor.submit(

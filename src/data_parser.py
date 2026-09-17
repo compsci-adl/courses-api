@@ -174,6 +174,7 @@ def get_course_details(course_code: str, year: int | str | None = None):
                 else parsed.get("university_wide_elective")
             ),
             "terms": terms if terms else None,
+            "html": raw_html,
         }
 
         logger.debug("Course details extracted successfully.")
@@ -224,8 +225,15 @@ def parse_course_text(text: str) -> dict:
     return parsed
 
 
-def get_course_class_list(course_code: int | str, year: int | str | None = None):
+def get_course_class_list(
+    course_code: int | str,
+    year: int | str | None = None,
+    raw_html: str | None = None,
+):
     """Return the class list of a course for a given course code."""
+    if raw_html:
+        parsed_classes = parse_course_class_list(raw_html)
+        return {"classes": parsed_classes}
 
     # Encode course code to match URL format
     code_str = course_code[0] if isinstance(course_code, (list, tuple)) else course_code

@@ -87,7 +87,7 @@ def main():
         task = progress.add_task("Testing Proxies...", total=len(proxies))
 
         # Use ThreadPoolExecutor for concurrency
-        with ThreadPoolExecutor(max_workers=1000) as executor:
+        with ThreadPoolExecutor(max_workers=100) as executor:
             future_to_proxy = {
                 executor.submit(test_proxy, proxy): proxy for proxy in proxies
             }
