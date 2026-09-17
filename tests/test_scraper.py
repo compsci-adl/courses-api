@@ -10,6 +10,7 @@ contain non-digit text (e.g. "3 units"), which crashed a bare
 
 import os
 import sys
+import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -35,3 +36,24 @@ def test_parse_units_unparseable_falls_back_to_default():
 
 def test_parse_units_custom_default():
     assert parse_units(None, default=0) == 0
+
+
+class TestScraper(unittest.TestCase):
+    def test_parse_units_plain_digits(self):
+        test_parse_units_plain_digits()
+
+    def test_parse_units_with_trailing_text(self):
+        test_parse_units_with_trailing_text()
+
+    def test_parse_units_missing_falls_back_to_default(self):
+        test_parse_units_missing_falls_back_to_default()
+
+    def test_parse_units_unparseable_falls_back_to_default(self):
+        test_parse_units_unparseable_falls_back_to_default()
+
+    def test_parse_units_custom_default(self):
+        test_parse_units_custom_default()
+
+
+if __name__ == "__main__":
+    unittest.main()

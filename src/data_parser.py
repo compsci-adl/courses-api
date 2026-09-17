@@ -84,7 +84,7 @@ def get_course_codes(subject: str, year: int):
         return {"courses": []}
 
 
-def get_course_details(course_code: str, max_retries=3):
+def get_course_details(course_code: str, year: int | str | None = None):
     """Return the details for a given course."""
     logger.debug(f"Fetching details for course {course_code}")
     code_str = course_code[0] if isinstance(course_code, (list, tuple)) else course_code
@@ -92,24 +92,39 @@ def get_course_details(course_code: str, max_retries=3):
         r"([a-zA-Z]+)([0-9]+)", r"\1-\2", str(code_str)
     ).lower()
 
-    course_details = data_fetcher.DataFetcher(
-        f"/study/courses/{encoded_course_code}/", use_class_url=True
+    endpoint = (
+        f"/study/courses/{year}/{encoded_course_code}/"
+        if year
+        else f"/study/courses/{encoded_course_code}/"
     )
+    course_details = data_fetcher.DataFetcher(endpoint, use_class_url=True)
     try:
         data = course_details.get()
         if (
             course_details.last_response is None
             or course_details.last_response.status_code != 200
             or not data
+            or (
+                isinstance(data, dict)
+                and data.get("h1", "").lower() == "page not found"
+            )
         ):
             status = (
                 course_details.last_response.status_code
                 if course_details.last_response
                 else "NO_RESPONSE"
             )
-            logger.error(
-                f"Error fetching course details for {course_code}: Status {status}"
-            )
+            if status == 404 or (
+                isinstance(data, dict)
+                and data.get("h1", "").lower() == "page not found"
+            ):
+                logger.info(
+                    f"Course {course_code} is not offered for year {year} (404 Not Found)."
+                )
+            else:
+                logger.error(
+                    f"Error fetching course details for {course_code}: Status {status}"
+                )
             return None
 
         # Return plain text string without extra newlines
@@ -121,6 +136,21 @@ def get_course_details(course_code: str, max_retries=3):
 
         # Parse the plain-body text for label/value pairs
         parsed = parse_course_text(body_text)
+
+        # Extract terms from raw HTML accordion titles if present
+        raw_html = data.get("html", "")
+        terms = []
+        if raw_html:
+            html_soup = BeautifulSoup(raw_html, "html.parser")
+            for el in html_soup.select(".cmp-course-accordion__title"):
+                txt = el.get_text(strip=True)
+                if re.search(
+                    r"^(Semester|Trimester|Term|Summer|Winter|Spring|Autumn)\b",
+                    txt,
+                    re.I,
+                ):
+                    if txt not in terms:
+                        terms.append(txt)
 
         # Return a dict with the parsed fields and the canonical code string
         course_details = {
@@ -143,6 +173,7 @@ def get_course_details(course_code: str, max_retries=3):
                 if parsed.get("university_wide_elective") == "No"
                 else parsed.get("university_wide_elective")
             ),
+            "terms": terms if terms else None,
         }
 
         logger.debug("Course details extracted successfully.")
@@ -193,7 +224,7 @@ def parse_course_text(text: str) -> dict:
     return parsed
 
 
-def get_course_class_list(course_code: int):
+def get_course_class_list(course_code: int | str, year: int | str | None = None):
     """Return the class list of a course for a given course code."""
 
     # Encode course code to match URL format
@@ -202,27 +233,41 @@ def get_course_class_list(course_code: int):
         r"([a-zA-Z]+)([0-9]+)", r"\1-\2", str(code_str)
     ).lower()
 
-    course_details = data_fetcher.DataFetcher(
-        f"/study/courses/{encoded_course_code}/", use_class_url=True
+    endpoint = (
+        f"/study/courses/{year}/{encoded_course_code}/"
+        if year
+        else f"/study/courses/{encoded_course_code}/"
     )
+    course_details = data_fetcher.DataFetcher(endpoint, use_class_url=True)
 
     try:
         data = course_details.get()
         if (
             course_details.last_response is None
             or course_details.last_response.status_code != 200
+            or not data
+            or (
+                isinstance(data, dict)
+                and data.get("h1", "").lower() == "page not found"
+            )
         ):
             status = (
                 course_details.last_response.status_code
                 if course_details.last_response
                 else "NO_RESPONSE"
             )
-            text = (
-                course_details.last_response.text
-                if course_details.last_response
-                else ""
-            )
-            print(f"Error: {status} - {text}")
+            if status != 404 and not (
+                isinstance(data, dict)
+                and data.get("h1", "").lower() == "page not found"
+            ):
+                text = (
+                    course_details.last_response.text
+                    if course_details.last_response
+                    else ""
+                )
+                logger.error(
+                    f"Error fetching class list for {course_code}: Status {status} - {text[:200]}"
+                )
             # Return a minimal dict so callers don't KeyError when accessing title/course_id
             title = ""
             if isinstance(data, dict):
