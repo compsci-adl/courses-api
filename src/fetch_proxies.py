@@ -23,7 +23,7 @@ def fetch_proxies(url):
 
 def test_proxy(
     proxy,
-    test_url="https://adelaideuni.edu.au/study/courses/",
+    test_url="https://adelaide.edu.au/study/courses/",
     timeout=5,
     retries=2,  # Number of retries
 ):
@@ -62,8 +62,19 @@ def save_working_proxies(proxies, filename="src/working_proxies.txt"):
 
 
 def main():
-    proxy_url = "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/refs/heads/master/http.txt"
-    proxies = fetch_proxies(proxy_url)
+    proxy_urls = [
+        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/refs/heads/master/http.txt",
+        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
+        "https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt",
+    ]
+    proxies = []
+    for url in proxy_urls:
+        try:
+            proxies.extend(fetch_proxies(url))
+        except Exception:
+            pass
+    # Deduplicate proxies while preserving order
+    proxies = list(dict.fromkeys(proxies))
 
     working_proxies = []
 

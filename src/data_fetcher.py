@@ -22,11 +22,12 @@ class DataFetcher:
     """
 
     BASE_URL = "https://uosa-search.funnelback.squiz.cloud/s/search.html"
-    BASE_INFO_URL = "https://adelaideuni.edu.au"
+    BASE_INFO_URL = "https://adelaide.edu.au"
     PROXY_FILE = "src/working_proxies.txt"
 
-    # Global proxy list and lock to share working proxies across all scraper threads
+    MAX_PROXY_FAILURES = 3
     _proxies = None
+    _proxy_failures = {}
     _proxy_lock = threading.Lock()
 
     @staticmethod
@@ -81,10 +82,13 @@ class DataFetcher:
             return []
 
     def get_random_proxy(self) -> dict:
-        """Get a random proxy from the loaded list."""
+        """Get a random proxy from the loaded list. Reloads from file if empty."""
         if not self.use_proxy:
             return None
         with DataFetcher._proxy_lock:
+            if not DataFetcher._proxies:
+                DataFetcher._proxies = self.load_proxies()
+                DataFetcher._proxy_failures.clear()
             if not DataFetcher._proxies:
                 logger.warning("No proxies available. Proceeding without a proxy.")
                 return None
@@ -94,22 +98,43 @@ class DataFetcher:
             "https": f"http://{proxy}",
         }
 
-    def remove_proxy(self, proxy: dict) -> None:
-        """Remove a bad/blocked proxy from the global list."""
+    def report_proxy_failure(self, proxy: dict, fatal: bool = False) -> None:
+        """Record a failure for a proxy. Remove it only if it exceeds MAX_PROXY_FAILURES or fatal is True."""
         if not proxy:
             return
         proxy_str = proxy.get("http", "").replace("http://", "")
         if not proxy_str:
             return
         with DataFetcher._proxy_lock:
-            if DataFetcher._proxies and proxy_str in DataFetcher._proxies:
-                try:
-                    DataFetcher._proxies.remove(proxy_str)
-                    logger.info(
-                        f"Removed bad proxy: {proxy_str}. Remaining proxies: {len(DataFetcher._proxies)}"
-                    )
-                except ValueError:
-                    pass
+            count = DataFetcher._proxy_failures.get(proxy_str, 0) + 1
+            DataFetcher._proxy_failures[proxy_str] = count
+            if fatal or count >= self.MAX_PROXY_FAILURES:
+                if DataFetcher._proxies and proxy_str in DataFetcher._proxies:
+                    try:
+                        DataFetcher._proxies.remove(proxy_str)
+                        logger.info(
+                            f"Removed bad proxy: {proxy_str} (failures: {count}). Remaining: {len(DataFetcher._proxies)}"
+                        )
+                    except ValueError:
+                        pass
+            else:
+                logger.debug(
+                    f"Proxy {proxy_str} failure count: {count}/{self.MAX_PROXY_FAILURES}"
+                )
+
+    def report_proxy_success(self, proxy: dict) -> None:
+        """Reset the failure count for a working proxy."""
+        if not proxy:
+            return
+        proxy_str = proxy.get("http", "").replace("http://", "")
+        if not proxy_str:
+            return
+        with DataFetcher._proxy_lock:
+            DataFetcher._proxy_failures.pop(proxy_str, None)
+
+    def remove_proxy(self, proxy: dict) -> None:
+        """Explicitly remove a proxy (fatal failure)."""
+        self.report_proxy_failure(proxy, fatal=True)
 
     def get(self, max_retries: int = 50) -> dict:
         """Fetch data from the API, handling retries and rate-limiting."""
@@ -169,41 +194,53 @@ class DataFetcher:
                 if response.status_code == 429:
                     # Handle rate limiting properly, use Retry-After if available
                     logger.warning("HTTP 429 - Too Many Requests.")
+                    self.report_proxy_failure(proxy)
                     retry_after = response.headers.get("Retry-After")
                     if retry_after:
                         try:
                             wait_seconds = int(retry_after)
                         except ValueError:
-                            # Retry-After may be a HTTP-date; fall back to default
-                            wait_seconds = min(60, int(backoff_base**retries))
+                            wait_seconds = min(60, max(5, int(backoff_base**retries)))
                     else:
-                        wait_seconds = min(60, int(backoff_base**retries))
+                        wait_seconds = min(
+                            60, max(5, int(backoff_base**retries))
+                        ) + random.uniform(1.0, 3.0)
 
                     logger.warning(
-                        f"Sleeping for {wait_seconds} seconds due to 429 response"
+                        f"Sleeping for {wait_seconds:.1f}s due to 429 response"
                     )
                     time.sleep(wait_seconds)
                     retries += 1
                     continue
 
                 if response.status_code == 404:
+                    self.report_proxy_success(proxy)
                     logger.warning(f"HTTP 404 - Not Found: {request_url}")
                     return {}
 
                 if response.status_code == 403:
                     logger.warning(f"HTTP 403 - Forbidden for proxy: {proxy}")
-                    self.remove_proxy(proxy)
+                    self.report_proxy_failure(proxy, fatal=True)
                     retries += 1
+                    time.sleep(
+                        min(3.0, backoff_base**retries) + random.uniform(0.5, 1.5)
+                    )
                     continue
 
                 if response.status_code != 200:
                     # Small backoff for other HTTP errors
                     logger.error(f"HTTP {response.status_code} - {response.text[:200]}")
-                    wait_seconds = min(10, int(backoff_base**retries))
-                    logger.debug(f"Waiting for {wait_seconds}s before retrying")
+                    self.report_proxy_failure(proxy)
+                    wait_seconds = min(10, int(backoff_base**retries)) + random.uniform(
+                        0.5, 1.5
+                    )
+                    logger.debug(f"Waiting for {wait_seconds:.1f}s before retrying")
                     time.sleep(wait_seconds)
                     retries += 1
                     continue
+
+                # Proxy succeeded
+                self.report_proxy_success(proxy)
 
                 # If using Funnelback (search), parse as JSON and return the response dict.
                 if not self.use_class_url:
@@ -213,6 +250,9 @@ class DataFetcher:
                             f"Funnelback API Error: {resp.get('error', 'Unknown error')}"
                         )
                         retries += 1
+                        time.sleep(
+                            min(3.0, backoff_base**retries) + random.uniform(0.5, 1.0)
+                        )
                         continue
                     self.data = resp.get("response", {})
                     return self.data
@@ -237,22 +277,22 @@ class DataFetcher:
                     return self.data
 
             except requests.exceptions.ProxyError:
-                logger.error(
+                logger.warning(
                     "Proxy error with proxy: %s", self._sanitise_for_log(proxy)
                 )
-                self.remove_proxy(proxy)
+                self.report_proxy_failure(proxy)
                 retries += 1
-                # Reduce retry flurry by sleeping a moment
-                time.sleep(min(3, backoff_base**retries))
+                time.sleep(min(3.0, backoff_base**retries) + random.uniform(0.5, 1.5))
             except requests.exceptions.RequestException as e:
-                logger.error("Request failed: %s", self._sanitise_for_log(e))
-                self.remove_proxy(proxy)
+                logger.warning("Request failed: %s", self._sanitise_for_log(e))
+                self.report_proxy_failure(proxy)
                 retries += 1
-                time.sleep(min(3, backoff_base**retries))
+                time.sleep(min(3.0, backoff_base**retries) + random.uniform(0.5, 1.5))
             except Exception as e:
                 logger.error("Unexpected error: %s", self._sanitise_for_log(e))
+                self.report_proxy_failure(proxy)
                 retries += 1
-                time.sleep(min(3, backoff_base**retries))
+                time.sleep(min(3.0, backoff_base**retries) + random.uniform(0.5, 1.5))
 
         logger.error(
             f"Failed to fetch data from {self.url} after {max_retries} retries."
