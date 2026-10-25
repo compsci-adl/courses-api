@@ -32,7 +32,7 @@
     },
     {
       "matchManagers": ["github-actions"],
-      "matchUpdateTypes": ["security"],
+      "isVulnerabilityAlert": true,
       "groupName": "GitHub Actions updates",
       "groupSlug": "github-actions-security-updates"
     },
@@ -43,7 +43,7 @@
     },
     {
       "matchManagers": ["pep621", "pep723", "pre-commit"],
-      "matchUpdateTypes": ["security", "pin"],
+      "isVulnerabilityAlert": true,
       "groupName": "python updates",
       "groupSlug": "python-security-updates"
     },
@@ -54,7 +54,7 @@
     },
     {
       "matchDatasources": ["docker"],
-      "matchUpdateTypes": ["security", "pin"],
+      "isVulnerabilityAlert": true,
       "groupName": "docker updates",
       "groupSlug": "docker-security-updates"
     },
