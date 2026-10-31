@@ -168,3 +168,5 @@ cython_debug/
 dev.sqlite3
 dev.sqlite3-journal
 working_proxies.txt
+*.sqlite3-shm
+*.sqlite3-wal
