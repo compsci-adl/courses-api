@@ -270,51 +270,89 @@ def process_course(
             progress.update(subject_task, advance=1)
             return
 
-        # Check if course info exists in DB from previous years to reuse
+        # Fetch course details for this year from the web
+        course_details = data_parser.get_course_details(course_code, year=year)
+        if not course_details:
+            logger.info(
+                f"Course {course_code} is not offered for year {year}. Skipping course."
+            )
+            progress.update(subject_task, advance=1)
+            return
+
+        name = subject["subject"] if isinstance(subject, dict) else str(subject)
+        title = course_details.get("title", "")
+        terms = course.get("terms") or course_details.get("terms")
+        campus = course_details.get("campus")
+
+        # Course Custom ID
+        course_cid = get_short_hash(f"{name}{code_str}{title}{year}{terms}{campus}")
+        encoded_course_code = re.sub(
+            r"([a-zA-Z]+)([0-9]+)", r"\1-\2", str(code_str)
+        ).lower()
+
+        # Compute content hash for the course outline
+        outline_hash = compute_course_hash(
+            {
+                "title": title,
+                "units": parse_units(course_details.get("units")),
+                "course_overview": course_details.get("course_overview", "N/A"),
+                "prerequisites": course_details.get("prerequisites", "N/A"),
+                "corequisites": course_details.get("corequisites", "N/A"),
+                "antirequisites": course_details.get("antirequisites", "N/A"),
+                "course_coordinator": course_details.get("course_coordinator", "N/A"),
+            }
+        )
+
+        # Check if previous year data exists
         prev_data = None
         if previous_courses:
             prev_data = previous_courses.get(code_str) or previous_courses.get(
                 norm_code
             )
 
+        prev_hash = None
         if prev_data:
-            logger.info(
-                f"Reusing course info for {code_str} from previous year ({prev_data.get('year')}) for year {year}."
+            prev_hash = prev_data.get("content_hash")
+            if not prev_hash:
+                prev_hash = compute_course_hash(prev_data)
+
+        # If hash matches previous year, reuse previous year outline and assessments
+        if prev_data and prev_hash == outline_hash:
+            logger.debug(
+                f"Course {code_str} outline hash matches previous year ({prev_data.get('year')}). Reusing outline & assessments."
             )
-            name = subject["subject"] if isinstance(subject, dict) else str(subject)
-            title = prev_data.get("title", "")
-            terms = course.get("terms") or prev_data.get("terms")
-            campus = prev_data.get("campus")
-
-            course_cid = get_short_hash(f"{name}{code_str}{title}{year}{terms}{campus}")
-            encoded_course_code = re.sub(
-                r"([a-zA-Z]+)([0-9]+)", r"\1-\2", str(code_str)
-            ).lower()
-
             db_course = Course(
                 id=course_cid,
-                course_id=prev_data.get("course_id", 0),
+                course_id=course_details.get("course_id")
+                or prev_data.get("course_id", 0),
                 year=year,
                 terms=join_str_if_iterable(terms),
                 subject=name,
                 course_code=code_str,
                 title=title,
                 campus=join_str_if_iterable(campus),
-                level_of_study=prev_data.get("level_of_study", "N/A"),
-                units=parse_units(prev_data.get("units")),
-                course_coordinator=prev_data.get("course_coordinator", "N/A"),
-                course_level=prev_data.get("course_level", "N/A"),
-                course_overview=prev_data.get("course_overview", "N/A"),
-                prerequisites=prev_data.get("prerequisites", "N/A"),
-                corequisites=prev_data.get("corequisites", "N/A"),
-                antirequisites=prev_data.get("antirequisites", "N/A"),
-                university_wide_elective=prev_data.get(
+                level_of_study=course_details.get("level_of_study")
+                or prev_data.get("level_of_study", "N/A"),
+                units=parse_units(course_details.get("units")),
+                course_coordinator=course_details.get("course_coordinator")
+                or prev_data.get("course_coordinator", "N/A"),
+                course_level=course_details.get("course_level")
+                or prev_data.get("course_level", "N/A"),
+                course_overview=course_details.get("course_overview")
+                or prev_data.get("course_overview", "N/A"),
+                prerequisites=course_details.get("prerequisites")
+                or prev_data.get("prerequisites", "N/A"),
+                corequisites=course_details.get("corequisites")
+                or prev_data.get("corequisites", "N/A"),
+                antirequisites=course_details.get("antirequisites")
+                or prev_data.get("antirequisites", "N/A"),
+                university_wide_elective=course_details.get(
                     "university_wide_elective", False
                 ),
                 url=f"https://adelaide.edu.au/study/courses/{year}/{encoded_course_code}/",
                 course_outline_url=prev_data.get("course_outline_url"),
                 textbooks=prev_data.get("textbooks"),
-                content_hash=prev_data.get("content_hash"),
+                content_hash=outline_hash,
             )
 
             # Replicate learning outcomes for new year
@@ -347,199 +385,135 @@ def process_course(
 
             write_queue.put(db_course)
 
-            # Track in existing_courses_for_year so duplicates in same run are skipped
-            if existing_courses_for_year is not None:
-                with lock:
-                    existing_courses_for_year[code_str] = course_cid
-                    existing_courses_for_year[norm_code] = course_cid
-
-            # Scrape classes ONLY if scrape_classes is True (active year)
-            if scrape_classes:
-                _extract_and_queue_classes(
-                    code_str,
-                    year,
-                    course_cid,
-                    raw_html=None,
-                    collected_classes=collected_classes,
-                    collected_meetings=collected_meetings,
-                    lock=lock,
+        else:
+            # Hash is different or brand new course: scrape fresh outline & assessments
+            if prev_data:
+                logger.info(
+                    f"Course {code_str} outline changed from previous year (hash delta). Scraping fresh outline for year {year}..."
+                )
+            else:
+                logger.info(
+                    f"Course {code_str} is new for year {year}. Scraping fresh outline..."
                 )
 
-            progress.update(subject_task, advance=1)
-            return
-
-        # Not in DB for current year, not in previous years: brand new course, scrape from web
-        logger.debug(
-            f"Course {code_str} not in current or previous years. Scraping from web for year {year}..."
-        )
-        course_details = data_parser.get_course_details(course_code, year=year)
-        if not course_details:
-            logger.info(
-                f"Course {course_code} is not offered for year {year}. Skipping course."
+            db_course = Course(
+                id=course_cid,
+                course_id=course_details.get("course_id", 0),
+                year=year,
+                terms=join_str_if_iterable(terms),
+                subject=name,
+                course_code=code_str,
+                title=title,
+                campus=join_str_if_iterable(campus),
+                level_of_study=course_details.get("level_of_study", "N/A"),
+                units=parse_units(course_details.get("units")),
+                course_coordinator=course_details.get("course_coordinator", "N/A"),
+                course_level=course_details.get("course_level", "N/A"),
+                course_overview=course_details.get("course_overview", "N/A"),
+                prerequisites=course_details.get("prerequisites", "N/A"),
+                corequisites=course_details.get("corequisites", "N/A"),
+                antirequisites=course_details.get("antirequisites", "N/A"),
+                university_wide_elective=course_details.get(
+                    "university_wide_elective", False
+                ),
+                url=f"https://adelaide.edu.au/study/courses/{year}/{encoded_course_code}/",
+                course_outline_url=None,
+                content_hash=outline_hash,
             )
-            progress.update(subject_task, advance=1)
-            return
 
-        name = subject["subject"]
-        title = course_details.get("title", "")
-        terms = course.get("terms") or course_details.get("terms")
-        campus = course_details.get("campus")
+            # Generate course outline URL if term and year are valid
+            term_str = join_str_if_iterable(terms)
+            term_code = get_term_code(term_str)
 
-        # Course Custom ID
-        course_cid = get_short_hash(f"{name}{course_code}{title}{year}{terms}{campus}")
+            if not term_code and term_str:
+                first_term = term_str.split(",")[0].strip()
+                term_code = get_term_code(first_term)
 
-        encoded_course_code = re.sub(
-            r"([a-zA-Z]+)([0-9]+)", r"\1-\2", str(code_str)
-        ).lower()
+            if term_code:
+                year_short = str(year)[-2:]
+                formatted_code = re.sub(
+                    r"([a-zA-Z]+)\s*(\d+)", r"\1_\2", str(code_str)
+                ).replace(" ", "_")
 
-        # Compute outline content hash for deduplication
-        outline_hash = compute_course_hash(
-            {
-                "title": title,
-                "units": parse_units(course_details.get("units")),
-                "course_overview": course_details.get("course_overview", "N/A"),
-                "prerequisites": course_details.get("prerequisites", "N/A"),
-                "corequisites": course_details.get("corequisites", "N/A"),
-                "antirequisites": course_details.get("antirequisites", "N/A"),
-                "course_coordinator": course_details.get("course_coordinator", "N/A"),
-            }
-        )
-
-        skip_course_db_write = False
-        if existing_hashes and existing_hashes.get((course_cid, year)) == outline_hash:
-            skip_course_db_write = True
-
-        if not skip_course_db_write:
-            try:
-                db_course = Course(
-                    id=course_cid,
-                    course_id=course_details.get("course_id", 0),
-                    year=year,
-                    terms=join_str_if_iterable(terms),
-                    subject=name,
-                    course_code=course_code[0]
-                    if isinstance(course_code, (list, tuple))
-                    else course_code,
-                    title=title,
-                    campus=join_str_if_iterable(campus),
-                    level_of_study=course_details.get("level_of_study", "N/A"),
-                    units=parse_units(course_details.get("units")),
-                    course_coordinator=course_details.get("course_coordinator", "N/A"),
-                    course_level=course_details.get("course_level", "N/A"),
-                    course_overview=course_details.get("course_overview", "N/A"),
-                    prerequisites=course_details.get("prerequisites", "N/A"),
-                    corequisites=course_details.get("corequisites", "N/A"),
-                    antirequisites=course_details.get("antirequisites", "N/A"),
-                    university_wide_elective=course_details.get(
-                        "university_wide_elective", False
-                    ),
-                    url=f"https://adelaide.edu.au/study/courses/{year}/{encoded_course_code}/",
-                    course_outline_url=None,
-                    content_hash=outline_hash,
-                )
-
-                # Generate course outline URL if term and year are valid
-                term_str = join_str_if_iterable(terms)
-                term_code = get_term_code(term_str)
-
-                if not term_code and term_str:
-                    first_term = term_str.split(",")[0].strip()
-                    term_code = get_term_code(first_term)
-
-                if term_code:
-                    year_short = str(year)[-2:]
-                    formatted_code = re.sub(
-                        r"([a-zA-Z]+)\s*(\d+)", r"\1_\2", str(code_str)
+                for suffix in range(1, 7):
+                    course_instance_id = (
+                        f"{year_short}{term_code}_{formatted_code}_{suffix}"
                     )
-                    formatted_code = formatted_code.replace(" ", "_")
+                    outline_url = f"https://apps.adelaide.edu.au/public/courseoutline?courseInstanceId={course_instance_id}"
 
-                    for suffix in range(1, 7):
-                        course_instance_id = (
-                            f"{year_short}{term_code}_{formatted_code}_{suffix}"
+                    try:
+                        headers = {
+                            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
+                        }
+                        resp = requests.get(
+                            outline_url,
+                            headers=headers,
+                            timeout=3,
+                            impersonate="chrome146",
                         )
-                        outline_url = f"https://apps.adelaide.edu.au/public/courseoutline?courseInstanceId={course_instance_id}"
 
-                        try:
-                            headers = {
-                                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
-                            }
-                            resp = requests.get(
-                                outline_url,
-                                headers=headers,
-                                timeout=5,
-                                impersonate="chrome146",
-                            )
+                        if resp.status_code == 200:
+                            text = resp.text.lower()
+                            if "course overview" in text or "subject area" in text:
+                                db_course.course_outline_url = outline_url
+                                parsed_outline = data_parser.parse_course_outline(
+                                    resp.text
+                                )
 
-                            if resp.status_code == 200:
-                                text = resp.text.lower()
-                                if "course overview" in text or "subject area" in text:
-                                    logger.debug(
-                                        f"Found valid course outline at {outline_url}"
+                                if parsed_outline.get("aim"):
+                                    db_course.course_overview = parsed_outline["aim"]
+
+                                for index, lo_text in enumerate(
+                                    parsed_outline.get("learning_outcomes", []),
+                                    start=1,
+                                ):
+                                    lo_id = get_short_hash(f"{course_cid}lo{lo_text}")
+                                    db_lo = LearningOutcome(
+                                        id=lo_id,
+                                        year=year,
+                                        course_id=course_cid,
+                                        description=lo_text,
+                                        outcome_index=index,
                                     )
-                                    db_course.course_outline_url = outline_url
+                                    write_queue.put(db_lo)
 
-                                    parsed_outline = data_parser.parse_course_outline(
-                                        resp.text
+                                db_course.textbooks = parsed_outline.get("textbooks")
+
+                                for assess in parsed_outline.get("assessments", []):
+                                    assess_title = assess.get("title")
+                                    assess_id = get_short_hash(
+                                        f"{course_cid}assess{assess_title}"
                                     )
-
-                                    if parsed_outline.get("aim"):
-                                        db_course.course_overview = parsed_outline[
-                                            "aim"
-                                        ]
-
-                                    for index, lo_text in enumerate(
-                                        parsed_outline.get("learning_outcomes", []),
-                                        start=1,
-                                    ):
-                                        lo_id = get_short_hash(
-                                            f"{course_cid}lo{lo_text}"
-                                        )
-                                        db_lo = LearningOutcome(
-                                            id=lo_id,
-                                            year=year,
-                                            course_id=course_cid,
-                                            description=lo_text,
-                                            outcome_index=index,
-                                        )
-                                        write_queue.put(db_lo)
-
-                                    db_course.textbooks = parsed_outline.get(
-                                        "textbooks"
+                                    db_assess = Assessment(
+                                        id=assess_id,
+                                        year=year,
+                                        course_id=course_cid,
+                                        title=assess_title,
+                                        weighting=assess.get("weighting"),
+                                        hurdle=assess.get("hurdle"),
+                                        learning_outcomes=assess.get(
+                                            "learning_outcomes"
+                                        ),
                                     )
+                                    write_queue.put(db_assess)
 
-                                    for assess in parsed_outline.get("assessments", []):
-                                        assess_title = assess.get("title")
-                                        assess_id = get_short_hash(
-                                            f"{course_cid}assess{assess_title}"
-                                        )
-                                        db_assess = Assessment(
-                                            id=assess_id,
-                                            year=year,
-                                            course_id=course_cid,
-                                            title=assess_title,
-                                            weighting=assess.get("weighting"),
-                                            hurdle=assess.get("hurdle"),
-                                            learning_outcomes=assess.get(
-                                                "learning_outcomes"
-                                            ),
-                                        )
-                                        write_queue.put(db_assess)
+                                break
+                    except Exception as e:
+                        logger.debug(f"Failed check for {outline_url}: {e}")
 
-                                    break
-                        except Exception as e:
-                            logger.debug(f"Failed check for {outline_url}: {e}")
-                            pass
+            write_queue.put(db_course)
 
-                write_queue.put(db_course)
-            except Exception as e:
-                print(f"Error inserting course {course_code}: {e}")
-                progress.update(subject_task, advance=1)
-                return
+        # Track in existing_courses_for_year so duplicates in same run are skipped
+        if existing_courses_for_year is not None:
+            with lock:
+                existing_courses_for_year[code_str] = course_cid
+                existing_courses_for_year[norm_code] = course_cid
 
         # Scrape classes ONLY if scrape_classes is True (active year)
+        # Pass raw_html from course_details so 0 extra network calls are made for classes!
         if scrape_classes:
             _extract_and_queue_classes(
-                course_code,
+                code_str,
                 year,
                 course_cid,
                 raw_html=course_details.get("html"),

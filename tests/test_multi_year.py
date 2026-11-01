@@ -451,6 +451,26 @@ class TestMultiYearPipeline(unittest.TestCase):
         subject_task = MagicMock()
         lock = Lock()
 
+        course_details_web = {
+            "code": "CHEM1001",
+            "title": "Foundations of Chemistry",
+            "course_id": 99901,
+            "terms": "Semester 1",
+            "campus": "North Terrace",
+            "level_of_study": "Undergraduate",
+            "units": 3,
+            "course_coordinator": "Dr. Mole",
+            "course_level": "1",
+            "course_overview": "Basic chemical principles.",
+            "prerequisites": "None",
+            "corequisites": "None",
+            "antirequisites": "None",
+            "university_wide_elective": True,
+            "html": "<html></html>",
+        }
+        mock_get_details.return_value = course_details_web
+
+        matching_hash = compute_course_hash(course_details_web)
         previous_courses_map = {
             "CHEM1001": {
                 "course_id": 99901,
@@ -470,7 +490,7 @@ class TestMultiYearPipeline(unittest.TestCase):
                 "university_wide_elective": True,
                 "course_outline_url": "https://apps.adelaide.edu.au/outline?id=123",
                 "textbooks": "Chemistry 101",
-                "content_hash": "chemhash456",
+                "content_hash": matching_hash,
                 "learning_outcomes": [
                     {"description": "Balance reactions", "outcome_index": 1}
                 ],
@@ -501,8 +521,8 @@ class TestMultiYearPipeline(unittest.TestCase):
             previous_courses=previous_courses_map,  # Exists in 2026
         )
 
-        # Must NOT fetch from web because it reuses 2026 info
-        mock_get_details.assert_not_called()
+        # Web details fetched to verify hash
+        mock_get_details.assert_called_once()
         mock_get_classes.assert_not_called()
 
         # write_queue must have received the cloned Course, LearningOutcome, and Assessment
@@ -529,6 +549,78 @@ class TestMultiYearPipeline(unittest.TestCase):
         self.assertEqual(len(queued_assessments), 1)
         self.assertEqual(queued_assessments[0].year, 2027)
         self.assertEqual(queued_assessments[0].title, "Lab Exam")
+
+    @patch("scraper.write_queue")
+    @patch("data_parser.get_course_details")
+    @patch("scraper.requests.get")
+    def test_process_course_scrapes_fresh_outline_when_hash_differs(
+        self, mock_requests_get, mock_get_details, mock_queue
+    ):
+        progress = MagicMock()
+        subject_task = MagicMock()
+        lock = Lock()
+
+        # Web returns updated course details (prerequisites changed!)
+        course_details_web = {
+            "code": "CHEM1001",
+            "title": "Foundations of Chemistry",
+            "course_id": 99901,
+            "terms": "Semester 1",
+            "campus": "North Terrace",
+            "level_of_study": "Undergraduate",
+            "units": 3,
+            "course_coordinator": "Dr. NewProf",
+            "course_level": "1",
+            "course_overview": "Updated advanced chemical principles.",
+            "prerequisites": "Advanced Maths",
+            "corequisites": "None",
+            "antirequisites": "None",
+            "university_wide_elective": True,
+            "html": "<html></html>",
+        }
+        mock_get_details.return_value = course_details_web
+
+        # Outline request returns 200 with new syllabus
+        mock_outline_resp = MagicMock()
+        mock_outline_resp.status_code = 200
+        mock_outline_resp.text = (
+            "<html><h1>Course Overview</h1><p>Aim: Master modern chemistry</p></html>"
+        )
+        mock_requests_get.return_value = mock_outline_resp
+
+        # Previous year had different hash
+        previous_courses_map = {
+            "CHEM1001": {
+                "course_id": 99901,
+                "year": 2026,
+                "title": "Foundations of Chemistry",
+                "subject": "Chemistry",
+                "content_hash": "different_old_hash_123",
+                "course_outline_url": "https://apps.adelaide.edu.au/outline?id=old",
+                "learning_outcomes": [],
+                "assessments": [],
+            }
+        }
+
+        course = {"code": "CHEM1001"}
+        subject = {"subject": "Chemistry"}
+
+        process_course(
+            course=course,
+            year=2027,
+            subject=subject,
+            engine=self.engine,
+            progress=progress,
+            subject_task=subject_task,
+            lock=lock,
+            scrape_classes=False,
+            existing_courses_for_year={},
+            previous_courses=previous_courses_map,
+        )
+
+        mock_get_details.assert_called_once()
+        # Because hash differed, outline URL was probed
+        mock_requests_get.assert_called()
 
     def test_ensure_healthy_database_recovers_malformed_db(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -583,7 +675,7 @@ class TestMultiYearPipeline(unittest.TestCase):
 
     def test_data_fetcher_timeout_configuration(self):
         fetcher_default = data_fetcher.DataFetcher("?test=1")
-        self.assertEqual(fetcher_default.timeout, 10.0)
+        self.assertEqual(fetcher_default.timeout, 3.0)
 
         fetcher_fast = data_fetcher.DataFetcher("?test=2", timeout=2.5)
         self.assertEqual(fetcher_fast.timeout, 2.5)
