@@ -29,6 +29,7 @@ from db_service import (
     compute_course_hash,
     configure_fast_sqlite,
     ensure_healthy_database,
+    ensure_schema_up_to_date,
     finalize_sqlite_for_s3,
     get_existing_course_hashes,
     get_existing_course_ids_for_year,
@@ -37,7 +38,6 @@ from db_service import (
 from log import logger
 from models import (
     Assessment,
-    Base,
     Course,
     CourseClass,
     LearningOutcome,
@@ -765,7 +765,7 @@ async def run_pipeline(
     def set_sqlite_pragma(dbapi_connection, connection_record):
         configure_fast_sqlite(dbapi_connection)
 
-    Base.metadata.create_all(engine)
+    ensure_schema_up_to_date(engine)
     Session.configure(bind=engine)
 
     # Preload existing content hashes to skip duplicate course outline updates
