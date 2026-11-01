@@ -11,8 +11,10 @@ requires-python = ">=3.12"
 dependencies = [
     "aiosqlite>=0.22.1",
     "beautifulsoup4>=4.14.3",
+    "boto3>=1.43.121",
     "curl_cffi>=0.7.0",
     "fastapi[standard]>=0.115.5",
+    "httpx[http2]>=0.28.1",
     "json-repair>=0.60.1",
     "nanoid>=2.0.0",
     "pydantic>=2.9.2",

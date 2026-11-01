@@ -48,9 +48,11 @@ class DataFetcher:
         use_class_url: bool = False,
         full_url: str = None,
         use_proxy: bool = True,
+        timeout: float = 10.0,
     ) -> None:
         self.endpoint = endpoint
         self.use_class_url = use_class_url
+        self.timeout = timeout
         if full_url:
             self.url = full_url
         elif self.use_class_url:
@@ -178,6 +180,44 @@ class DataFetcher:
             }
 
         while retries < max_retries:
+            # Fallback to direct connection if multiple proxy attempts stall
+            if retries >= 3 and self.use_proxy:
+                try:
+                    logger.debug(
+                        "Attempting direct connection fallback without proxy..."
+                    )
+                    direct_resp = requests.get(
+                        self.url,
+                        headers=headers,
+                        timeout=min(self.timeout, 5.0),
+                        impersonate="chrome146",
+                    )
+                    if direct_resp.status_code == 200:
+                        if not self.use_class_url:
+                            resp = json_repair.loads(direct_resp.text)
+                            if resp.get("response", {}).get("resultPacket"):
+                                logger.info("Direct connection fallback succeeded.")
+                                self.last_response = direct_resp
+                                self.data = resp.get("response", {})
+                                return self.data
+                        else:
+                            soup = BeautifulSoup(direct_resp.content, "html.parser")
+                            main_tag = soup.find("main")
+                            text = main_tag.get_text() if main_tag else soup.get_text()
+                            h1_tag = soup.find("h1")
+                            h1_text = h1_tag.get_text().strip() if h1_tag else ""
+                            self.last_response = direct_resp
+                            self.data = {
+                                "h1": h1_text,
+                                "data": re.sub(r"\n+", "\n", text),
+                                "html": direct_resp.text,
+                            }
+                            return self.data
+                except Exception as e:
+                    logger.debug(
+                        "Direct fallback attempt failed: %s", self._sanitise_for_log(e)
+                    )
+
             proxy = self.get_random_proxy()
             request_url = self.url
             try:
@@ -186,7 +226,7 @@ class DataFetcher:
                     request_url,
                     proxies=proxy,
                     headers=headers,
-                    timeout=10,
+                    timeout=self.timeout,
                     impersonate="chrome146",
                 )
                 self.last_response = response
@@ -276,23 +316,30 @@ class DataFetcher:
                     }
                     return self.data
 
+            except requests.exceptions.Timeout:
+                logger.warning(
+                    "Proxy timed out (limit: %ss): %s",
+                    self.timeout,
+                    self._sanitise_for_log(proxy),
+                )
+                self.report_proxy_failure(proxy, fatal=True)
+                retries += 1
+                # Dead proxy timed out: proceed immediately to next proxy without sleeping
             except requests.exceptions.ProxyError:
                 logger.warning(
                     "Proxy error with proxy: %s", self._sanitise_for_log(proxy)
                 )
-                self.report_proxy_failure(proxy)
+                self.report_proxy_failure(proxy, fatal=True)
                 retries += 1
-                time.sleep(min(3.0, backoff_base**retries) + random.uniform(0.5, 1.5))
+                # Dead proxy error: proceed immediately to next proxy without sleeping
             except requests.exceptions.RequestException as e:
                 logger.warning("Request failed: %s", self._sanitise_for_log(e))
                 self.report_proxy_failure(proxy)
                 retries += 1
-                time.sleep(min(3.0, backoff_base**retries) + random.uniform(0.5, 1.5))
             except Exception as e:
                 logger.error("Unexpected error: %s", self._sanitise_for_log(e))
                 self.report_proxy_failure(proxy)
                 retries += 1
-                time.sleep(min(3.0, backoff_base**retries) + random.uniform(0.5, 1.5))
 
         logger.error(
             f"Failed to fetch data from {self.url} after {max_retries} retries."

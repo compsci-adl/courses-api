@@ -4,14 +4,18 @@ from datetime import datetime
 from typing import Dict, List, Optional, Union
 
 from dotenv import dotenv_values
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import ValidationError
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from .models import Base, Course, CourseClass, Subject
-from .schemas import CourseSchema
+try:
+    from .models import Base, Course, CourseClass
+    from .schemas import CourseSchema
+except ImportError:
+    from models import Base, Course, CourseClass  # noqa: F401
+    from schemas import CourseSchema  # noqa: F401
 
 # Check if the application is running in development mode
 is_dev_mode = "dev" in sys.argv
@@ -66,12 +70,60 @@ def get_db():
         db.close()
 
 
-def current_year() -> int:
-    """Gets the current year."""
-    year_str = dotenv_values().get("YEAR")
-    if year_str is None:
-        return datetime.now().year
-    return int(year_str)
+def get_active_year(db: Session) -> int:
+    """Finds the latest year that contains class records in the DB.
+
+    Falls back to the latest course year or current calendar year.
+    """
+    result = (
+        db.query(CourseClass.year).distinct().order_by(CourseClass.year.desc()).first()
+    )
+    if result and result[0]:
+        return int(result[0])
+
+    course_year = db.query(Course.year).distinct().order_by(Course.year.desc()).first()
+    if course_year and course_year[0]:
+        return int(course_year[0])
+
+    env_year = dotenv_values().get("YEAR")
+    if env_year and env_year.isdigit():
+        return int(env_year)
+
+    return datetime.now().year
+
+
+def get_available_years_from_db(db: Session) -> list[int]:
+    """Queries SQLite directly for all distinct course years."""
+    years = db.query(Course.year).distinct().order_by(Course.year.asc()).all()
+    avail = [int(y[0]) for y in years if y[0] is not None]
+    if avail:
+        return avail
+    # Fallback to current year span
+    cur = datetime.now().year
+    return [cur, cur + 1, cur + 2]
+
+
+def current_year(db: Optional[Session] = None) -> int:
+    """Gets the current active year."""
+    if db:
+        return get_active_year(db)
+    return datetime.now().year
+
+
+def validate_and_resolve_year(year: Optional[int], db: Session) -> int:
+    """Validates year against available_years in DB or defaults to active_year.
+
+    Raises HTTP 400 Bad Request if year is invalid.
+    """
+    available_years = get_available_years_from_db(db)
+    if year is None:
+        return get_active_year(db)
+    if year not in available_years:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid year: {year}. Available years are: {available_years}",
+        )
+    return year
 
 
 def current_sem() -> str:
@@ -81,7 +133,6 @@ def current_sem() -> str:
 
 def get_term_number(db, year: int, term: str) -> str:
     """Gets the term number from the local database."""
-
     # Convert aliases
     term = convert_term_alias(term)
     courses = db.query(Course).filter(Course.year == year).all()
@@ -227,24 +278,48 @@ def convert_term_alias(term_alias: str) -> str:
     return converted_alias
 
 
+def get_years_with_classes_from_db(db: Session) -> list[int]:
+    """Queries SQLite for all distinct years that have course classes."""
+    years = db.query(CourseClass.year).distinct().order_by(CourseClass.year.asc()).all()
+    return [int(y[0]) for y in years if y[0] is not None]
+
+
+@app.get("/")
+@app.get("/status")
+@app.get("/years")
+def get_years_metadata(db: Session = Depends(get_db)):
+    """Returns active academic year, available years, and years with classes directly from SQLite."""
+    available_years = get_available_years_from_db(db)
+    years_with_classes = get_years_with_classes_from_db(db)
+    active_year = get_active_year(db)
+    return {
+        "active_year": active_year,
+        "available_years": available_years,
+        "years_with_classes": years_with_classes,
+    }
+
+
 @app.get("/subjects", response_model=List[str])
 def get_subjects(
-    year: int = current_year(), term: str = current_sem(), db: Session = Depends(get_db)
+    year: Optional[int] = Query(default=None),
+    term: str = current_sem(),
+    db: Session = Depends(get_db),
 ):
     """Get all possible subjects for a given year and term, sorted alphabetically.
 
     Args:
-        year (int, optional): The year to search for courses. Defaults to current year.
+        year (int, optional): The year to search for courses. Defaults to active year.
         term (str, optional): The term to search for courses. Defaults to current semester.
 
     Returns:
-        dict: A dictionary containing a list of subjects.
+        list[str]: A list of subjects.
     """
-    term_number = get_term_number(db, year, term)
+    resolved_year = validate_and_resolve_year(year, db)
+    term_number = get_term_number(db, resolved_year, term)
 
     results = (
         db.query(Course)
-        .filter(Course.year == year, Course.terms.contains(term_number))
+        .filter(Course.year == resolved_year, Course.terms.contains(term_number))
         .all()
     )
 
@@ -253,31 +328,19 @@ def get_subjects(
             status_code=404, detail="No courses found for the specified year and term"
         )
 
-    # Extract unique subject codes from the results
-    subjects = db.query(Subject).all()
     unique_names = set()
-
-    subjects: list[str] = []
-
-    # Collect unique subject codes from course results
     for entry in results:
-        name = entry.subject
-        if name:  # Skip empty names
-            unique_names.add(name)
+        if entry.subject:
+            unique_names.add(entry.subject)
 
-    # Add subject name for each unique name
-    for name in unique_names:
-        subjects.append(name)
-
-    # Sort the subjects alphabetically
-    subjects.sort()
+    subjects = sorted(list(unique_names))
     return subjects
 
 
 @app.get("/courses", response_model=Union[Dict, List])
 def get_subject_courses(
-    subject: str,
-    year: int = current_year(),
+    subject: Optional[str] = None,
+    year: Optional[int] = Query(default=None),
     term: str = current_sem(),
     university_wide_elective: Optional[bool] = None,
     level_of_study: Optional[str] = None,
@@ -285,21 +348,19 @@ def get_subject_courses(
 ):
     """Gets a list of courses, optionally filtered by subject, year, term, university_wide_elective and level_of_study.
 
-    Examples:
-        /courses?year=2026&term=online1&subject=Accounting&university_wide_elective=false&level_of_study=Undergraduate
-
     Args:
         subject (str, optional): The subject code to search for. If omitted, all subjects are included.
-        year (int, optional): The year of the courses. Defaults to current year.
+        year (int, optional): The year of the courses. Defaults to active year.
         term (str, optional): The term of the courses. Defaults to current semester.
-        university_wide_elective (bool, optional): Filter courses by whether they're an university-wide elective.
-        level_of_study (str, optional): Filter courses by level of study (e.g., 'Undergraduate').
+        university_wide_elective (bool, optional): Filter courses by whether they're a university-wide elective.
+        level_of_study (str, optional): Filter courses by level of study.
 
     Returns:
-        list[dict]: A list of courses as dictionaries.
+        dict: A dictionary containing the list of courses.
     """
-    term_number = get_term_number(db, year, term)
-    filters = [Course.year == year, Course.terms.contains(term_number)]
+    resolved_year = validate_and_resolve_year(year, db)
+    term_number = get_term_number(db, resolved_year, term)
+    filters = [Course.year == resolved_year, Course.terms.contains(term_number)]
     if subject:
         filters.append(Course.subject == subject)
     if university_wide_elective is not None:
@@ -352,23 +413,28 @@ def split_class_type_category(original_type: str):
 
 
 @app.get("/courses/{course_cid}", response_model=Union[Dict, List])
-def get_course(course_cid: str, db: Session = Depends(get_db)):
-    """Course details route, takes in an id returns the courses' info and classes.
+def get_course(
+    course_cid: str,
+    year: Optional[int] = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    """Course details route, takes in an id returns the course's info and classes."""
+    query = db.query(Course).filter(Course.id == course_cid)
+    if year is not None:
+        resolved_year = validate_and_resolve_year(year, db)
+        query = query.filter(Course.year == resolved_year)
 
-    Args:
-        course_cid (string, required): The id to search for.
-
-    Returns:
-        dict: A dictionary containing the course information and classes.
-    """
-    course = db.query(Course).filter(Course.id == course_cid).first()
+    course = query.first()
 
     if not course:
         raise HTTPException(status_code=404, detail="Course not found")
 
     course_id = course.course_id
-
-    course_details = db.query(Course).filter(Course.course_id == course_id).first()
+    course_details = (
+        db.query(Course)
+        .filter(Course.course_id == course_id, Course.year == course.year)
+        .first()
+    )
 
     # Extract necessary information from details
     if course_details:
@@ -406,7 +472,7 @@ def get_course(course_cid: str, db: Session = Depends(get_db)):
         "id": course_cid,
         "course_id": course.course_id,
         "name": name,
-        "year": course.year,
+        "year": str(course.year),
         "term": course.terms,
         "campus": course.campus,
         "units": course.units,
@@ -425,7 +491,11 @@ def get_course(course_cid: str, db: Session = Depends(get_db)):
     }
 
     # Fetch classes info and process to match the required structure
-    classes = db.query(CourseClass).filter(CourseClass.course_id == course_cid).all()
+    classes = (
+        db.query(CourseClass)
+        .filter(CourseClass.course_id == course_cid, CourseClass.year == course.year)
+        .all()
+    )
     if classes:
         class_groups = {}
         for class_group in classes:
@@ -451,14 +521,8 @@ def get_course(course_cid: str, db: Session = Depends(get_db)):
                     day.strip() for day in meeting.days.split(",") if day.strip()
                 ]
 
-                # Flatten the list if the days appear multiple times (e.g., "Monday, Monday")
-                flattened_meeting_days = []
-                for day in meeting_days:
-                    # Append each day individually
-                    flattened_meeting_days.append(day)
-
                 # Create meeting entry
-                for day in flattened_meeting_days:
+                for day in meeting_days:
                     meeting_entry = {
                         "day": day,
                         "location": meeting.location,

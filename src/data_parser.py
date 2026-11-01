@@ -6,10 +6,11 @@ import data_fetcher
 from log import logger
 
 
-def get_subjects(year: int) -> dict[str, list[dict[str, str]]]:
+def get_subjects(year: int, timeout: float = 3.0) -> dict[str, list[dict[str, str]]]:
     """Return a list of subjects for a given year."""
     subjects = data_fetcher.DataFetcher(
-        f"?f.Tabs|type=Degrees+%26+Courses&form=json&num_ranks=10&profile=site-search&query=&f.Year|year={year}&collection=uosa~sp-aem-prod&f.Study+type|studyType=Course&start_rank=1"
+        f"?f.Tabs|type=Degrees+%26+Courses&form=json&num_ranks=10&profile=site-search&query=&f.Year|year={year}&collection=uosa~sp-aem-prod&f.Study+type|studyType=Course&start_rank=1",
+        timeout=timeout,
     )
 
     try:
@@ -41,10 +42,11 @@ def get_subjects(year: int) -> dict[str, list[dict[str, str]]]:
         return {"subjects": []}
 
 
-def get_course_codes(subject: str, year: int):
+def get_course_codes(subject: str, year: int, timeout: float = 6.0):
     """Return a list of course codes for a given subject code and year."""
     courses = data_fetcher.DataFetcher(
-        f"?f.Tabs%7Ctype=Degrees+%26+Courses&form=json&f.Year%7Cyear={year}&num_ranks=1000&profile=site-search&query=&f.Area+of+study%7CstudyArea={subject}&collection=uosa%7Esp-aem-prod&f.Study+type%7CstudyType=Course"
+        f"?f.Tabs%7Ctype=Degrees+%26+Courses&form=json&f.Year%7Cyear={year}&num_ranks=1000&profile=site-search&query=&f.Area+of+study%7CstudyArea={subject}&collection=uosa%7Esp-aem-prod&f.Study+type%7CstudyType=Course",
+        timeout=timeout,
     )
 
     try:
