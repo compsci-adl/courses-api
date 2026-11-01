@@ -80,21 +80,21 @@ def get_course_codes(subject: str, year: int, timeout: float = 6.0):
         if (
             courses.last_response is None
             or courses.last_response.status_code != 200
-            or data is None
+            or not data
         ):
             status = (
                 courses.last_response.status_code
                 if courses.last_response
                 else "NO_RESPONSE"
             )
-            print(f"Error: {status} - {data}")
-            return {"courses": []}
-        results = data.get("resultPacket", []).get("results", [])
+            logger.warning(f"Error fetching course codes for {subject}: HTTP {status}")
+            return None
+        results = data.get("resultPacket", {}).get("results", [])
         logger.debug(f"Number of courses found: {len(results)}")
 
         if not results:
             logger.debug("No results found in course codes.")
-            return {}
+            return {"courses": []}
 
         course_codes = [
             {

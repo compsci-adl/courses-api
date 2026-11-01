@@ -30,6 +30,7 @@ class DataFetcher:
     _proxy_failures = {}
     _proxy_lock = threading.Lock()
     _funnelback_semaphore = threading.BoundedSemaphore(4)
+    _direct_blocked = False
 
     @staticmethod
     def _sanitise_for_log(value: Any) -> str:
@@ -85,7 +86,7 @@ class DataFetcher:
             return []
 
     def get_random_proxy(self) -> dict:
-        """Get a random proxy from the loaded list. Reloads from file if empty."""
+        """Get a proxy from the loaded list, prioritising known working proxies."""
         if not self.use_proxy:
             return None
         with DataFetcher._proxy_lock:
@@ -95,7 +96,11 @@ class DataFetcher:
             if not DataFetcher._proxies:
                 logger.warning("No proxies available. Proceeding without a proxy.")
                 return None
-            proxy = random.choice(DataFetcher._proxies)
+            # 70% of the time pick from the top 5 known good proxies if available
+            if len(DataFetcher._proxies) > 5 and random.random() < 0.7:
+                proxy = random.choice(DataFetcher._proxies[:5])
+            else:
+                proxy = random.choice(DataFetcher._proxies)
         return {
             "http": f"http://{proxy}",
             "https": f"http://{proxy}",
@@ -126,7 +131,7 @@ class DataFetcher:
                 )
 
     def report_proxy_success(self, proxy: dict) -> None:
-        """Reset the failure count for a working proxy."""
+        """Reset failure count and promote working proxy to the top of the pool."""
         if not proxy:
             return
         proxy_str = proxy.get("http", "").replace("http://", "")
@@ -134,6 +139,9 @@ class DataFetcher:
             return
         with DataFetcher._proxy_lock:
             DataFetcher._proxy_failures.pop(proxy_str, None)
+            if DataFetcher._proxies and proxy_str in DataFetcher._proxies:
+                DataFetcher._proxies.remove(proxy_str)
+                DataFetcher._proxies.insert(0, proxy_str)
 
     def remove_proxy(self, proxy: dict) -> None:
         """Explicitly remove a proxy (fatal failure)."""
@@ -207,21 +215,18 @@ class DataFetcher:
                 "Sec-Fetch-Site": "cross-site",
             }
 
-        # Rate limit Funnelback requests across concurrent worker threads
-        sem_ctx = (
-            DataFetcher._funnelback_semaphore
-            if not self.use_class_url
-            else threading.Lock()
-        )
-
-        with sem_ctx:
-            # Direct Connection First (with 2 attempts on 403/429) ---
-            for direct_attempt in range(2):
+        # Direct Connection First
+        if not DataFetcher._direct_blocked:
+            sem_ctx = (
+                DataFetcher._funnelback_semaphore
+                if not self.use_class_url
+                else threading.Lock()
+            )
+            with sem_ctx:
                 try:
                     logger.debug(
-                        "Attempting direct connection for %s (attempt %s)...",
+                        "Attempting direct connection for %s...",
                         self._sanitise_for_log(self.endpoint),
-                        direct_attempt + 1,
                     )
                     direct_resp = requests.get(
                         self.url,
@@ -238,23 +243,26 @@ class DataFetcher:
                         logger.warning("HTTP 404 - Not Found: %s", self.url)
                         return {}
                     elif direct_resp.status_code in (403, 429):
+                        DataFetcher._direct_blocked = True
                         logger.warning(
-                            "Direct connection throttled (HTTP %s, attempt %s).",
+                            "Direct connection blocked by WAF/Cloudflare (HTTP %s). "
+                            "Switching to proxy pool for all subsequent requests.",
                             direct_resp.status_code,
-                            direct_attempt + 1,
                         )
-                        time.sleep(0.5 * (direct_attempt + 1))
                 except Exception as e:
                     logger.debug(
-                        "Direct connection attempt %s failed (%s).",
-                        direct_attempt + 1,
+                        "Direct connection attempt failed (%s). Falling back to proxies.",
                         self._sanitise_for_log(e),
                     )
-                    time.sleep(0.3)
 
-        # Fast Proxy Fallback with Tight 3.0s Timeout & Immediate Drops ---
+        # If proxy is disabled, return without proxy fallback
+        if not self.use_proxy:
+            return {}
+
+        # Smart Proxy Fallback with 5.0s timeout and priority queue of working proxies
         retries = 0
-        proxy_timeout = min(self.timeout, 3.0)
+        proxy_timeout = max(self.timeout, 5.0)
+        max_retries = max(max_retries, 35)
 
         while retries < max_retries:
             # Re-attempt direct connection after 2 proxy failures in case throttling cleared

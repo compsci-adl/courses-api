@@ -5,7 +5,6 @@ import shutil
 import sqlite3
 from pathlib import Path
 
-from sqlalchemy import UniqueConstraint
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
@@ -493,45 +492,57 @@ def ensure_healthy_database(db_path: str, base_dir: str = ".") -> bool:
     return False
 
 
-def is_legacy_database(db_path: str) -> bool:
-    """Checks if the database at db_path exists but uses the legacy single-year schema."""
+def validate_db_schema(db_path: str) -> bool:
+    """Verifies that the SQLite database at db_path exists, is valid SQLite,
+    and has all tables and columns defined in Base.metadata.
+    Returns False if any table or column is missing or mismatched.
+    """
     path = Path(db_path)
     if not path.exists() or path.stat().st_size == 0:
         return False
     try:
         conn = sqlite3.connect(str(path))
         cursor = conn.cursor()
-        # Check if courses table exists
-        cursor.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='courses'"
-        )
-        if not cursor.fetchone():
+        # Verify integrity
+        integrity = cursor.execute("PRAGMA integrity_check;").fetchall()
+        if integrity != [("ok",)]:
             conn.close()
             return False
-        # Check if content_hash column exists in courses
-        cursor.execute("PRAGMA table_info(courses)")
-        course_cols = {row[1].lower() for row in cursor.fetchall()}
-        # Check if year column exists in course_classes
-        cursor.execute("PRAGMA table_info(course_classes)")
-        class_cols = {row[1].lower() for row in cursor.fetchall()}
-        conn.close()
 
-        # If courses exists but content_hash is missing, or course_classes is missing year, it's legacy
-        if "content_hash" not in course_cols:
-            return True
-        if class_cols and "year" not in class_cols:
-            return True
-        return False
+        # Get existing tables in SQLite
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        existing_tables = {row[0].lower() for row in cursor.fetchall()}
+
+        # Verify all tables and columns defined in Base.metadata exist
+        for table_name, table in Base.metadata.tables.items():
+            if table_name.lower() not in existing_tables:
+                conn.close()
+                return False
+            cursor.execute(f"PRAGMA table_info('{table_name}')")
+            existing_cols = {row[1].lower() for row in cursor.fetchall()}
+            for col in table.columns:
+                if col.name.lower() not in existing_cols:
+                    conn.close()
+                    return False
+
+        conn.close()
+        return True
     except Exception:
         return False
 
 
-def reset_legacy_database(db_path: str) -> bool:
-    """If the database is using an old format, cleanly remove it so it starts from scratch with the modern schema."""
-    if is_legacy_database(db_path):
+def reset_db_if_invalid(db_path: str) -> bool:
+    """If the database at db_path does not match the expected schema or is legacy,
+    cleanly removes it so the application starts fresh from scratch.
+    """
+    path = Path(db_path)
+    if not path.exists():
+        return False
+
+    if not validate_db_schema(db_path):
         logger.warning(
-            f"Database {db_path} is using legacy format (missing multi-year support). "
-            f"Resetting legacy database to start fresh with modern schema."
+            f"Database {db_path} schema does not match current models or is corrupted. "
+            f"Ignoring saved database and starting from scratch."
         )
         for ext in ["", "-wal", "-shm"]:
             f = Path(str(db_path) + ext)
@@ -544,105 +555,14 @@ def reset_legacy_database(db_path: str) -> bool:
     return False
 
 
+# Backward compatibility aliases
+def is_legacy_database(db_path: str) -> bool:
+    return not validate_db_schema(db_path)
+
+
+reset_legacy_database = reset_db_if_invalid
+
+
 def ensure_schema_up_to_date(engine_or_conn):
-    """Ensures all tables, columns, and indexes in Base.metadata exist in the SQLite database.
-
-    If columns were added to models (e.g. Course.content_hash, LearningOutcome.year, etc.)
-    that are not in the existing SQLite database (such as an older database downloaded from S3),
-    they are safely added via ALTER TABLE ADD COLUMN.
-    """
-    # Create any non-existent tables
+    """Ensures all tables, columns, constraints, and indexes in Base.metadata exist."""
     Base.metadata.create_all(engine_or_conn)
-
-    # Check and add any missing columns or indexes
-    if hasattr(engine_or_conn, "connect"):
-        with engine_or_conn.begin() as conn:
-            _migrate_connection(conn)
-    else:
-        _migrate_connection(engine_or_conn)
-
-
-def _migrate_connection(conn):
-    """Executes safe ALTER TABLE migrations for missing model columns."""
-    dialect = conn.dialect if hasattr(conn, "dialect") else None
-    for table_name, table in Base.metadata.tables.items():
-        try:
-            res = conn.exec_driver_sql(f"PRAGMA table_info({table_name})").fetchall()
-        except Exception:
-            continue
-
-        existing_cols = {r[1].lower() for r in res}
-        for col in table.columns:
-            if col.name.lower() not in existing_cols:
-                col_type = col.type.compile(dialect) if dialect else str(col.type)
-                default_clause = ""
-                if col.default is not None:
-                    val = col.default.arg
-                    default_clause = (
-                        f" DEFAULT {val}"
-                        if isinstance(val, (int, float))
-                        else f" DEFAULT '{val}'"
-                    )
-                elif not col.nullable:
-                    if "int" in col_type.lower():
-                        default_clause = " DEFAULT 2026"
-                    elif "bool" in col_type.lower():
-                        default_clause = " DEFAULT 0"
-                    else:
-                        default_clause = " DEFAULT ''"
-
-                alter_stmt = f"ALTER TABLE {table_name} ADD COLUMN {col.name} {col_type}{default_clause}"
-                logger.info(f"Schema migration: {alter_stmt}")
-                try:
-                    conn.exec_driver_sql(alter_stmt)
-                except Exception as e:
-                    logger.warning(f"Could not execute '{alter_stmt}': {e}")
-
-        # Ensure table indexes exist
-        for idx in table.indexes:
-            try:
-                idx.create(conn)
-            except Exception:
-                pass
-
-        # Ensure table unique constraints have unique indexes in SQLite
-        # (Required by SQLite ON CONFLICT clause)
-        for constraint in table.constraints:
-            if isinstance(constraint, UniqueConstraint):
-                col_names = [f'"{c.name}"' for c in constraint.columns]
-                cols_str = ", ".join(col_names)
-                idx_name = (
-                    constraint.name
-                    or f"uq_{table_name}_{'_'.join(c.name for c in constraint.columns)}"
-                )
-                # Deduplicate any existing duplicate rows before creating unique index
-                dedup_sql = f"""
-                    DELETE FROM "{table_name}"
-                    WHERE rowid NOT IN (
-                        SELECT MIN(rowid) FROM "{table_name}"
-                        GROUP BY {cols_str}
-                    )
-                """
-                try:
-                    conn.exec_driver_sql(dedup_sql)
-                except Exception:
-                    pass
-                create_idx_sql = f'CREATE UNIQUE INDEX IF NOT EXISTS "{idx_name}" ON "{table_name}" ({cols_str})'
-                try:
-                    conn.exec_driver_sql(create_idx_sql)
-                except Exception as e:
-                    logger.warning(f"Could not create unique index {idx_name}: {e}")
-
-    # Backfill default year on child tables if any rows have NULL year
-    for child_table in (
-        "learning_outcomes",
-        "assessments",
-        "meetings",
-        "course_classes",
-    ):
-        try:
-            conn.exec_driver_sql(
-                f"UPDATE {child_table} SET year = 2026 WHERE year IS NULL"
-            )
-        except Exception:
-            pass
