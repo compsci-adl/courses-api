@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import atexit
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from hashlib import shake_256
 from queue import Queue
@@ -22,6 +23,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool
 
+import data_fetcher
 import data_parser
 import fetch_proxies
 from db_service import (
@@ -443,22 +445,37 @@ def process_course(
                     outline_url = f"https://apps.adelaide.edu.au/public/courseoutline?courseInstanceId={course_instance_id}"
 
                     try:
-                        headers = {
-                            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
-                        }
-                        resp = requests.get(
-                            outline_url,
-                            headers=headers,
-                            timeout=3,
-                            impersonate="chrome146",
+                        fetcher = data_fetcher.DataFetcher(
+                            "", full_url=outline_url, use_class_url=True, timeout=4.0
                         )
+                        parsed_res = fetcher.get()
+                        resp_html = ""
+                        if parsed_res and isinstance(parsed_res, dict):
+                            resp_html = parsed_res.get("html", "")
+                        elif (
+                            fetcher.last_response
+                            and fetcher.last_response.status_code == 200
+                        ):
+                            resp_html = fetcher.last_response.text
 
-                        if resp.status_code == 200:
-                            text = resp.text.lower()
+                        if not resp_html:
+                            resp = requests.get(
+                                outline_url,
+                                headers={
+                                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
+                                },
+                                timeout=4,
+                                impersonate="chrome146",
+                            )
+                            if resp.status_code == 200:
+                                resp_html = resp.text
+
+                        if resp_html:
+                            text = resp_html.lower()
                             if "course overview" in text or "subject area" in text:
                                 db_course.course_outline_url = outline_url
                                 parsed_outline = data_parser.parse_course_outline(
-                                    resp.text
+                                    resp_html
                                 )
 
                                 if parsed_outline.get("aim"):
@@ -557,8 +574,27 @@ def process_subject(
 
         # Encode & in subject name
         encoded_name = name.replace("&", "%26")
-        courses = data_parser.get_course_codes(encoded_name, year)
-        course_list = courses.get("courses", []) if isinstance(courses, dict) else []
+        course_list = None
+        for attempt in range(6):
+            courses = data_parser.get_course_codes(encoded_name, year)
+            if (
+                courses is not None
+                and isinstance(courses, dict)
+                and "courses" in courses
+            ):
+                course_list = courses["courses"]
+                break
+            logger.warning(
+                f"Subject '{name}' ({year}) course fetch attempt {attempt + 1}/6 failed or blocked by WAF. Retrying with alternate proxy..."
+            )
+            time.sleep(1.0 + attempt * 0.5)
+
+        if course_list is None:
+            logger.error(
+                f"Subject '{name}' ({year}) could not be retrieved after 6 attempts. Skipping."
+            )
+            course_list = []
+
         progress.update(subject_task, total=len(course_list))
 
         # Process each course concurrently

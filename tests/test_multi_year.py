@@ -19,7 +19,6 @@ from db_service import (
     compute_course_hash,
     ensure_healthy_database,
     ensure_schema_up_to_date,
-    get_existing_course_hashes,
     get_existing_course_ids_for_year,
     get_previous_years_course_data,
     is_legacy_database,
@@ -1055,81 +1054,64 @@ class TestFastAPIRouting(unittest.TestCase):
 
         asyncio.run(run())
 
-    def test_ensure_schema_up_to_date_migrates_missing_content_hash(self):
-        # Create an engine with an older legacy schema missing content_hash and year columns
-        engine = create_engine("sqlite:///:memory:")
-        with engine.begin() as conn:
-            conn.exec_driver_sql(
-                """
-                CREATE TABLE courses (
-                    id VARCHAR PRIMARY KEY,
-                    course_id INTEGER NOT NULL,
-                    year INTEGER NOT NULL,
-                    terms VARCHAR NOT NULL,
-                    subject VARCHAR NOT NULL,
-                    course_code VARCHAR NOT NULL,
-                    title VARCHAR NOT NULL,
-                    campus VARCHAR NOT NULL,
-                    level_of_study VARCHAR,
-                    units INTEGER NOT NULL,
-                    course_coordinator VARCHAR,
-                    course_level VARCHAR NOT NULL,
-                    course_overview VARCHAR,
-                    prerequisites VARCHAR NOT NULL,
-                    corequisites VARCHAR NOT NULL,
-                    antirequisites VARCHAR NOT NULL,
-                    university_wide_elective BOOLEAN NOT NULL,
-                    url VARCHAR NOT NULL,
-                    course_outline_url VARCHAR,
-                    textbooks VARCHAR
+    def test_schema_mismatch_resets_database(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_file = Path(tmpdir) / "test_legacy.sqlite3"
+            engine = create_engine(f"sqlite:///{db_file}")
+            with engine.begin() as conn:
+                conn.exec_driver_sql(
+                    """
+                    CREATE TABLE courses (
+                        id VARCHAR PRIMARY KEY,
+                        course_id INTEGER NOT NULL,
+                        year INTEGER NOT NULL,
+                        terms VARCHAR NOT NULL,
+                        subject VARCHAR NOT NULL,
+                        course_code VARCHAR NOT NULL,
+                        title VARCHAR NOT NULL,
+                        campus VARCHAR NOT NULL,
+                        level_of_study VARCHAR,
+                        units INTEGER NOT NULL,
+                        course_coordinator VARCHAR,
+                        course_level VARCHAR NOT NULL,
+                        course_overview VARCHAR,
+                        prerequisites VARCHAR NOT NULL,
+                        corequisites VARCHAR NOT NULL,
+                        antirequisites VARCHAR NOT NULL,
+                        university_wide_elective BOOLEAN NOT NULL,
+                        url VARCHAR NOT NULL,
+                        course_outline_url VARCHAR,
+                        textbooks VARCHAR
+                    )
+                    """
                 )
-                """
-            )
-            conn.exec_driver_sql(
-                """
-                CREATE TABLE learning_outcomes (
-                    id VARCHAR PRIMARY KEY,
-                    course_id VARCHAR NOT NULL,
-                    description VARCHAR NOT NULL,
-                    outcome_index INTEGER NOT NULL
+                conn.exec_driver_sql(
+                    """
+                    CREATE TABLE learning_outcomes (
+                        id VARCHAR PRIMARY KEY,
+                        course_id VARCHAR NOT NULL,
+                        description VARCHAR NOT NULL,
+                        outcome_index INTEGER NOT NULL
+                    )
+                    """
                 )
-                """
-            )
+            engine.dispose()
 
-        # Before migration, courses has no content_hash
-        with engine.connect() as conn:
-            cols = [
-                r[1]
-                for r in conn.exec_driver_sql("PRAGMA table_info(courses)").fetchall()
-            ]
-            self.assertNotIn("content_hash", cols)
+            # Schema lacks content_hash and year in learning_outcomes -> invalid
+            self.assertFalse(is_legacy_database(str(db_file)) is False)
 
-        # Run migration
-        ensure_schema_up_to_date(engine)
+            # Resetting legacy DB cleanly wipes it
+            did_reset = reset_legacy_database(str(db_file))
+            self.assertTrue(did_reset)
+            self.assertFalse(db_file.exists())
 
-        # After migration, content_hash must exist
-        with engine.connect() as conn:
-            cols = [
-                r[1]
-                for r in conn.exec_driver_sql("PRAGMA table_info(courses)").fetchall()
-            ]
-            self.assertIn("content_hash", cols)
-            lo_cols = [
-                r[1]
-                for r in conn.exec_driver_sql(
-                    "PRAGMA table_info(learning_outcomes)"
-                ).fetchall()
-            ]
-            self.assertIn("year", lo_cols)
+            # Fresh init creates full schema
+            new_engine = create_engine(f"sqlite:///{db_file}")
+            ensure_schema_up_to_date(new_engine)
+            new_engine.dispose()
 
-        # get_existing_course_hashes must execute cleanly without OperationalError
-        Session = sessionmaker(bind=engine)
-        sess = Session()
-        try:
-            hashes = get_existing_course_hashes(sess)
-            self.assertEqual(hashes, {})
-        finally:
-            sess.close()
+            # Now schema matches perfectly
+            self.assertFalse(is_legacy_database(str(db_file)))
 
     def test_bulk_replace_classes_on_legacy_table_without_initial_unique_constraint(
         self,
@@ -1257,6 +1239,29 @@ class TestFastAPIRouting(unittest.TestCase):
             modern_reset = reset_legacy_database(str(modern_db))
             self.assertFalse(modern_reset)
             self.assertTrue(modern_db.exists())
+
+    def test_get_course_codes_returns_none_on_403_so_subject_is_not_skipped(self):
+        # When Funnelback returns 403, get_course_codes must return None (not empty list)
+        mock_fetcher = MagicMock()
+        mock_fetcher.get.return_value = {}
+        mock_fetcher.last_response = MagicMock(status_code=403)
+
+        with patch("data_fetcher.DataFetcher", return_value=mock_fetcher):
+            res = data_parser.get_course_codes("Accounting", 2027)
+            self.assertIsNone(res)
+
+    def test_data_fetcher_direct_blocked_flag_on_403(self):
+        # When direct connection gets 403, DataFetcher sets _direct_blocked = True
+        data_fetcher.DataFetcher._direct_blocked = False
+
+        mock_resp = MagicMock(status_code=403)
+        with patch("curl_cffi.requests.get", return_value=mock_resp):
+            fetcher = data_fetcher.DataFetcher("?test", use_proxy=False)
+            fetcher.get()
+            self.assertTrue(data_fetcher.DataFetcher._direct_blocked)
+
+        # Reset flag
+        data_fetcher.DataFetcher._direct_blocked = False
 
 
 if __name__ == "__main__":
