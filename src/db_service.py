@@ -5,6 +5,7 @@ import shutil
 import sqlite3
 from pathlib import Path
 
+from sqlalchemy import UniqueConstraint
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
@@ -237,6 +238,15 @@ def bulk_upsert_courses(session: Session, courses_data: list[dict]):
     if not courses_data:
         return
 
+    # Ensure unique index exists on SQLite for ON CONFLICT target
+    try:
+        session.connection().exec_driver_sql(
+            'CREATE UNIQUE INDEX IF NOT EXISTS "uq_courses_year_course_id" '
+            'ON "courses" ("year", "course_id")'
+        )
+    except Exception:
+        pass
+
     stmt = sqlite_insert(Course).values(courses_data)
     stmt = stmt.on_conflict_do_update(
         index_elements=["year", "course_id"],
@@ -301,6 +311,15 @@ def bulk_replace_classes_for_year(
         synchronize_session=False
     )
 
+    # Ensure unique index exists on SQLite for ON CONFLICT target
+    try:
+        session.connection().exec_driver_sql(
+            'CREATE UNIQUE INDEX IF NOT EXISTS "uq_course_classes_year_course_class_section_group" '
+            'ON "course_classes" ("year", "course_id", "class_nbr", "section", "group")'
+        )
+    except Exception:
+        pass
+
     # Batch insert using SQLite ON CONFLICT
     # Chunking by 2,000 prevents exceeding SQLite's bound parameter limits
     chunk_size = 2000
@@ -315,7 +334,16 @@ def bulk_replace_classes_for_year(
                 "component": stmt.excluded.component,
             },
         )
-        session.execute(stmt)
+        try:
+            session.execute(stmt)
+        except Exception as e:
+            # Fallback for legacy database tables if constraint matching fails
+            logger.warning(
+                f"Falling back to on_conflict_do_nothing on primary key 'id' for course_classes: {e}"
+            )
+            fallback_stmt = sqlite_insert(CourseClass).values(chunk)
+            fallback_stmt = fallback_stmt.on_conflict_do_nothing(index_elements=["id"])
+            session.execute(fallback_stmt)
 
     if meetings_data:
         # Deduplicate meetings by ID
@@ -465,6 +493,57 @@ def ensure_healthy_database(db_path: str, base_dir: str = ".") -> bool:
     return False
 
 
+def is_legacy_database(db_path: str) -> bool:
+    """Checks if the database at db_path exists but uses the legacy single-year schema."""
+    path = Path(db_path)
+    if not path.exists() or path.stat().st_size == 0:
+        return False
+    try:
+        conn = sqlite3.connect(str(path))
+        cursor = conn.cursor()
+        # Check if courses table exists
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='courses'"
+        )
+        if not cursor.fetchone():
+            conn.close()
+            return False
+        # Check if content_hash column exists in courses
+        cursor.execute("PRAGMA table_info(courses)")
+        course_cols = {row[1].lower() for row in cursor.fetchall()}
+        # Check if year column exists in course_classes
+        cursor.execute("PRAGMA table_info(course_classes)")
+        class_cols = {row[1].lower() for row in cursor.fetchall()}
+        conn.close()
+
+        # If courses exists but content_hash is missing, or course_classes is missing year, it's legacy
+        if "content_hash" not in course_cols:
+            return True
+        if class_cols and "year" not in class_cols:
+            return True
+        return False
+    except Exception:
+        return False
+
+
+def reset_legacy_database(db_path: str) -> bool:
+    """If the database is using an old format, cleanly remove it so it starts from scratch with the modern schema."""
+    if is_legacy_database(db_path):
+        logger.warning(
+            f"Database {db_path} is using legacy format (missing multi-year support). "
+            f"Resetting legacy database to start fresh with modern schema."
+        )
+        for ext in ["", "-wal", "-shm"]:
+            f = Path(str(db_path) + ext)
+            if f.exists():
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
+        return True
+    return False
+
+
 def ensure_schema_up_to_date(engine_or_conn):
     """Ensures all tables, columns, and indexes in Base.metadata exist in the SQLite database.
 
@@ -525,6 +604,34 @@ def _migrate_connection(conn):
                 idx.create(conn)
             except Exception:
                 pass
+
+        # Ensure table unique constraints have unique indexes in SQLite
+        # (Required by SQLite ON CONFLICT clause)
+        for constraint in table.constraints:
+            if isinstance(constraint, UniqueConstraint):
+                col_names = [f'"{c.name}"' for c in constraint.columns]
+                cols_str = ", ".join(col_names)
+                idx_name = (
+                    constraint.name
+                    or f"uq_{table_name}_{'_'.join(c.name for c in constraint.columns)}"
+                )
+                # Deduplicate any existing duplicate rows before creating unique index
+                dedup_sql = f"""
+                    DELETE FROM "{table_name}"
+                    WHERE rowid NOT IN (
+                        SELECT MIN(rowid) FROM "{table_name}"
+                        GROUP BY {cols_str}
+                    )
+                """
+                try:
+                    conn.exec_driver_sql(dedup_sql)
+                except Exception:
+                    pass
+                create_idx_sql = f'CREATE UNIQUE INDEX IF NOT EXISTS "{idx_name}" ON "{table_name}" ({cols_str})'
+                try:
+                    conn.exec_driver_sql(create_idx_sql)
+                except Exception as e:
+                    logger.warning(f"Could not create unique index {idx_name}: {e}")
 
     # Backfill default year on child tables if any rows have NULL year
     for child_table in (
