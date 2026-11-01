@@ -8,15 +8,26 @@ from pathlib import Path
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
-from log import logger
-from models import (
-    Assessment,
-    Base,
-    Course,
-    CourseClass,
-    LearningOutcome,
-    Meetings,
-)
+try:
+    from .log import logger
+    from .models import (
+        Assessment,
+        Base,
+        Course,
+        CourseClass,
+        LearningOutcome,
+        Meetings,
+    )
+except ImportError:
+    from log import logger
+    from models import (
+        Assessment,
+        Base,
+        Course,
+        CourseClass,
+        LearningOutcome,
+        Meetings,
+    )
 
 
 def compute_course_hash(course_dict: dict) -> str:
