@@ -8,7 +8,15 @@ from pathlib import Path
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
-from models import Assessment, Course, CourseClass, LearningOutcome, Meetings
+from log import logger
+from models import (
+    Assessment,
+    Base,
+    Course,
+    CourseClass,
+    LearningOutcome,
+    Meetings,
+)
 
 
 def compute_course_hash(course_dict: dict) -> str:
@@ -37,8 +45,14 @@ def get_existing_course_hashes(session: Session) -> dict[tuple[str, int], str]:
 
     Returns dict mapping (course_id/course_cid, year) -> content_hash.
     """
-    rows = session.query(Course.id, Course.year, Course.content_hash).all()
-    return {(row[0], row[1]): row[2] for row in rows if row[2] is not None}
+    try:
+        rows = session.query(Course.id, Course.year, Course.content_hash).all()
+        return {(row[0], row[1]): row[2] for row in rows if row[2] is not None}
+    except Exception as e:
+        logger.warning(
+            f"Could not load existing course hashes (will populate fresh): {e}"
+        )
+        return {}
 
 
 def get_existing_course_ids_for_year(session: Session, year: int) -> dict[str, str]:
@@ -449,3 +463,79 @@ def ensure_healthy_database(db_path: str, base_dir: str = ".") -> bool:
                 print(f"[DB HEALTH CHECK] Candidate {cand} failed integrity check: {e}")
 
     return False
+
+
+def ensure_schema_up_to_date(engine_or_conn):
+    """Ensures all tables, columns, and indexes in Base.metadata exist in the SQLite database.
+
+    If columns were added to models (e.g. Course.content_hash, LearningOutcome.year, etc.)
+    that are not in the existing SQLite database (such as an older database downloaded from S3),
+    they are safely added via ALTER TABLE ADD COLUMN.
+    """
+    # Create any non-existent tables
+    Base.metadata.create_all(engine_or_conn)
+
+    # Check and add any missing columns or indexes
+    if hasattr(engine_or_conn, "connect"):
+        with engine_or_conn.begin() as conn:
+            _migrate_connection(conn)
+    else:
+        _migrate_connection(engine_or_conn)
+
+
+def _migrate_connection(conn):
+    """Executes safe ALTER TABLE migrations for missing model columns."""
+    dialect = conn.dialect if hasattr(conn, "dialect") else None
+    for table_name, table in Base.metadata.tables.items():
+        try:
+            res = conn.exec_driver_sql(f"PRAGMA table_info({table_name})").fetchall()
+        except Exception:
+            continue
+
+        existing_cols = {r[1].lower() for r in res}
+        for col in table.columns:
+            if col.name.lower() not in existing_cols:
+                col_type = col.type.compile(dialect) if dialect else str(col.type)
+                default_clause = ""
+                if col.default is not None:
+                    val = col.default.arg
+                    default_clause = (
+                        f" DEFAULT {val}"
+                        if isinstance(val, (int, float))
+                        else f" DEFAULT '{val}'"
+                    )
+                elif not col.nullable:
+                    if "int" in col_type.lower():
+                        default_clause = " DEFAULT 2026"
+                    elif "bool" in col_type.lower():
+                        default_clause = " DEFAULT 0"
+                    else:
+                        default_clause = " DEFAULT ''"
+
+                alter_stmt = f"ALTER TABLE {table_name} ADD COLUMN {col.name} {col_type}{default_clause}"
+                logger.info(f"Schema migration: {alter_stmt}")
+                try:
+                    conn.exec_driver_sql(alter_stmt)
+                except Exception as e:
+                    logger.warning(f"Could not execute '{alter_stmt}': {e}")
+
+        # Ensure table indexes exist
+        for idx in table.indexes:
+            try:
+                idx.create(conn)
+            except Exception:
+                pass
+
+    # Backfill default year on child tables if any rows have NULL year
+    for child_table in (
+        "learning_outcomes",
+        "assessments",
+        "meetings",
+        "course_classes",
+    ):
+        try:
+            conn.exec_driver_sql(
+                f"UPDATE {child_table} SET year = 2026 WHERE year IS NULL"
+            )
+        except Exception:
+            pass

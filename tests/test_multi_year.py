@@ -18,6 +18,8 @@ from db_service import (
     bulk_replace_classes_for_year,
     compute_course_hash,
     ensure_healthy_database,
+    ensure_schema_up_to_date,
+    get_existing_course_hashes,
     get_existing_course_ids_for_year,
     get_previous_years_course_data,
     purge_year_data,
@@ -909,12 +911,13 @@ class TestFastAPIRouting(unittest.TestCase):
 
         asyncio.run(run())
 
+    @patch("fetch_proxies.main")
     @patch("scraper.scrape_single_year")
     @patch("scraper.S3SyncManager")
     @patch("scraper.ensure_healthy_database")
     @patch("scraper.finalize_sqlite_for_s3")
     def test_pipeline_skips_historical_2026_and_scrapes_active_2027(
-        self, mock_finalize, mock_ensure, mock_s3_class, mock_scrape_year
+        self, mock_finalize, mock_ensure, mock_s3_class, mock_scrape_year, mock_proxies
     ):
         async def run():
             mock_s3 = MagicMock()
@@ -957,6 +960,82 @@ class TestFastAPIRouting(unittest.TestCase):
                     self.assertTrue(call.kwargs["is_active"])
 
         asyncio.run(run())
+
+    def test_ensure_schema_up_to_date_migrates_missing_content_hash(self):
+        # Create an engine with an older legacy schema missing content_hash and year columns
+        engine = create_engine("sqlite:///:memory:")
+        with engine.begin() as conn:
+            conn.exec_driver_sql(
+                """
+                CREATE TABLE courses (
+                    id VARCHAR PRIMARY KEY,
+                    course_id INTEGER NOT NULL,
+                    year INTEGER NOT NULL,
+                    terms VARCHAR NOT NULL,
+                    subject VARCHAR NOT NULL,
+                    course_code VARCHAR NOT NULL,
+                    title VARCHAR NOT NULL,
+                    campus VARCHAR NOT NULL,
+                    level_of_study VARCHAR,
+                    units INTEGER NOT NULL,
+                    course_coordinator VARCHAR,
+                    course_level VARCHAR NOT NULL,
+                    course_overview VARCHAR,
+                    prerequisites VARCHAR NOT NULL,
+                    corequisites VARCHAR NOT NULL,
+                    antirequisites VARCHAR NOT NULL,
+                    university_wide_elective BOOLEAN NOT NULL,
+                    url VARCHAR NOT NULL,
+                    course_outline_url VARCHAR,
+                    textbooks VARCHAR
+                )
+                """
+            )
+            conn.exec_driver_sql(
+                """
+                CREATE TABLE learning_outcomes (
+                    id VARCHAR PRIMARY KEY,
+                    course_id VARCHAR NOT NULL,
+                    description VARCHAR NOT NULL,
+                    outcome_index INTEGER NOT NULL
+                )
+                """
+            )
+
+        # Before migration, courses has no content_hash
+        with engine.connect() as conn:
+            cols = [
+                r[1]
+                for r in conn.exec_driver_sql("PRAGMA table_info(courses)").fetchall()
+            ]
+            self.assertNotIn("content_hash", cols)
+
+        # Run migration
+        ensure_schema_up_to_date(engine)
+
+        # After migration, content_hash must exist
+        with engine.connect() as conn:
+            cols = [
+                r[1]
+                for r in conn.exec_driver_sql("PRAGMA table_info(courses)").fetchall()
+            ]
+            self.assertIn("content_hash", cols)
+            lo_cols = [
+                r[1]
+                for r in conn.exec_driver_sql(
+                    "PRAGMA table_info(learning_outcomes)"
+                ).fetchall()
+            ]
+            self.assertIn("year", lo_cols)
+
+        # get_existing_course_hashes must execute cleanly without OperationalError
+        Session = sessionmaker(bind=engine)
+        sess = Session()
+        try:
+            hashes = get_existing_course_hashes(sess)
+            self.assertEqual(hashes, {})
+        finally:
+            sess.close()
 
 
 if __name__ == "__main__":
