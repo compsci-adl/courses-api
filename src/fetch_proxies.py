@@ -34,9 +34,10 @@ def test_proxy(
     }
     for attempt in range(retries + 1):  # Retry logic
         try:
-            # Use realistic User-Agent to avoid WAF block
+            # Use realistic User-Agent and Referer to avoid WAF block
             headers = {
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+                "Referer": "https://www.adelaide.edu.au/",
             }
             response = requests.get(
                 test_url, proxies=proxies, headers=headers, timeout=timeout

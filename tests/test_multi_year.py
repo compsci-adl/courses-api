@@ -22,7 +22,9 @@ from db_service import (
     get_existing_course_hashes,
     get_existing_course_ids_for_year,
     get_previous_years_course_data,
+    is_legacy_database,
     purge_year_data,
+    reset_legacy_database,
 )
 from models import (
     Assessment,
@@ -1128,6 +1130,133 @@ class TestFastAPIRouting(unittest.TestCase):
             self.assertEqual(hashes, {})
         finally:
             sess.close()
+
+    def test_bulk_replace_classes_on_legacy_table_without_initial_unique_constraint(
+        self,
+    ):
+        # Create a database where course_classes has NO initial unique constraint on (year, course_id, class_nbr, section, group)
+        engine = create_engine("sqlite:///:memory:")
+        with engine.begin() as conn:
+            conn.exec_driver_sql(
+                """
+                CREATE TABLE course_classes (
+                    id VARCHAR PRIMARY KEY,
+                    year INTEGER NOT NULL,
+                    class_nbr INTEGER NOT NULL,
+                    section VARCHAR NOT NULL,
+                    size INTEGER NOT NULL,
+                    available INTEGER NOT NULL,
+                    component VARCHAR,
+                    "group" VARCHAR,
+                    course_id VARCHAR NOT NULL
+                )
+                """
+            )
+            conn.exec_driver_sql(
+                """
+                CREATE TABLE meetings (
+                    id VARCHAR PRIMARY KEY,
+                    year INTEGER NOT NULL,
+                    dates VARCHAR NOT NULL,
+                    days VARCHAR NOT NULL,
+                    start_time VARCHAR NOT NULL,
+                    end_time VARCHAR NOT NULL,
+                    campus VARCHAR NOT NULL,
+                    location VARCHAR NOT NULL,
+                    instructor VARCHAR,
+                    course_class_id VARCHAR NOT NULL
+                )
+                """
+            )
+
+        Session = sessionmaker(bind=engine)
+        sess = Session()
+        try:
+            classes_data = [
+                {
+                    "id": "cls_1",
+                    "year": 2027,
+                    "class_nbr": 1001,
+                    "section": "LE01",
+                    "size": 50,
+                    "available": 10,
+                    "component": "Lecture",
+                    "group": "1",
+                    "course_id": "c1",
+                }
+            ]
+            meetings_data = [
+                {
+                    "id": "m_1",
+                    "year": 2027,
+                    "dates": "1 Mar - 1 Jun",
+                    "days": "Mon",
+                    "start_time": "9am",
+                    "end_time": "10am",
+                    "campus": "North Terrace",
+                    "location": "Room 1",
+                    "instructor": "Staff",
+                    "course_class_id": "cls_1",
+                }
+            ]
+            # Must succeed without sqlite3.OperationalError: ON CONFLICT clause does not match...
+            bulk_replace_classes_for_year(sess, 2027, classes_data, meetings_data)
+
+            # Verify rows were inserted
+            inserted_cls = sess.query(CourseClass).all()
+            self.assertEqual(len(inserted_cls), 1)
+            self.assertEqual(inserted_cls[0].class_nbr, 1001)
+        finally:
+            sess.close()
+
+    def test_is_legacy_database_and_reset(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            legacy_db = Path(tmpdir) / "legacy.sqlite3"
+            modern_db = Path(tmpdir) / "modern.sqlite3"
+
+            # Create legacy DB (missing content_hash)
+            l_conn = sqlite3.connect(str(legacy_db))
+            l_conn.execute(
+                """
+                CREATE TABLE courses (
+                    id VARCHAR PRIMARY KEY,
+                    course_id INTEGER NOT NULL,
+                    year INTEGER NOT NULL,
+                    terms VARCHAR NOT NULL,
+                    subject VARCHAR NOT NULL,
+                    course_code VARCHAR NOT NULL,
+                    title VARCHAR NOT NULL,
+                    campus VARCHAR NOT NULL,
+                    units INTEGER NOT NULL,
+                    course_level VARCHAR NOT NULL,
+                    prerequisites VARCHAR NOT NULL,
+                    corequisites VARCHAR NOT NULL,
+                    antirequisites VARCHAR NOT NULL,
+                    university_wide_elective BOOLEAN NOT NULL,
+                    url VARCHAR NOT NULL
+                )
+                """
+            )
+            l_conn.close()
+
+            # Create modern DB
+            m_engine = create_engine(f"sqlite:///{modern_db}")
+            Base.metadata.create_all(m_engine)
+            m_engine.dispose()
+
+            # Test detection
+            self.assertTrue(is_legacy_database(str(legacy_db)))
+            self.assertFalse(is_legacy_database(str(modern_db)))
+
+            # Test reset
+            reset_result = reset_legacy_database(str(legacy_db))
+            self.assertTrue(reset_result)
+            self.assertFalse(legacy_db.exists())
+
+            # Resetting modern DB should return False and keep file
+            modern_reset = reset_legacy_database(str(modern_db))
+            self.assertFalse(modern_reset)
+            self.assertTrue(modern_db.exists())
 
 
 if __name__ == "__main__":

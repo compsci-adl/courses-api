@@ -29,6 +29,7 @@ class DataFetcher:
     _proxies = None
     _proxy_failures = {}
     _proxy_lock = threading.Lock()
+    _funnelback_semaphore = threading.BoundedSemaphore(4)
 
     @staticmethod
     def _sanitise_for_log(value: Any) -> str:
@@ -176,6 +177,7 @@ class DataFetcher:
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
                 "Accept-Language": "en-US,en;q=0.9",
+                "Referer": "https://www.adelaide.edu.au/",
                 "Cache-Control": "no-cache",
                 "Pragma": "no-cache",
                 "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="146", "Google Chrome";v="146"',
@@ -183,7 +185,7 @@ class DataFetcher:
                 "Sec-Ch-Ua-Platform": '"macOS"',
                 "Sec-Fetch-Dest": "document",
                 "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-Site": "same-origin",
                 "Sec-Fetch-User": "?1",
                 "Upgrade-Insecure-Requests": "1",
             }
@@ -192,43 +194,65 @@ class DataFetcher:
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
                 "Accept": "application/json, text/javascript, */*; q=0.01",
                 "Accept-Language": "en-US,en;q=0.9",
+                "Referer": "https://www.adelaide.edu.au/",
+                "Origin": "https://www.adelaide.edu.au",
                 "Cache-Control": "no-cache",
                 "Pragma": "no-cache",
                 "X-Requested-With": "XMLHttpRequest",
+                "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="146", "Google Chrome";v="146"',
+                "Sec-Ch-Ua-Mobile": "?0",
+                "Sec-Ch-Ua-Platform": '"macOS"',
+                "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Site": "cross-site",
             }
 
-        # --- RECOMMENDATION 1: Direct Connection First ---
-        try:
-            logger.debug(
-                "Attempting direct connection for %s...",
-                self._sanitise_for_log(self.endpoint),
-            )
-            direct_resp = requests.get(
-                self.url,
-                headers=headers,
-                timeout=min(self.timeout, 5.0),
-                impersonate="chrome146",
-            )
-            if direct_resp.status_code == 200:
-                parsed = self._process_response(direct_resp)
-                if parsed is not None:
-                    return parsed
-            elif direct_resp.status_code == 404:
-                self.last_response = direct_resp
-                logger.warning("HTTP 404 - Not Found: %s", self.url)
-                return {}
-            elif direct_resp.status_code in (403, 429):
-                logger.warning(
-                    "Direct connection throttled (HTTP %s). Falling back to proxy pool.",
-                    direct_resp.status_code,
-                )
-        except Exception as e:
-            logger.debug(
-                "Direct connection attempt failed (%s). Falling back to proxies.",
-                self._sanitise_for_log(e),
-            )
+        # Rate limit Funnelback requests across concurrent worker threads
+        sem_ctx = (
+            DataFetcher._funnelback_semaphore
+            if not self.use_class_url
+            else threading.Lock()
+        )
 
-        # --- RECOMMENDATION 3: Fast Proxy Fallback with Tight 3.0s Timeout & Immediate Drops ---
+        with sem_ctx:
+            # Direct Connection First (with 2 attempts on 403/429) ---
+            for direct_attempt in range(2):
+                try:
+                    logger.debug(
+                        "Attempting direct connection for %s (attempt %s)...",
+                        self._sanitise_for_log(self.endpoint),
+                        direct_attempt + 1,
+                    )
+                    direct_resp = requests.get(
+                        self.url,
+                        headers=headers,
+                        timeout=min(self.timeout, 5.0),
+                        impersonate="chrome146",
+                    )
+                    self.last_response = direct_resp
+                    if direct_resp.status_code == 200:
+                        parsed = self._process_response(direct_resp)
+                        if parsed is not None:
+                            return parsed
+                    elif direct_resp.status_code == 404:
+                        logger.warning("HTTP 404 - Not Found: %s", self.url)
+                        return {}
+                    elif direct_resp.status_code in (403, 429):
+                        logger.warning(
+                            "Direct connection throttled (HTTP %s, attempt %s).",
+                            direct_resp.status_code,
+                            direct_attempt + 1,
+                        )
+                        time.sleep(0.5 * (direct_attempt + 1))
+                except Exception as e:
+                    logger.debug(
+                        "Direct connection attempt %s failed (%s).",
+                        direct_attempt + 1,
+                        self._sanitise_for_log(e),
+                    )
+                    time.sleep(0.3)
+
+        # Fast Proxy Fallback with Tight 3.0s Timeout & Immediate Drops ---
         retries = 0
         proxy_timeout = min(self.timeout, 3.0)
 
@@ -242,6 +266,7 @@ class DataFetcher:
                         timeout=min(self.timeout, 4.0),
                         impersonate="chrome146",
                     )
+                    self.last_response = direct_resp
                     if direct_resp.status_code == 200:
                         parsed = self._process_response(direct_resp)
                         if parsed is not None:

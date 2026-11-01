@@ -34,6 +34,7 @@ from db_service import (
     get_existing_course_hashes,
     get_existing_course_ids_for_year,
     get_previous_years_course_data,
+    reset_legacy_database,
 )
 from log import logger
 from models import (
@@ -708,6 +709,12 @@ async def run_pipeline(
     db_downloaded = s3_manager.download_database(db_path)
     if db_downloaded:
         logger.info(f"Loaded existing database from S3 into {db_path}")
+
+    # If database uses old single-year format, reset so it starts clean with modern schema
+    if reset_legacy_database(db_path):
+        logger.info(
+            f"Reset legacy database at {db_path} to build clean multi-year schema from scratch."
+        )
 
     existing_years = S3SyncManager.get_synced_years_from_db(db_path)
     logger.info(f"Years already populated in DB: {existing_years}")

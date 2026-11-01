@@ -1,4 +1,5 @@
 import re
+import time
 
 from bs4 import BeautifulSoup
 
@@ -18,7 +19,19 @@ def get_subjects(year: int, timeout: float = 3.0) -> dict[str, list[dict[str, st
         if (
             subjects.last_response is None
             or subjects.last_response.status_code != 200
-            or data is None
+            or not data
+        ):
+            time.sleep(1.0)
+            subjects = data_fetcher.DataFetcher(
+                f"?f.Tabs|type=Degrees+%26+Courses&form=json&num_ranks=10&profile=site-search&query=&f.Year|year={year}&collection=uosa~sp-aem-prod&f.Study+type|studyType=Course&start_rank=1",
+                timeout=timeout + 2.0,
+            )
+            data = subjects.get()
+
+        if (
+            subjects.last_response is None
+            or subjects.last_response.status_code != 200
+            or not data
         ):
             status = (
                 subjects.last_response.status_code
@@ -51,6 +64,18 @@ def get_course_codes(subject: str, year: int, timeout: float = 6.0):
 
     try:
         data = courses.get()
+        if (
+            courses.last_response is None
+            or courses.last_response.status_code != 200
+            or not data
+        ):
+            time.sleep(0.8)
+            courses = data_fetcher.DataFetcher(
+                f"?f.Tabs%7Ctype=Degrees+%26+Courses&form=json&f.Year%7Cyear={year}&num_ranks=1000&profile=site-search&query=&f.Area+of+study%7CstudyArea={subject}&collection=uosa%7Esp-aem-prod&f.Study+type%7CstudyType=Course",
+                timeout=timeout + 2.0,
+            )
+            data = courses.get()
+
         logger.debug(f"Course data: {data}")
         if (
             courses.last_response is None
