@@ -1,3 +1,4 @@
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
@@ -55,11 +56,21 @@ def test_proxy(
     return None
 
 
-def save_working_proxies(proxies, filename="src/working_proxies.txt"):
-    """Save working proxies to a text file."""
-    with open(filename, "w") as file:
-        for proxy in proxies:
-            file.write(f"{proxy}\n")
+def save_working_proxies(proxies, filename=None):
+    """Save working proxies to text files across standard candidate paths."""
+    targets = (
+        [filename] if filename else ["src/working_proxies.txt", "working_proxies.txt"]
+    )
+    for target in targets:
+        try:
+            parent = os.path.dirname(target)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(target, "w") as file:
+                for proxy in proxies:
+                    file.write(f"{proxy}\n")
+        except Exception:
+            pass
 
 
 def main():

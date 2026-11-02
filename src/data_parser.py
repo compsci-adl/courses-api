@@ -7,52 +7,81 @@ import data_fetcher
 from log import logger
 
 
-def get_subjects(year: int, timeout: float = 3.0) -> dict[str, list[dict[str, str]]]:
-    """Return a list of subjects for a given year."""
-    subjects = data_fetcher.DataFetcher(
-        f"?f.Tabs|type=Degrees+%26+Courses&form=json&num_ranks=10&profile=site-search&query=&f.Year|year={year}&collection=uosa~sp-aem-prod&f.Study+type|studyType=Course&start_rank=1",
-        timeout=timeout,
-    )
-
-    try:
-        data = subjects.get()
+def _extract_subjects_from_facet_data(data) -> list[dict[str, str]]:
+    """Helper to extract Area of study subject names from Funnelback response data."""
+    if not data or not isinstance(data, dict):
+        return []
+    facets = data.get("facets", [])
+    area_facet = None
+    for facet in facets:
         if (
-            subjects.last_response is None
-            or subjects.last_response.status_code != 200
-            or not data
+            isinstance(facet, dict)
+            and str(facet.get("name", "")).lower() == "area of study"
         ):
-            time.sleep(1.0)
-            subjects = data_fetcher.DataFetcher(
-                f"?f.Tabs|type=Degrees+%26+Courses&form=json&num_ranks=10&profile=site-search&query=&f.Year|year={year}&collection=uosa~sp-aem-prod&f.Study+type|studyType=Course&start_rank=1",
-                timeout=timeout + 2.0,
-            )
-            data = subjects.get()
+            area_facet = facet
+            break
+    if not area_facet and len(facets) > 5 and isinstance(facets[5], dict):
+        area_facet = facets[5]
 
-        if (
-            subjects.last_response is None
-            or subjects.last_response.status_code != 200
-            or not data
-        ):
-            status = (
-                subjects.last_response.status_code
-                if subjects.last_response
-                else "NO_RESPONSE"
-            )
-            print(f"Error: {status} - {data}")
-            return {"subjects": []}
-
+    if area_facet and isinstance(area_facet, dict) and "allValues" in area_facet:
+        values = area_facet.get("allValues", [])
         subject_list = []
+        for subject in values:
+            if isinstance(subject, dict):
+                subj = subject.get("data")
+                if subj:
+                    subject_list.append({"subject": subj})
+        return subject_list
+    return []
 
-        data = data.get("facets")[5].get("allValues", [])
-        for subject in data:
-            subj = subject.get("data")
-            subject_list.append({"subject": subj})
-        logger.debug(f"Subjects: {subject_list}")
-        return {"subjects": subject_list}
 
-    except Exception as e:
-        print(f"An error occurred while fetching subjects: {e}")
-        return {"subjects": []}
+def get_subjects(year: int, timeout: float = 3.0) -> dict[str, list[dict[str, str]]]:
+    """Return a list of subjects for a given year by querying Funnelback search facets dynamically.
+
+    Tries year-filtered query first, then generic study-area facet query, with proxy retries.
+    """
+    query_endpoints = [
+        f"?f.Tabs|type=Degrees+%26+Courses&form=json&num_ranks=10&profile=site-search&query=&f.Year|year={year}&collection=uosa~sp-aem-prod&f.Study+type|studyType=Course&start_rank=1",
+        "?f.Tabs|type=Degrees+%26+Courses&form=json&num_ranks=10&profile=site-search&query=&collection=uosa~sp-aem-prod&f.Study+type|studyType=Course&start_rank=1",
+    ]
+
+    fetcher = None
+    for attempt in range(4):
+        for endpoint in query_endpoints:
+            fetcher = data_fetcher.DataFetcher(
+                endpoint,
+                timeout=timeout + attempt * 1.0,
+            )
+            try:
+                data = fetcher.get()
+                if (
+                    fetcher.last_response is not None
+                    and fetcher.last_response.status_code == 200
+                    and data
+                    and isinstance(data, dict)
+                ):
+                    subject_list = _extract_subjects_from_facet_data(data)
+                    if subject_list:
+                        logger.debug(
+                            f"Retrieved {len(subject_list)} subjects dynamically for year {year}"
+                        )
+                        return {"subjects": subject_list}
+            except Exception as e:
+                logger.debug(
+                    f"Attempt {attempt + 1} to fetch subjects for year {year} ({endpoint}) failed: {e}"
+                )
+
+        time.sleep(0.5 + attempt * 0.5)
+
+    status = (
+        fetcher.last_response.status_code
+        if fetcher and fetcher.last_response
+        else "NO_RESPONSE"
+    )
+    logger.error(
+        f"Failed to dynamically retrieve subjects for year {year} after 4 attempts (HTTP {status})."
+    )
+    return {"subjects": []}
 
 
 def get_course_codes(subject: str, year: int, timeout: float = 6.0):

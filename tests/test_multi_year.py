@@ -1263,6 +1263,121 @@ class TestFastAPIRouting(unittest.TestCase):
         # Reset flag
         data_fetcher.DataFetcher._direct_blocked = False
 
+    @patch("scraper.fetch_proxies")
+    @patch("scraper.scrape_single_year")
+    @patch("scraper.S3SyncManager")
+    @patch("scraper.ensure_healthy_database")
+    @patch("scraper.finalize_sqlite_for_s3")
+    def test_pipeline_empty_db_scrapes_2026_and_all_target_years(
+        self, mock_finalize, mock_ensure, mock_s3_class, mock_scrape_year, mock_proxies
+    ):
+        async def run():
+            mock_s3 = MagicMock()
+            mock_s3.download_database.return_value = False
+            mock_s3.upload_database.return_value = True
+            # Simulate completely empty DB (no synced years)
+            mock_s3_class.get_synced_years_from_db.return_value = set()
+            mock_s3_class.return_value = mock_s3
+
+            with (
+                patch.object(
+                    YearDiscoveryService,
+                    "discover_available_years",
+                    return_value=[2027, 2028],  # Even if 2026 missing from discovery
+                ),
+                patch.object(
+                    YearDiscoveryService,
+                    "determine_active_year",
+                    new_callable=AsyncMock,
+                ) as mock_det,
+            ):
+                mock_det.return_value = 2027
+
+                with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp_db:
+                    await run_pipeline(
+                        force_all_years=False,
+                        db_path=tmp_db.name,
+                        active_year=2027,
+                    )
+
+            # Check which years were called for scrape_single_year
+            called_years = [call.args[0] for call in mock_scrape_year.call_args_list]
+            # 2026 MUST be scraped when DB is empty!
+            self.assertIn(2026, called_years)
+            self.assertIn(2027, called_years)
+            self.assertIn(2028, called_years)
+
+            # 2027 is active (is_active=True), 2026 and 2028 are static (is_active=False)
+            for call in mock_scrape_year.call_args_list:
+                yr = call.args[0]
+                if yr == 2027:
+                    self.assertTrue(call.kwargs["is_active"])
+                else:
+                    self.assertFalse(call.kwargs["is_active"])
+
+        asyncio.run(run())
+
+    def test_get_subjects_dynamic_extraction_and_fallback_to_alternate_query(self):
+        # Verify get_subjects extracts subjects dynamically without hardcoded constants
+        # 1st call fails (403), 2nd call (unfiltered query) succeeds dynamically
+        mock_fail = MagicMock()
+        mock_fail.get.return_value = {}
+        mock_fail.last_response = MagicMock(status_code=403)
+
+        mock_succ = MagicMock()
+        mock_succ.get.return_value = {
+            "facets": [
+                {
+                    "name": "Area of study",
+                    "allValues": [{"data": "Accounting"}, {"data": "Computer Science"}],
+                }
+            ]
+        }
+        mock_succ.last_response = MagicMock(status_code=200)
+
+        with patch("data_fetcher.DataFetcher", side_effect=[mock_fail, mock_succ]):
+            res = data_parser.get_subjects(2026, timeout=0.1)
+            self.assertIn("subjects", res)
+            self.assertEqual(
+                res["subjects"],
+                [{"subject": "Accounting"}, {"subject": "Computer Science"}],
+            )
+
+    def test_get_subjects_returns_empty_when_all_network_attempts_fail(self):
+        # When all queries fail, returns empty subjects list without raising or using hardcoded defaults
+        mock_fail = MagicMock()
+        mock_fail.get.return_value = {}
+        mock_fail.last_response = MagicMock(status_code=403)
+
+        with patch("data_fetcher.DataFetcher", return_value=mock_fail):
+            res = data_parser.get_subjects(2026, timeout=0.1)
+            self.assertEqual(res, {"subjects": []})
+
+    def test_year_discovery_always_includes_2026_to_2028(self):
+        # Fallback years must always include 2026 through 2028
+        fallback = YearDiscoveryService.get_fallback_years(2027)
+        self.assertIn(2026, fallback)
+        self.assertIn(2027, fallback)
+        self.assertIn(2028, fallback)
+
+        # discover_available_years must ensure 2026 is present even if API returns higher years
+        mock_client = MagicMock()
+        mock_client.get.return_value = MagicMock(
+            status_code=200,
+            json=lambda: {
+                "facets": [
+                    {
+                        "name": "Year",
+                        "allValues": [{"data": "2027"}, {"data": "2028"}],
+                    }
+                ]
+            },
+        )
+        years = YearDiscoveryService.discover_available_years(mock_client)
+        self.assertIn(2026, years)
+        self.assertIn(2027, years)
+        self.assertIn(2028, years)
+
 
 if __name__ == "__main__":
     unittest.main()

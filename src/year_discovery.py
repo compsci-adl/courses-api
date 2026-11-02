@@ -21,9 +21,11 @@ class YearDiscoveryService:
 
     @classmethod
     def get_fallback_years(cls, base_year: Optional[int] = None) -> list[int]:
-        """Return fallback years starting from base_year (default current year)."""
-        start = base_year or datetime.now().year
-        return [start + i for i in range(cls.FALLBACK_YEAR_SPAN)]
+        """Return fallback years covering 2026 through at least 2028 (or current_year + span)."""
+        current_y = datetime.now().year
+        start_year = min(2026, base_year or current_y)
+        end_year = max(2028, (base_year or current_y) + cls.FALLBACK_YEAR_SPAN - 1)
+        return list(range(start_year, end_year + 1))
 
     @classmethod
     def discover_available_years(
@@ -31,8 +33,8 @@ class YearDiscoveryService:
     ) -> list[int]:
         """Query the university search API / course planner to discover available academic years.
 
-        Falls back gracefully to [current_year, current_year + 1, current_year + 2]
-        if discovery fails.
+        Guarantees that target academic years (2026-2028) are always included,
+        falling back gracefully if discovery fails.
         """
         search_url = (
             "https://uosa-search.funnelback.squiz.cloud/s/search.html"
@@ -65,7 +67,11 @@ class YearDiscoveryService:
                 client.close()
 
         if discovered_years:
-            return sorted(list(discovered_years))
+            years = sorted(list(discovered_years))
+            for y in [2026, 2027, 2028]:
+                if y not in years:
+                    years.append(y)
+            return sorted(years)
 
         fallback = cls.get_fallback_years()
         logger.info(f"Using fallback academic years: {fallback}")

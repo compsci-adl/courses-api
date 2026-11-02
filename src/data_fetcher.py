@@ -1,3 +1,4 @@
+import os
 import random
 import re
 import threading
@@ -75,15 +76,25 @@ class DataFetcher:
                 DataFetcher._proxies = self.load_proxies()
 
     def load_proxies(self) -> list:
-        """Load proxies from the file."""
-        try:
-            with open(self.PROXY_FILE, "r") as file:
-                proxies = file.read().splitlines()
-                logger.debug(f"Loaded {len(proxies)} proxies from {self.PROXY_FILE}.")
-                return proxies
-        except FileNotFoundError:
-            logger.error(f"Proxy file {self.PROXY_FILE} not found.")
-            return []
+        """Load proxies from file, checking candidate paths."""
+        candidates = [
+            self.PROXY_FILE,
+            "src/working_proxies.txt",
+            "working_proxies.txt",
+            os.path.join(os.path.dirname(__file__), "working_proxies.txt"),
+        ]
+        for path in candidates:
+            if os.path.exists(path):
+                try:
+                    with open(path, "r") as file:
+                        proxies = [line.strip() for line in file if line.strip()]
+                        if proxies:
+                            logger.info(f"Loaded {len(proxies)} proxies from {path}.")
+                            return proxies
+                except Exception as e:
+                    logger.debug(f"Error reading proxies from {path}: {e}")
+        logger.debug("No working proxies file found among candidates.")
+        return []
 
     def get_random_proxy(self) -> dict:
         """Get a proxy from the loaded list, prioritising known working proxies."""
@@ -262,11 +273,14 @@ class DataFetcher:
         # Smart Proxy Fallback with 5.0s timeout and priority queue of working proxies
         retries = 0
         proxy_timeout = max(self.timeout, 5.0)
+        with DataFetcher._proxy_lock:
+            pool_size = len(DataFetcher._proxies or [])
+        max_retries = max(max_retries, min(pool_size, 60))
         max_retries = max(max_retries, 35)
 
         while retries < max_retries:
-            # Re-attempt direct connection after 2 proxy failures in case throttling cleared
-            if retries == 2:
+            # Re-attempt direct connection after 2 proxy failures only if not blocked by WAF
+            if retries == 2 and not DataFetcher._direct_blocked:
                 try:
                     direct_resp = requests.get(
                         self.url,

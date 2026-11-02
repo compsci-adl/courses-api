@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import atexit
+import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -665,8 +666,23 @@ def scrape_single_year(
         check_session.close()
 
     with Progress() as progress:
-        subjects = data_parser.get_subjects(year)
-        subj_list = subjects.get("subjects", [])
+        subj_list = []
+        for attempt in range(4):
+            subjects = data_parser.get_subjects(year)
+            subj_list = subjects.get("subjects", [])
+            if subj_list:
+                break
+            logger.warning(
+                f"Subject discovery attempt {attempt + 1}/4 for year {year} returned 0 subjects. Retrying..."
+            )
+            time.sleep(1.0 + attempt * 1.0)
+
+        if not subj_list:
+            logger.error(
+                f"Could not retrieve subjects for year {year}. Skipping scrape for {year}."
+            )
+            return
+
         all_task = progress.add_task(f"[cyan bold]{year} Courses", total=len(subj_list))
 
         # Create a thread pool with multiple threads
@@ -717,6 +733,36 @@ def scrape_single_year(
     logger.info(f"{year} scraping completed directly to SQLite database.")
 
 
+def ensure_proxies_ready(min_proxies: int = 20):
+    """Ensure that a valid working_proxies file exists with at least min_proxies."""
+    candidate_files = [
+        "src/working_proxies.txt",
+        "working_proxies.txt",
+        os.path.join(os.path.dirname(__file__), "working_proxies.txt"),
+    ]
+    valid_count = 0
+    for path in candidate_files:
+        if os.path.exists(path):
+            try:
+                with open(path, "r") as f:
+                    lines = [line.strip() for line in f if line.strip()]
+                    valid_count = max(valid_count, len(lines))
+            except Exception:
+                pass
+    if valid_count < min_proxies:
+        logger.info(
+            f"Found {valid_count} working proxies (< {min_proxies} required). "
+            f"Testing and fetching fresh proxies..."
+        )
+        try:
+            fetch_proxies.main()
+            with data_fetcher.DataFetcher._proxy_lock:
+                data_fetcher.DataFetcher._proxies = None
+                data_fetcher.DataFetcher._proxy_failures.clear()
+        except Exception as e:
+            logger.warning(f"Proxy discovery failed: {e}")
+
+
 async def create_scraper_client() -> httpx.AsyncClient:
     """Creates persistent httpx client with connection pooling and optional HTTP/2."""
     limits = httpx.Limits(max_keepalive_connections=20, max_connections=50)
@@ -738,8 +784,8 @@ async def run_pipeline(
 
     s3_manager = S3SyncManager()
 
-    # Run proxy fetching and testing
-    fetch_proxies.main()
+    # Ensure sufficient working proxies are available before scraping
+    ensure_proxies_ready()
 
     # Pre-flight S3 Download
     db_downloaded = s3_manager.download_database(db_path)
@@ -763,9 +809,13 @@ async def run_pipeline(
         active_year = await YearDiscoveryService.determine_active_year(
             http_client, available_years, active_year_override=active_year
         )
+        # Guarantee target multi-year window (2026-2028) is always present
+        for y in [2026, 2027, 2028]:
+            if y not in available_years:
+                available_years.append(y)
         if active_year not in available_years:
             available_years.append(active_year)
-            available_years.sort()
+        available_years.sort()
 
         logger.info(
             f"Available years: {available_years} | Active year (with classes): {active_year}"
@@ -831,9 +881,9 @@ async def run_pipeline(
                     existing_hashes=existing_hashes,
                 )
             else:
-                # Only hit if a new future year (e.g. 2028) was added and missing from DB
+                tag = "historical" if yr < active_year else "future"
                 logger.info(
-                    f"Scraping NEW future year {yr} (course outlines only, skipping classes)..."
+                    f"Scraping {tag} year {yr} (course outlines only, skipping classes)..."
                 )
                 scrape_single_year(
                     yr,
