@@ -1,3 +1,4 @@
+import os
 import random
 import re
 import threading
@@ -29,6 +30,8 @@ class DataFetcher:
     _proxies = None
     _proxy_failures = {}
     _proxy_lock = threading.Lock()
+    _funnelback_semaphore = threading.BoundedSemaphore(4)
+    _direct_blocked = False
 
     @staticmethod
     def _sanitise_for_log(value: Any) -> str:
@@ -48,9 +51,11 @@ class DataFetcher:
         use_class_url: bool = False,
         full_url: str = None,
         use_proxy: bool = True,
+        timeout: float = 3.0,
     ) -> None:
         self.endpoint = endpoint
         self.use_class_url = use_class_url
+        self.timeout = timeout
         if full_url:
             self.url = full_url
         elif self.use_class_url:
@@ -71,18 +76,28 @@ class DataFetcher:
                 DataFetcher._proxies = self.load_proxies()
 
     def load_proxies(self) -> list:
-        """Load proxies from the file."""
-        try:
-            with open(self.PROXY_FILE, "r") as file:
-                proxies = file.read().splitlines()
-                logger.debug(f"Loaded {len(proxies)} proxies from {self.PROXY_FILE}.")
-                return proxies
-        except FileNotFoundError:
-            logger.error(f"Proxy file {self.PROXY_FILE} not found.")
-            return []
+        """Load proxies from file, checking candidate paths."""
+        candidates = [
+            self.PROXY_FILE,
+            "src/working_proxies.txt",
+            "working_proxies.txt",
+            os.path.join(os.path.dirname(__file__), "working_proxies.txt"),
+        ]
+        for path in candidates:
+            if os.path.exists(path):
+                try:
+                    with open(path, "r") as file:
+                        proxies = [line.strip() for line in file if line.strip()]
+                        if proxies:
+                            logger.info(f"Loaded {len(proxies)} proxies from {path}.")
+                            return proxies
+                except Exception as e:
+                    logger.debug(f"Error reading proxies from {path}: {e}")
+        logger.debug("No working proxies file found among candidates.")
+        return []
 
     def get_random_proxy(self) -> dict:
-        """Get a random proxy from the loaded list. Reloads from file if empty."""
+        """Get a proxy from the loaded list, prioritising known working proxies."""
         if not self.use_proxy:
             return None
         with DataFetcher._proxy_lock:
@@ -92,7 +107,11 @@ class DataFetcher:
             if not DataFetcher._proxies:
                 logger.warning("No proxies available. Proceeding without a proxy.")
                 return None
-            proxy = random.choice(DataFetcher._proxies)
+            # 70% of the time pick from the top 5 known good proxies if available
+            if len(DataFetcher._proxies) > 5 and random.random() < 0.7:
+                proxy = random.choice(DataFetcher._proxies[:5])
+            else:
+                proxy = random.choice(DataFetcher._proxies)
         return {
             "http": f"http://{proxy}",
             "https": f"http://{proxy}",
@@ -123,7 +142,7 @@ class DataFetcher:
                 )
 
     def report_proxy_success(self, proxy: dict) -> None:
-        """Reset the failure count for a working proxy."""
+        """Reset failure count and promote working proxy to the top of the pool."""
         if not proxy:
             return
         proxy_str = proxy.get("http", "").replace("http://", "")
@@ -131,13 +150,38 @@ class DataFetcher:
             return
         with DataFetcher._proxy_lock:
             DataFetcher._proxy_failures.pop(proxy_str, None)
+            if DataFetcher._proxies and proxy_str in DataFetcher._proxies:
+                DataFetcher._proxies.remove(proxy_str)
+                DataFetcher._proxies.insert(0, proxy_str)
 
     def remove_proxy(self, proxy: dict) -> None:
         """Explicitly remove a proxy (fatal failure)."""
         self.report_proxy_failure(proxy, fatal=True)
 
-    def get(self, max_retries: int = 50) -> dict:
-        """Fetch data from the API, handling retries and rate-limiting."""
+    def _process_response(self, response):
+        """Process and store a successful response based on endpoint type."""
+        self.last_response = response
+        if not self.use_class_url:
+            resp = json_repair.loads(response.text)
+            if resp.get("response", {}).get("resultPacket"):
+                self.data = resp.get("response", {})
+                return self.data
+            return None
+        else:
+            soup = BeautifulSoup(response.content, "html.parser")
+            main_tag = soup.find("main")
+            text = main_tag.get_text() if main_tag else soup.get_text()
+            h1_tag = soup.find("h1")
+            h1_text = h1_tag.get_text().strip() if h1_tag else ""
+            self.data = {
+                "h1": h1_text,
+                "data": re.sub(r"\n+", "\n", text),
+                "html": response.text,
+            }
+            return self.data
+
+    def get(self, max_retries: int = 10) -> dict:
+        """Fetch data from the API, trying direct connection first with smart proxy fallback."""
         logger.debug("Fetching %s...", self._sanitise_for_log(self.endpoint))
         if self.data is not None:
             return self.data
@@ -146,155 +190,183 @@ class DataFetcher:
             logger.error("Error: No URL provided.")
             return {}
 
-        retries = 0
-        self.last_response = None
-        backoff_base = 1.5
-
         # Flexible headers depending on target endpoint (html page vs json api)
         if self.use_class_url:
             headers = {
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
                 "Accept-Language": "en-US,en;q=0.9",
+                "Referer": "https://www.adelaide.edu.au/",
                 "Cache-Control": "no-cache",
                 "Pragma": "no-cache",
-                "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+                "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="146", "Google Chrome";v="146"',
                 "Sec-Ch-Ua-Mobile": "?0",
                 "Sec-Ch-Ua-Platform": '"macOS"',
                 "Sec-Fetch-Dest": "document",
                 "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-Site": "same-origin",
                 "Sec-Fetch-User": "?1",
                 "Upgrade-Insecure-Requests": "1",
             }
         else:
             headers = {
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
                 "Accept": "application/json, text/javascript, */*; q=0.01",
                 "Accept-Language": "en-US,en;q=0.9",
+                "Referer": "https://www.adelaide.edu.au/",
+                "Origin": "https://www.adelaide.edu.au",
                 "Cache-Control": "no-cache",
                 "Pragma": "no-cache",
                 "X-Requested-With": "XMLHttpRequest",
+                "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="146", "Google Chrome";v="146"',
+                "Sec-Ch-Ua-Mobile": "?0",
+                "Sec-Ch-Ua-Platform": '"macOS"',
+                "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Site": "cross-site",
             }
 
+        # Direct Connection First
+        if not DataFetcher._direct_blocked:
+            sem_ctx = (
+                DataFetcher._funnelback_semaphore
+                if not self.use_class_url
+                else threading.Lock()
+            )
+            with sem_ctx:
+                try:
+                    logger.debug(
+                        "Attempting direct connection for %s...",
+                        self._sanitise_for_log(self.endpoint),
+                    )
+                    direct_resp = requests.get(
+                        self.url,
+                        headers=headers,
+                        timeout=min(self.timeout, 5.0),
+                        impersonate="chrome146",
+                    )
+                    self.last_response = direct_resp
+                    if direct_resp.status_code == 200:
+                        parsed = self._process_response(direct_resp)
+                        if parsed is not None:
+                            return parsed
+                    elif direct_resp.status_code == 404:
+                        logger.warning("HTTP 404 - Not Found: %s", self.url)
+                        return {}
+                    elif direct_resp.status_code in (403, 429):
+                        DataFetcher._direct_blocked = True
+                        logger.warning(
+                            "Direct connection blocked by WAF/Cloudflare (HTTP %s). "
+                            "Switching to proxy pool for all subsequent requests.",
+                            direct_resp.status_code,
+                        )
+                except Exception as e:
+                    logger.debug(
+                        "Direct connection attempt failed (%s). Falling back to proxies.",
+                        self._sanitise_for_log(e),
+                    )
+
+        # If proxy is disabled, return without proxy fallback
+        if not self.use_proxy:
+            return {}
+
+        # Smart Proxy Fallback with 5.0s timeout and priority queue of working proxies
+        retries = 0
+        proxy_timeout = max(self.timeout, 5.0)
+        with DataFetcher._proxy_lock:
+            pool_size = len(DataFetcher._proxies or [])
+        max_retries = max(max_retries, min(pool_size, 60))
+        max_retries = max(max_retries, 35)
+
         while retries < max_retries:
+            # Re-attempt direct connection after 2 proxy failures only if not blocked by WAF
+            if retries == 2 and not DataFetcher._direct_blocked:
+                try:
+                    direct_resp = requests.get(
+                        self.url,
+                        headers=headers,
+                        timeout=min(self.timeout, 4.0),
+                        impersonate="chrome146",
+                    )
+                    self.last_response = direct_resp
+                    if direct_resp.status_code == 200:
+                        parsed = self._process_response(direct_resp)
+                        if parsed is not None:
+                            return parsed
+                except Exception:
+                    pass
+
             proxy = self.get_random_proxy()
-            request_url = self.url
+            if not proxy:
+                retries += 1
+                time.sleep(0.5)
+                continue
+
             try:
                 logger.debug("Using proxy: %s", self._sanitise_for_log(proxy))
                 response = requests.get(
-                    request_url,
+                    self.url,
                     proxies=proxy,
                     headers=headers,
-                    timeout=10,
+                    timeout=proxy_timeout,
                     impersonate="chrome146",
                 )
                 self.last_response = response
 
                 if response.status_code == 429:
-                    # Handle rate limiting properly, use Retry-After if available
-                    logger.warning("HTTP 429 - Too Many Requests.")
-                    self.report_proxy_failure(proxy)
-                    retry_after = response.headers.get("Retry-After")
-                    if retry_after:
-                        try:
-                            wait_seconds = int(retry_after)
-                        except ValueError:
-                            wait_seconds = min(60, max(5, int(backoff_base**retries)))
-                    else:
-                        wait_seconds = min(
-                            60, max(5, int(backoff_base**retries))
-                        ) + random.uniform(1.0, 3.0)
-
-                    logger.warning(
-                        f"Sleeping for {wait_seconds:.1f}s due to 429 response"
-                    )
-                    time.sleep(wait_seconds)
+                    logger.warning("HTTP 429 - Too Many Requests via proxy.")
+                    self.report_proxy_failure(proxy, fatal=True)
                     retries += 1
                     continue
 
                 if response.status_code == 404:
                     self.report_proxy_success(proxy)
-                    logger.warning(f"HTTP 404 - Not Found: {request_url}")
+                    logger.warning("HTTP 404 - Not Found: %s", self.url)
                     return {}
 
                 if response.status_code == 403:
-                    logger.warning(f"HTTP 403 - Forbidden for proxy: {proxy}")
+                    logger.warning("HTTP 403 - Forbidden for proxy: %s", proxy)
                     self.report_proxy_failure(proxy, fatal=True)
                     retries += 1
-                    time.sleep(
-                        min(3.0, backoff_base**retries) + random.uniform(0.5, 1.5)
-                    )
                     continue
 
                 if response.status_code != 200:
-                    # Small backoff for other HTTP errors
-                    logger.error(f"HTTP {response.status_code} - {response.text[:200]}")
-                    self.report_proxy_failure(proxy)
-                    wait_seconds = min(10, int(backoff_base**retries)) + random.uniform(
-                        0.5, 1.5
-                    )
-                    logger.debug(f"Waiting for {wait_seconds:.1f}s before retrying")
-                    time.sleep(wait_seconds)
+                    logger.error("HTTP %s via proxy", response.status_code)
+                    self.report_proxy_failure(proxy, fatal=True)
                     retries += 1
                     continue
 
                 # Proxy succeeded
                 self.report_proxy_success(proxy)
+                parsed = self._process_response(response)
+                if parsed is not None:
+                    return parsed
+                retries += 1
 
-                # If using Funnelback (search), parse as JSON and return the response dict.
-                if not self.use_class_url:
-                    resp = json_repair.loads(response.text)
-                    if not resp.get("response", {}).get("resultPacket"):
-                        logger.error(
-                            f"Funnelback API Error: {resp.get('error', 'Unknown error')}"
-                        )
-                        retries += 1
-                        time.sleep(
-                            min(3.0, backoff_base**retries) + random.uniform(0.5, 1.0)
-                        )
-                        continue
-                    self.data = resp.get("response", {})
-                    return self.data
-
-                # If fetching a class/course content page, just return the HTML text as {'data': <text>}.
-                if self.use_class_url:
-                    soup = BeautifulSoup(response.content, "html.parser")
-                    # Get main content
-                    main_tag = soup.find("main")
-                    if main_tag:
-                        text = main_tag.get_text()
-                    else:
-                        text = soup.get_text()
-                    # Grab H1 text if present as a separate field to help parsers
-                    h1_tag = soup.find("h1")
-                    h1_text = h1_tag.get_text().strip() if h1_tag else ""
-                    self.data = {
-                        "h1": h1_text,
-                        "data": re.sub(r"\n+", "\n", text),
-                        "html": response.text,
-                    }
-                    return self.data
-
-            except requests.exceptions.ProxyError:
-                logger.warning(
-                    "Proxy error with proxy: %s", self._sanitise_for_log(proxy)
+            except (
+                requests.exceptions.Timeout,
+                requests.exceptions.ProxyError,
+                requests.exceptions.RequestException,
+            ) as e:
+                logger.debug(
+                    "Proxy error/timeout (%s): %s",
+                    self._sanitise_for_log(e),
+                    self._sanitise_for_log(proxy),
                 )
-                self.report_proxy_failure(proxy)
+                self.report_proxy_failure(proxy, fatal=True)
                 retries += 1
-                time.sleep(min(3.0, backoff_base**retries) + random.uniform(0.5, 1.5))
-            except requests.exceptions.RequestException as e:
-                logger.warning("Request failed: %s", self._sanitise_for_log(e))
-                self.report_proxy_failure(proxy)
-                retries += 1
-                time.sleep(min(3.0, backoff_base**retries) + random.uniform(0.5, 1.5))
             except Exception as e:
-                logger.error("Unexpected error: %s", self._sanitise_for_log(e))
-                self.report_proxy_failure(proxy)
+                logger.debug(
+                    "Unexpected error on proxy (%s): %s",
+                    self._sanitise_for_log(e),
+                    self._sanitise_for_log(proxy),
+                )
+                self.report_proxy_failure(proxy, fatal=True)
                 retries += 1
-                time.sleep(min(3.0, backoff_base**retries) + random.uniform(0.5, 1.5))
 
         logger.error(
-            f"Failed to fetch data from {self.url} after {max_retries} retries."
+            "Failed to fetch data from %s after %s attempts.",
+            self.url,
+            max_retries,
         )
         return {}

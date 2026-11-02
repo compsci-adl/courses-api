@@ -1,4 +1,5 @@
 import re
+import time
 
 from bs4 import BeautifulSoup
 
@@ -6,68 +7,123 @@ import data_fetcher
 from log import logger
 
 
-def get_subjects(year: int) -> dict[str, list[dict[str, str]]]:
-    """Return a list of subjects for a given year."""
-    subjects = data_fetcher.DataFetcher(
-        f"?f.Tabs|type=Degrees+%26+Courses&form=json&num_ranks=10&profile=site-search&query=&f.Year|year={year}&collection=uosa~sp-aem-prod&f.Study+type|studyType=Course&start_rank=1"
-    )
-
-    try:
-        data = subjects.get()
+def _extract_subjects_from_facet_data(data) -> list[dict[str, str]]:
+    """Helper to extract Area of study subject names from Funnelback response data."""
+    if not data or not isinstance(data, dict):
+        return []
+    facets = data.get("facets", [])
+    area_facet = None
+    for facet in facets:
         if (
-            subjects.last_response is None
-            or subjects.last_response.status_code != 200
-            or data is None
+            isinstance(facet, dict)
+            and str(facet.get("name", "")).lower() == "area of study"
         ):
-            status = (
-                subjects.last_response.status_code
-                if subjects.last_response
-                else "NO_RESPONSE"
-            )
-            print(f"Error: {status} - {data}")
-            return {"subjects": []}
+            area_facet = facet
+            break
+    if not area_facet and len(facets) > 5 and isinstance(facets[5], dict):
+        area_facet = facets[5]
 
+    if area_facet and isinstance(area_facet, dict) and "allValues" in area_facet:
+        values = area_facet.get("allValues", [])
         subject_list = []
-
-        data = data.get("facets")[5].get("allValues", [])
-        for subject in data:
-            subj = subject.get("data")
-            subject_list.append({"subject": subj})
-        logger.debug(f"Subjects: {subject_list}")
-        return {"subjects": subject_list}
-
-    except Exception as e:
-        print(f"An error occurred while fetching subjects: {e}")
-        return {"subjects": []}
+        for subject in values:
+            if isinstance(subject, dict):
+                subj = subject.get("data")
+                if subj:
+                    subject_list.append({"subject": subj})
+        return subject_list
+    return []
 
 
-def get_course_codes(subject: str, year: int):
+def get_subjects(year: int, timeout: float = 3.0) -> dict[str, list[dict[str, str]]]:
+    """Return a list of subjects for a given year by querying Funnelback search facets dynamically.
+
+    Tries year-filtered query first, then generic study-area facet query, with proxy retries.
+    """
+    query_endpoints = [
+        f"?f.Tabs|type=Degrees+%26+Courses&form=json&num_ranks=10&profile=site-search&query=&f.Year|year={year}&collection=uosa~sp-aem-prod&f.Study+type|studyType=Course&start_rank=1",
+        "?f.Tabs|type=Degrees+%26+Courses&form=json&num_ranks=10&profile=site-search&query=&collection=uosa~sp-aem-prod&f.Study+type|studyType=Course&start_rank=1",
+    ]
+
+    fetcher = None
+    for attempt in range(4):
+        for endpoint in query_endpoints:
+            fetcher = data_fetcher.DataFetcher(
+                endpoint,
+                timeout=timeout + attempt * 1.0,
+            )
+            try:
+                data = fetcher.get()
+                if (
+                    fetcher.last_response is not None
+                    and fetcher.last_response.status_code == 200
+                    and data
+                    and isinstance(data, dict)
+                ):
+                    subject_list = _extract_subjects_from_facet_data(data)
+                    if subject_list:
+                        logger.debug(
+                            f"Retrieved {len(subject_list)} subjects dynamically for year {year}"
+                        )
+                        return {"subjects": subject_list}
+            except Exception as e:
+                logger.debug(
+                    f"Attempt {attempt + 1} to fetch subjects for year {year} ({endpoint}) failed: {e}"
+                )
+
+        time.sleep(0.5 + attempt * 0.5)
+
+    status = (
+        fetcher.last_response.status_code
+        if fetcher and fetcher.last_response
+        else "NO_RESPONSE"
+    )
+    logger.error(
+        f"Failed to dynamically retrieve subjects for year {year} after 4 attempts (HTTP {status})."
+    )
+    return {"subjects": []}
+
+
+def get_course_codes(subject: str, year: int, timeout: float = 6.0):
     """Return a list of course codes for a given subject code and year."""
     courses = data_fetcher.DataFetcher(
-        f"?f.Tabs%7Ctype=Degrees+%26+Courses&form=json&f.Year%7Cyear={year}&num_ranks=1000&profile=site-search&query=&f.Area+of+study%7CstudyArea={subject}&collection=uosa%7Esp-aem-prod&f.Study+type%7CstudyType=Course"
+        f"?f.Tabs%7Ctype=Degrees+%26+Courses&form=json&f.Year%7Cyear={year}&num_ranks=1000&profile=site-search&query=&f.Area+of+study%7CstudyArea={subject}&collection=uosa%7Esp-aem-prod&f.Study+type%7CstudyType=Course",
+        timeout=timeout,
     )
 
     try:
         data = courses.get()
+        if (
+            courses.last_response is None
+            or courses.last_response.status_code != 200
+            or not data
+        ):
+            time.sleep(0.8)
+            courses = data_fetcher.DataFetcher(
+                f"?f.Tabs%7Ctype=Degrees+%26+Courses&form=json&f.Year%7Cyear={year}&num_ranks=1000&profile=site-search&query=&f.Area+of+study%7CstudyArea={subject}&collection=uosa%7Esp-aem-prod&f.Study+type%7CstudyType=Course",
+                timeout=timeout + 2.0,
+            )
+            data = courses.get()
+
         logger.debug(f"Course data: {data}")
         if (
             courses.last_response is None
             or courses.last_response.status_code != 200
-            or data is None
+            or not data
         ):
             status = (
                 courses.last_response.status_code
                 if courses.last_response
                 else "NO_RESPONSE"
             )
-            print(f"Error: {status} - {data}")
-            return {"courses": []}
-        results = data.get("resultPacket", []).get("results", [])
+            logger.warning(f"Error fetching course codes for {subject}: HTTP {status}")
+            return None
+        results = data.get("resultPacket", {}).get("results", [])
         logger.debug(f"Number of courses found: {len(results)}")
 
         if not results:
             logger.debug("No results found in course codes.")
-            return {}
+            return {"courses": []}
 
         course_codes = [
             {
