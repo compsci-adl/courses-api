@@ -25,7 +25,7 @@ def fetch_proxies(url):
 def test_proxy(
     proxy,
     test_url="https://adelaide.edu.au/study/courses/",
-    timeout=3,
+    timeout=5,
     retries=0,
 ):
     """Test if the given proxy is working by making a request."""
@@ -73,7 +73,7 @@ def save_working_proxies(proxies, filename=None):
             pass
 
 
-def main(target_working: int = 80, max_candidates: int = 600):
+def main(target_working: int = 100, max_candidates: int = 600):
     proxy_urls = [
         "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/refs/heads/master/http.txt",
         "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
