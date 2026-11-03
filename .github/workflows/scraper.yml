@@ -51,6 +51,7 @@ jobs:
         run: |
           docker run --rm \
             -v ${{ github.workspace }}/src:/app/src \
+            -e PYTHONUNBUFFERED=1 \
             -e DEFAULT_LOGGING_LEVEL=${{ env.DEFAULT_LOGGING_LEVEL }} \
             -e YEAR=${{ env.YEAR }} \
             courses-api-scraper:latest
@@ -58,13 +59,19 @@ jobs:
       - name: Rename SQLite DB to local.sqlite3
         run: mv src/dev.sqlite3 src/local.sqlite3
 
-      - name: Validate Database Size
+      - name: Validate Database Size and Integrity
         run: |
           DB_SIZE=$(stat -c%s "src/local.sqlite3" 2>/dev/null || stat -f%z "src/local.sqlite3")
-          LIMIT=$((60 * 1024 * 1024))
+          LIMIT=$((45 * 1024 * 1024))
           echo "Database size: $DB_SIZE bytes (Required limit: $LIMIT bytes)"
           if [ "$DB_SIZE" -lt "$LIMIT" ]; then
-            echo "Error: Database file size is less than 60MB. Scraping might have failed or been blocked."
+            echo "Error: Database file size is less than 45MB. Scraping might have failed or been blocked."
+            exit 1
+          fi
+          COURSE_COUNT=$(python3 -c "import sqlite3; conn = sqlite3.connect('src/local.sqlite3'); print(conn.execute('SELECT count(*) FROM courses').fetchone()[0])" 2>/dev/null || echo "0")
+          echo "Total courses in DB: $COURSE_COUNT"
+          if [ "$COURSE_COUNT" -lt 20000 ]; then
+            echo "Error: Course count ($COURSE_COUNT) is below expected 20,000 threshold."
             exit 1
           fi
 

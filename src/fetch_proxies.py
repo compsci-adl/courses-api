@@ -73,7 +73,7 @@ def save_working_proxies(proxies, filename=None):
             pass
 
 
-def main():
+def main(target_working: int = 80, max_candidates: int = 600):
     proxy_urls = [
         "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/refs/heads/master/http.txt",
         "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
@@ -87,6 +87,8 @@ def main():
             pass
     # Deduplicate proxies while preserving order
     proxies = list(dict.fromkeys(proxies))
+    if max_candidates and len(proxies) > max_candidates:
+        proxies = proxies[:max_candidates]
 
     working_proxies = []
 
@@ -109,6 +111,9 @@ def main():
                     result = future.result()
                     if result:
                         working_proxies.append(result)
+                        if len(working_proxies) >= target_working:
+                            executor.shutdown(wait=False, cancel_futures=True)
+                            break
                 except Exception:
                     pass  # Handle or log specific proxy testing errors if needed
 

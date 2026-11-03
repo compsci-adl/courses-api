@@ -34,6 +34,7 @@ from db_service import (
     ensure_healthy_database,
     ensure_schema_up_to_date,
     finalize_sqlite_for_s3,
+    get_existing_class_count_for_year,
     get_existing_course_hashes,
     get_existing_course_ids_for_year,
     get_previous_years_course_data,
@@ -439,7 +440,7 @@ def process_course(
                     r"([a-zA-Z]+)\s*(\d+)", r"\1_\2", str(code_str)
                 ).replace(" ", "_")
 
-                for suffix in range(1, 7):
+                for suffix in range(1, 4):
                     course_instance_id = (
                         f"{year_short}{term_code}_{formatted_code}_{suffix}"
                     )
@@ -447,7 +448,7 @@ def process_course(
 
                     try:
                         fetcher = data_fetcher.DataFetcher(
-                            "", full_url=outline_url, use_class_url=True, timeout=4.0
+                            "", full_url=outline_url, use_class_url=True, timeout=8.0
                         )
                         parsed_res = fetcher.get()
                         resp_html = ""
@@ -465,7 +466,7 @@ def process_course(
                                 headers={
                                     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
                                 },
-                                timeout=4,
+                                timeout=8,
                                 impersonate="chrome146",
                             )
                             if resp.status_code == 200:
@@ -599,7 +600,7 @@ def process_subject(
         progress.update(subject_task, total=len(course_list))
 
         # Process each course concurrently
-        with ThreadPoolExecutor(max_workers=10) as executor:
+        with ThreadPoolExecutor(max_workers=6) as executor:
             futures = []
             for course in course_list:
                 future = executor.submit(
@@ -636,12 +637,13 @@ def scrape_single_year(
     engine,
     is_active: bool,
     existing_hashes: dict[tuple[str, int], str] | None = None,
+    scrape_classes_override: bool | None = None,
 ):
     """Scrape data directly into SQLite for a given academic year.
 
     Preserves existing courses in DB to prevent redundant course outline re-scraping.
-    For the active year: refreshes classes and meetings via bulk atomic replacement.
-    For static/future years: scrapes courses only if missing from DB.
+    For active or unpopulated years: harvests classes and meetings.
+    For static/future years with classes already present: scrapes courses only if missing from DB.
     """
     logger.info(f"=== Scraping Academic Year {year} (Active: {is_active}) ===")
 
@@ -655,8 +657,10 @@ def scrape_single_year(
         existing_courses_for_year = get_existing_course_ids_for_year(
             check_session, year
         )
+        existing_class_count = get_existing_class_count_for_year(check_session, year)
         logger.info(
-            f"Preloaded {len(existing_courses_for_year)} existing course records for year {year} from DB."
+            f"Preloaded {len(existing_courses_for_year)} existing course records and "
+            f"{existing_class_count} class records for year {year} from DB."
         )
         previous_courses = get_previous_years_course_data(check_session, year)
         logger.info(
@@ -664,6 +668,13 @@ def scrape_single_year(
         )
     finally:
         check_session.close()
+
+    # Harvest classes if active year, or if year has 0 classes in DB (e.g. initial clean scrape)
+    should_scrape_classes = (
+        scrape_classes_override
+        if scrape_classes_override is not None
+        else (is_active or existing_class_count == 0)
+    )
 
     with Progress() as progress:
         subj_list = []
@@ -685,8 +696,8 @@ def scrape_single_year(
 
         all_task = progress.add_task(f"[cyan bold]{year} Courses", total=len(subj_list))
 
-        # Create a thread pool with multiple threads
-        with ThreadPoolExecutor(max_workers=10) as executor:
+        # Create a thread pool with balanced workers to prevent network contention from CI runners
+        with ThreadPoolExecutor(max_workers=6) as executor:
             futures = []
             for subject in subj_list:
                 future = executor.submit(
@@ -697,12 +708,12 @@ def scrape_single_year(
                     progress,
                     all_task,
                     lock,
-                    is_active,  # scrape_classes only for active year
+                    should_scrape_classes,
                     existing_hashes,
                     existing_courses_for_year,
                     previous_courses,
-                    collected_classes if is_active else None,
-                    collected_meetings if is_active else None,
+                    collected_classes if should_scrape_classes else None,
+                    collected_meetings if should_scrape_classes else None,
                 )
                 futures.append(future)
 
@@ -710,25 +721,29 @@ def scrape_single_year(
             for future in as_completed(futures):
                 future.result()
 
-    # Bulk atomic replace for active year classes and meetings
-    if is_active:
-        if collected_classes:
-            logger.info(
-                f"Atomic bulk replacing {len(collected_classes)} classes and "
-                f"{len(collected_meetings)} meetings for active year {year}..."
+    # Bulk atomic replace for active/harvested classes and meetings
+    if should_scrape_classes and collected_classes:
+        logger.info(
+            f"Atomic bulk replacing {len(collected_classes)} classes and "
+            f"{len(collected_meetings)} meetings for year {year}..."
+        )
+        db_session = Session(bind=engine)
+        try:
+            bulk_replace_classes_for_year(
+                db_session,
+                year,
+                collected_classes,
+                collected_meetings,
             )
-            db_session = Session(bind=engine)
-            try:
-                bulk_replace_classes_for_year(
-                    db_session,
-                    year,
-                    collected_classes,
-                    collected_meetings,
-                )
-            finally:
-                db_session.close()
+        finally:
+            db_session.close()
     else:
-        logger.info(f"Year {year} is static/future: skipped class harvesting.")
+        if not should_scrape_classes:
+            logger.info(
+                f"Year {year} already has {existing_class_count} classes in DB: skipped class harvesting."
+            )
+        else:
+            logger.info(f"Year {year} has no classes published yet.")
 
     logger.info(f"{year} scraping completed directly to SQLite database.")
 
@@ -883,7 +898,7 @@ async def run_pipeline(
             else:
                 tag = "historical" if yr < active_year else "future"
                 logger.info(
-                    f"Scraping {tag} year {yr} (course outlines only, skipping classes)..."
+                    f"Scraping {tag} year {yr} (courses + class harvesting if unpopulated)..."
                 )
                 scrape_single_year(
                     yr,
