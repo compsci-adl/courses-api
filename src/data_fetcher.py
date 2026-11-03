@@ -32,6 +32,12 @@ class DataFetcher:
     _proxy_lock = threading.Lock()
     _funnelback_semaphore = threading.BoundedSemaphore(4)
     _direct_blocked = False
+    _direct_blocked_until = 0.0
+
+    @classmethod
+    def is_direct_blocked(cls) -> bool:
+        """Check if direct connection is currently paused due to rate limiting or cooldown."""
+        return cls._direct_blocked or time.time() < cls._direct_blocked_until
 
     @staticmethod
     def _sanitise_for_log(value: Any) -> str:
@@ -163,8 +169,13 @@ class DataFetcher:
         self.last_response = response
         if not self.use_class_url:
             resp = json_repair.loads(response.text)
+            if not isinstance(resp, dict):
+                return None
             if resp.get("response", {}).get("resultPacket"):
                 self.data = resp.get("response", {})
+                return self.data
+            elif resp.get("resultPacket"):
+                self.data = resp
                 return self.data
             return None
         else:
@@ -227,7 +238,10 @@ class DataFetcher:
             }
 
         # Direct Connection First
-        if not DataFetcher._direct_blocked:
+        is_ci = bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))
+        base_timeout = max(self.timeout, 12.0) if is_ci else max(self.timeout, 6.0)
+
+        if not DataFetcher.is_direct_blocked():
             sem_ctx = (
                 DataFetcher._funnelback_semaphore
                 if not self.use_class_url
@@ -242,7 +256,7 @@ class DataFetcher:
                     direct_resp = requests.get(
                         self.url,
                         headers=headers,
-                        timeout=min(self.timeout, 5.0),
+                        timeout=base_timeout,
                         impersonate="chrome146",
                     )
                     self.last_response = direct_resp
@@ -256,8 +270,8 @@ class DataFetcher:
                     elif direct_resp.status_code in (403, 429):
                         DataFetcher._direct_blocked = True
                         logger.warning(
-                            "Direct connection blocked by WAF/Cloudflare (HTTP %s). "
-                            "Switching to proxy pool for all subsequent requests.",
+                            "Direct connection rate-limited/blocked by WAF (HTTP %s). "
+                            "Pausing direct requests for 15s cooldown and trying proxies.",
                             direct_resp.status_code,
                         )
                 except Exception as e:
@@ -270,22 +284,22 @@ class DataFetcher:
         if not self.use_proxy:
             return {}
 
-        # Smart Proxy Fallback with 5.0s timeout and priority queue of working proxies
+        # Smart Proxy Fallback with generous timeout and priority queue of working proxies
         retries = 0
-        proxy_timeout = max(self.timeout, 5.0)
+        proxy_timeout = min(max(self.timeout, 8.0), 15.0)
         with DataFetcher._proxy_lock:
             pool_size = len(DataFetcher._proxies or [])
-        max_retries = max(max_retries, min(pool_size, 60))
-        max_retries = max(max_retries, 35)
+        max_retries = max(max_retries, min(pool_size, 40))
+        max_retries = max(max_retries, 25)
 
         while retries < max_retries:
             # Re-attempt direct connection after 2 proxy failures only if not blocked by WAF
-            if retries == 2 and not DataFetcher._direct_blocked:
+            if retries == 2 and not DataFetcher.is_direct_blocked():
                 try:
                     direct_resp = requests.get(
                         self.url,
                         headers=headers,
-                        timeout=min(self.timeout, 4.0),
+                        timeout=base_timeout,
                         impersonate="chrome146",
                     )
                     self.last_response = direct_resp
@@ -336,11 +350,13 @@ class DataFetcher:
                     retries += 1
                     continue
 
-                # Proxy succeeded
-                self.report_proxy_success(proxy)
+                # Parse proxy response to ensure it actually returned valid content
                 parsed = self._process_response(response)
                 if parsed is not None:
+                    self.report_proxy_success(proxy)
                     return parsed
+                else:
+                    self.report_proxy_failure(proxy, fatal=True)
                 retries += 1
 
             except (

@@ -5,6 +5,7 @@ import shutil
 import sqlite3
 from pathlib import Path
 
+from sqlalchemy import func
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
@@ -81,6 +82,19 @@ def get_existing_course_ids_for_year(session: Session, year: int) -> dict[str, s
             mapping[code.replace(" ", "").upper()] = cid
             mapping[code.strip()] = cid
     return mapping
+
+
+def get_existing_class_count_for_year(session: Session, year: int) -> int:
+    """Returns the count of existing classes in DB for a specific year."""
+    try:
+        count = (
+            session.query(func.count(CourseClass.id))
+            .filter(CourseClass.year == year)
+            .scalar()
+        )
+        return count or 0
+    except Exception:
+        return 0
 
 
 def get_previous_years_course_data(

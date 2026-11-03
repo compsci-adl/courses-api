@@ -84,64 +84,69 @@ def get_subjects(year: int, timeout: float = 3.0) -> dict[str, list[dict[str, st
     return {"subjects": []}
 
 
-def get_course_codes(subject: str, year: int, timeout: float = 6.0):
+def get_course_codes(subject: str, year: int, timeout: float = 12.0):
     """Return a list of course codes for a given subject code and year."""
-    courses = data_fetcher.DataFetcher(
-        f"?f.Tabs%7Ctype=Degrees+%26+Courses&form=json&f.Year%7Cyear={year}&num_ranks=1000&profile=site-search&query=&f.Area+of+study%7CstudyArea={subject}&collection=uosa%7Esp-aem-prod&f.Study+type%7CstudyType=Course",
-        timeout=timeout,
+    # Ensure spaces and & are safely encoded for query string
+    safe_subject = str(subject).replace(" ", "%20").replace("&", "%26")
+    endpoint = (
+        f"?f.Tabs%7Ctype=Degrees+%26+Courses&form=json&f.Year%7Cyear={year}"
+        f"&num_ranks=1000&profile=site-search&query=&f.Area+of+study%7CstudyArea={safe_subject}"
+        f"&collection=uosa%7Esp-aem-prod&f.Study+type%7CstudyType=Course"
     )
 
-    try:
-        data = courses.get()
-        if (
-            courses.last_response is None
-            or courses.last_response.status_code != 200
-            or not data
-        ):
-            time.sleep(0.8)
-            courses = data_fetcher.DataFetcher(
-                f"?f.Tabs%7Ctype=Degrees+%26+Courses&form=json&f.Year%7Cyear={year}&num_ranks=1000&profile=site-search&query=&f.Area+of+study%7CstudyArea={subject}&collection=uosa%7Esp-aem-prod&f.Study+type%7CstudyType=Course",
-                timeout=timeout + 2.0,
-            )
+    for attempt in range(3):
+        courses = data_fetcher.DataFetcher(
+            endpoint,
+            timeout=timeout + attempt * 2.0,
+        )
+        try:
             data = courses.get()
+            if (
+                courses.last_response is not None
+                and courses.last_response.status_code == 200
+                and data
+                and isinstance(data, dict)
+            ):
+                results = data.get("resultPacket", {}).get("results", [])
+                if not results and "response" in data:
+                    results = (
+                        data.get("response", {})
+                        .get("resultPacket", {})
+                        .get("results", [])
+                    )
 
-        logger.debug(f"Course data: {data}")
-        if (
-            courses.last_response is None
-            or courses.last_response.status_code != 200
-            or not data
-        ):
-            status = (
-                courses.last_response.status_code
-                if courses.last_response
-                else "NO_RESPONSE"
+                course_codes = [
+                    {
+                        "code": course.get("listMetadata", {}).get("courseCode"),
+                        "terms": course.get("listMetadata", {}).get("term"),
+                    }
+                    for course in results
+                    if course.get("listMetadata", {}).get("courseCode")
+                ]
+                logger.debug(
+                    f"Course codes extracted successfully for {subject}: {len(course_codes)}"
+                )
+                return {"courses": course_codes}
+        except Exception as e:
+            logger.debug(
+                f"Attempt {attempt + 1} for course codes {subject} failed: {e}"
             )
-            logger.warning(f"Error fetching course codes for {subject}: HTTP {status}")
-            return None
-        results = data.get("resultPacket", {}).get("results", [])
-        logger.debug(f"Number of courses found: {len(results)}")
 
-        if not results:
-            logger.debug("No results found in course codes.")
-            return {"courses": []}
+        time.sleep(0.5 + attempt * 0.5)
 
-        course_codes = [
-            {
-                "code": course.get("listMetadata", {}).get("courseCode"),
-                "terms": course.get("listMetadata", {}).get("term"),
-            }
-            for course in results
-        ]
-        logger.debug("Course codes extracted successfully.")
-        return {"courses": course_codes}
-
-    except Exception as e:
-        print(f"An error occurred while fetching course codes: {e}")
-        return {"courses": []}
+    status = (
+        courses.last_response.status_code
+        if "courses" in locals() and courses.last_response
+        else "NO_RESPONSE"
+    )
+    logger.warning(
+        f"Error fetching course codes for {subject} after 3 attempts: HTTP {status}"
+    )
+    return None
 
 
 def get_course_details(course_code: str, year: int | str | None = None):
-    """Return the details for a given course."""
+    """Return the details for a given course with retries."""
     logger.debug(f"Fetching details for course {course_code}")
     code_str = course_code[0] if isinstance(course_code, (list, tuple)) else course_code
     encoded_course_code = re.sub(
@@ -153,92 +158,97 @@ def get_course_details(course_code: str, year: int | str | None = None):
         if year
         else f"/study/courses/{encoded_course_code}/"
     )
-    course_details = data_fetcher.DataFetcher(endpoint, use_class_url=True)
-    try:
-        data = course_details.get()
-        if (
-            course_details.last_response is None
-            or course_details.last_response.status_code != 200
-            or not data
-            or (
-                isinstance(data, dict)
-                and data.get("h1", "").lower() == "page not found"
-            )
-        ):
-            status = (
-                course_details.last_response.status_code
-                if course_details.last_response
-                else "NO_RESPONSE"
-            )
-            if status == 404 or (
-                isinstance(data, dict)
-                and data.get("h1", "").lower() == "page not found"
+
+    for attempt in range(3):
+        course_details = data_fetcher.DataFetcher(endpoint, use_class_url=True)
+        try:
+            data = course_details.get()
+            if (
+                course_details.last_response is not None
+                and course_details.last_response.status_code == 200
+                and data
+                and isinstance(data, dict)
+            ):
+                if data.get("h1", "").lower() == "page not found":
+                    logger.info(
+                        f"Course {course_code} is not offered for year {year} (404 Page Not Found)."
+                    )
+                    return None
+
+                text = data.get("data", "")
+                soup = BeautifulSoup(text, "html.parser")
+                body_text = soup.get_text() if soup else text
+
+                # Parse the plain-body text for label/value pairs
+                parsed = parse_course_text(body_text)
+
+                # Extract terms from raw HTML accordion titles if present
+                raw_html = data.get("html", "")
+                terms = []
+                if raw_html:
+                    html_soup = BeautifulSoup(raw_html, "html.parser")
+                    for el in html_soup.select(".cmp-course-accordion__title"):
+                        txt = el.get_text(strip=True)
+                        if re.search(
+                            r"^(Semester|Trimester|Term|Summer|Winter|Spring|Autumn)\b",
+                            txt,
+                            re.I,
+                        ):
+                            if txt not in terms:
+                                terms.append(txt)
+
+                # Return a dict with the parsed fields and the canonical code string
+                course_info = {
+                    "code": code_str,
+                    "title": data.get("h1", ""),
+                    "course_id": parsed.get("course_id"),
+                    "campus": parsed.get("campus"),
+                    "level_of_study": parsed.get("level_of_study"),
+                    "units": parsed.get("units"),
+                    "course_coordinator": parsed.get("course_coordinator"),
+                    "course_level": parsed.get("course_level"),
+                    "course_overview": parsed.get("course_overview"),
+                    "prerequisites": parsed.get("prerequisites"),
+                    "corequisites": parsed.get("corequisites"),
+                    "antirequisites": parsed.get("antirequisites"),
+                    "university_wide_elective": (
+                        True
+                        if parsed.get("university_wide_elective") == "Yes"
+                        else False
+                        if parsed.get("university_wide_elective") == "No"
+                        else parsed.get("university_wide_elective")
+                    ),
+                    "terms": terms if terms else None,
+                    "html": raw_html,
+                }
+
+                logger.debug("Course details extracted successfully.")
+                return course_info
+
+            elif (
+                course_details.last_response is not None
+                and course_details.last_response.status_code == 404
             ):
                 logger.info(
                     f"Course {course_code} is not offered for year {year} (404 Not Found)."
                 )
-            else:
-                logger.error(
-                    f"Error fetching course details for {course_code}: Status {status}"
-                )
-            return None
+                return None
+        except Exception as e:
+            logger.debug(
+                f"Attempt {attempt + 1} for course details {course_code} failed: {e}"
+            )
 
-        # Return plain text string without extra newlines
-        text = data.get("data", "")
+        time.sleep(0.5 + attempt * 0.5)
 
-        # Strip HTML tags
-        soup = BeautifulSoup(text, "html.parser")
-        body_text = soup.get_text() if soup else text
-
-        # Parse the plain-body text for label/value pairs
-        parsed = parse_course_text(body_text)
-
-        # Extract terms from raw HTML accordion titles if present
-        raw_html = data.get("html", "")
-        terms = []
-        if raw_html:
-            html_soup = BeautifulSoup(raw_html, "html.parser")
-            for el in html_soup.select(".cmp-course-accordion__title"):
-                txt = el.get_text(strip=True)
-                if re.search(
-                    r"^(Semester|Trimester|Term|Summer|Winter|Spring|Autumn)\b",
-                    txt,
-                    re.I,
-                ):
-                    if txt not in terms:
-                        terms.append(txt)
-
-        # Return a dict with the parsed fields and the canonical code string
-        course_details = {
-            "code": code_str,
-            "title": data.get("h1", ""),
-            "course_id": parsed.get("course_id"),
-            "campus": parsed.get("campus"),
-            "level_of_study": parsed.get("level_of_study"),
-            "units": parsed.get("units"),
-            "course_coordinator": parsed.get("course_coordinator"),
-            "course_level": parsed.get("course_level"),
-            "course_overview": parsed.get("course_overview"),
-            "prerequisites": parsed.get("prerequisites"),
-            "corequisites": parsed.get("corequisites"),
-            "antirequisites": parsed.get("antirequisites"),
-            "university_wide_elective": (
-                True
-                if parsed.get("university_wide_elective") == "Yes"
-                else False
-                if parsed.get("university_wide_elective") == "No"
-                else parsed.get("university_wide_elective")
-            ),
-            "terms": terms if terms else None,
-            "html": raw_html,
-        }
-
-        logger.debug("Course details extracted successfully.")
-        return course_details
-
-    except Exception as e:
-        print(f"An error occurred while fetching course details for {course_code}: {e}")
-        return None
+    status = (
+        course_details.last_response.status_code
+        if "course_details" in locals() and course_details.last_response
+        else "NO_RESPONSE"
+    )
+    logger.warning(
+        f"Could not retrieve details for course {course_code} after 3 attempts (HTTP {status})."
+    )
+    return None
 
 
 def parse_course_text(text: str) -> dict:
