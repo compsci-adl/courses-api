@@ -1,4 +1,3 @@
-import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
@@ -26,7 +25,7 @@ def test_proxy(
     proxy,
     test_url="https://adelaide.edu.au/study/courses/",
     timeout=5,
-    retries=0,
+    retries=2,  # Number of retries
 ):
     """Test if the given proxy is working by making a request."""
     proxies = {
@@ -35,10 +34,9 @@ def test_proxy(
     }
     for attempt in range(retries + 1):  # Retry logic
         try:
-            # Use realistic User-Agent and Referer to avoid WAF block
+            # Use realistic User-Agent to avoid WAF block
             headers = {
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
-                "Referer": "https://www.adelaide.edu.au/",
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             }
             response = requests.get(
                 test_url, proxies=proxies, headers=headers, timeout=timeout
@@ -56,24 +54,14 @@ def test_proxy(
     return None
 
 
-def save_working_proxies(proxies, filename=None):
-    """Save working proxies to text files across standard candidate paths."""
-    targets = (
-        [filename] if filename else ["src/working_proxies.txt", "working_proxies.txt"]
-    )
-    for target in targets:
-        try:
-            parent = os.path.dirname(target)
-            if parent:
-                os.makedirs(parent, exist_ok=True)
-            with open(target, "w") as file:
-                for proxy in proxies:
-                    file.write(f"{proxy}\n")
-        except Exception:
-            pass
+def save_working_proxies(proxies, filename="src/working_proxies.txt"):
+    """Save working proxies to a text file."""
+    with open(filename, "w") as file:
+        for proxy in proxies:
+            file.write(f"{proxy}\n")
 
 
-def main(target_working: int = 100, max_candidates: int = 600):
+def main():
     proxy_urls = [
         "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/refs/heads/master/http.txt",
         "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
@@ -87,8 +75,6 @@ def main(target_working: int = 100, max_candidates: int = 600):
             pass
     # Deduplicate proxies while preserving order
     proxies = list(dict.fromkeys(proxies))
-    if max_candidates and len(proxies) > max_candidates:
-        proxies = proxies[:max_candidates]
 
     working_proxies = []
 
@@ -111,9 +97,6 @@ def main(target_working: int = 100, max_candidates: int = 600):
                     result = future.result()
                     if result:
                         working_proxies.append(result)
-                        if len(working_proxies) >= target_working:
-                            executor.shutdown(wait=False, cancel_futures=True)
-                            break
                 except Exception:
                     pass  # Handle or log specific proxy testing errors if needed
 
