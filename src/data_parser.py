@@ -176,8 +176,11 @@ def get_course_details(course_code: str, year: int | str | None = None):
                     return None
 
                 text = data.get("data", "")
-                soup = BeautifulSoup(text, "html.parser")
-                body_text = soup.get_text() if soup else text
+                body_text = (
+                    BeautifulSoup(text, "html.parser").get_text()
+                    if ("<" in text and ">" in text)
+                    else text
+                )
 
                 # Parse the plain-body text for label/value pairs
                 parsed = parse_course_text(body_text)

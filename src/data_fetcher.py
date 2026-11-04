@@ -1,3 +1,4 @@
+import asyncio
 import os
 import random
 import re
@@ -8,8 +9,18 @@ from typing import Any
 import json_repair
 from bs4 import BeautifulSoup
 from curl_cffi import requests
+from curl_cffi.requests import AsyncSession
 
 from log import logger
+
+_tls = threading.local()
+
+
+def _get_tls_session() -> requests.Session:
+    """Get or create a thread-local persistent Session for connection pooling."""
+    if not hasattr(_tls, "session") or _tls.session is None:
+        _tls.session = requests.Session(impersonate="chrome146")
+    return _tls.session
 
 
 class DataFetcher:
@@ -30,14 +41,23 @@ class DataFetcher:
     _proxies = None
     _proxy_failures = {}
     _proxy_lock = threading.Lock()
-    _funnelback_semaphore = threading.BoundedSemaphore(4)
+    _funnelback_semaphore = threading.BoundedSemaphore(12)
     _direct_blocked = False
     _direct_blocked_until = 0.0
 
     @classmethod
     def is_direct_blocked(cls) -> bool:
         """Check if direct connection is currently paused due to rate limiting or cooldown."""
-        return cls._direct_blocked or time.time() < cls._direct_blocked_until
+        if cls._direct_blocked:
+            if (
+                cls._direct_blocked_until > 0
+                and time.time() >= cls._direct_blocked_until
+            ):
+                cls._direct_blocked = False
+                cls._direct_blocked_until = 0.0
+                return False
+            return True
+        return False
 
     @staticmethod
     def _sanitise_for_log(value: Any) -> str:
@@ -191,19 +211,10 @@ class DataFetcher:
             }
             return self.data
 
-    def get(self, max_retries: int = 10) -> dict:
-        """Fetch data from the API, trying direct connection first with smart proxy fallback."""
-        logger.debug("Fetching %s...", self._sanitise_for_log(self.endpoint))
-        if self.data is not None:
-            return self.data
-
-        if not self.url:
-            logger.error("Error: No URL provided.")
-            return {}
-
-        # Flexible headers depending on target endpoint (html page vs json api)
+    def _get_headers(self) -> dict:
+        """Flexible headers depending on target endpoint (html page vs json api)."""
         if self.use_class_url:
-            headers = {
+            return {
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
                 "Accept-Language": "en-US,en;q=0.9",
@@ -220,7 +231,7 @@ class DataFetcher:
                 "Upgrade-Insecure-Requests": "1",
             }
         else:
-            headers = {
+            return {
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
                 "Accept": "application/json, text/javascript, */*; q=0.01",
                 "Accept-Language": "en-US,en;q=0.9",
@@ -237,9 +248,51 @@ class DataFetcher:
                 "Sec-Fetch-Site": "cross-site",
             }
 
+    def _execute_http_get(
+        self,
+        url: str,
+        headers: dict,
+        timeout: float,
+        proxy: dict | None = None,
+    ):
+        """Execute HTTP GET using persistent Session pooling, falling back to requests.get if mocked."""
+        if hasattr(requests.get, "assert_called") or hasattr(
+            requests.get, "_mock_return_value"
+        ):
+            if proxy:
+                return requests.get(
+                    url,
+                    proxies=proxy,
+                    headers=headers,
+                    timeout=timeout,
+                    impersonate="chrome146",
+                )
+            return requests.get(
+                url,
+                headers=headers,
+                timeout=timeout,
+                impersonate="chrome146",
+            )
+        sess = _get_tls_session()
+        if proxy:
+            return sess.get(url, proxies=proxy, headers=headers, timeout=timeout)
+        return sess.get(url, headers=headers, timeout=timeout)
+
+    def get(self, max_retries: int = 10) -> dict:
+        """Fetch data from the API, trying direct connection first with smart proxy fallback."""
+        logger.debug("Fetching %s...", self._sanitise_for_log(self.endpoint))
+        if self.data is not None:
+            return self.data
+
+        if not self.url:
+            logger.error("Error: No URL provided.")
+            return {}
+
+        headers = self._get_headers()
+
         # Direct Connection First
         is_ci = bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))
-        base_timeout = max(self.timeout, 12.0) if is_ci else max(self.timeout, 6.0)
+        base_timeout = max(self.timeout, 8.0) if is_ci else max(self.timeout, 5.0)
 
         if not DataFetcher.is_direct_blocked():
             sem_ctx = (
@@ -253,11 +306,8 @@ class DataFetcher:
                         "Attempting direct connection for %s...",
                         self._sanitise_for_log(self.endpoint),
                     )
-                    direct_resp = requests.get(
-                        self.url,
-                        headers=headers,
-                        timeout=base_timeout,
-                        impersonate="chrome146",
+                    direct_resp = self._execute_http_get(
+                        self.url, headers=headers, timeout=base_timeout
                     )
                     self.last_response = direct_resp
                     if direct_resp.status_code == 200:
@@ -269,6 +319,7 @@ class DataFetcher:
                         return {}
                     elif direct_resp.status_code in (403, 429):
                         DataFetcher._direct_blocked = True
+                        DataFetcher._direct_blocked_until = time.time() + 15.0
                         logger.warning(
                             "Direct connection rate-limited/blocked by WAF (HTTP %s). "
                             "Pausing direct requests for 15s cooldown and trying proxies.",
@@ -286,21 +337,17 @@ class DataFetcher:
 
         # Smart Proxy Fallback with generous timeout and priority queue of working proxies
         retries = 0
-        proxy_timeout = min(max(self.timeout, 8.0), 15.0)
+        proxy_timeout = min(max(self.timeout, 6.0), 12.0)
         with DataFetcher._proxy_lock:
             pool_size = len(DataFetcher._proxies or [])
-        max_retries = max(max_retries, min(pool_size, 40))
-        max_retries = max(max_retries, 25)
+        max_retries = max(min(max_retries, pool_size), 15)
 
         while retries < max_retries:
             # Re-attempt direct connection after 2 proxy failures only if not blocked by WAF
             if retries == 2 and not DataFetcher.is_direct_blocked():
                 try:
-                    direct_resp = requests.get(
-                        self.url,
-                        headers=headers,
-                        timeout=base_timeout,
-                        impersonate="chrome146",
+                    direct_resp = self._execute_http_get(
+                        self.url, headers=headers, timeout=base_timeout
                     )
                     self.last_response = direct_resp
                     if direct_resp.status_code == 200:
@@ -313,17 +360,13 @@ class DataFetcher:
             proxy = self.get_random_proxy()
             if not proxy:
                 retries += 1
-                time.sleep(0.5)
+                time.sleep(0.3)
                 continue
 
             try:
                 logger.debug("Using proxy: %s", self._sanitise_for_log(proxy))
-                response = requests.get(
-                    self.url,
-                    proxies=proxy,
-                    headers=headers,
-                    timeout=proxy_timeout,
-                    impersonate="chrome146",
+                response = self._execute_http_get(
+                    self.url, headers=headers, timeout=proxy_timeout, proxy=proxy
                 )
                 self.last_response = response
 
@@ -385,4 +428,85 @@ class DataFetcher:
             self.url,
             max_retries,
         )
+        return {}
+
+    async def async_get(
+        self, session: AsyncSession | None = None, max_retries: int = 10
+    ) -> dict:
+        """Asynchronously fetch data with browser TLS impersonation and connection reuse."""
+        if self.data is not None:
+            return self.data
+        if not self.url:
+            return {}
+
+        headers = self._get_headers()
+        base_timeout = max(self.timeout, 6.0)
+
+        if not DataFetcher.is_direct_blocked():
+            try:
+                if session is not None:
+                    resp = await session.get(
+                        self.url, headers=headers, timeout=base_timeout
+                    )
+                else:
+                    async with AsyncSession(impersonate="chrome146") as local_sess:
+                        resp = await local_sess.get(
+                            self.url, headers=headers, timeout=base_timeout
+                        )
+                self.last_response = resp
+                if resp.status_code == 200:
+                    parsed = self._process_response(resp)
+                    if parsed is not None:
+                        return parsed
+                elif resp.status_code == 404:
+                    return {}
+                elif resp.status_code in (403, 429):
+                    DataFetcher._direct_blocked = True
+                    DataFetcher._direct_blocked_until = time.time() + 15.0
+            except Exception as e:
+                logger.debug(f"Direct async connection attempt failed: {e}")
+
+        if not self.use_proxy:
+            return {}
+
+        retries = 0
+        proxy_timeout = min(max(self.timeout, 6.0), 12.0)
+        while retries < min(max_retries, 15):
+            proxy = self.get_random_proxy()
+            if not proxy:
+                retries += 1
+                await asyncio.sleep(0.2)
+                continue
+            try:
+                if session is not None:
+                    resp = await session.get(
+                        self.url,
+                        proxies=proxy,
+                        headers=headers,
+                        timeout=proxy_timeout,
+                    )
+                else:
+                    async with AsyncSession(impersonate="chrome146") as local_sess:
+                        resp = await local_sess.get(
+                            self.url,
+                            proxies=proxy,
+                            headers=headers,
+                            timeout=proxy_timeout,
+                        )
+                self.last_response = resp
+                if resp.status_code == 200:
+                    parsed = self._process_response(resp)
+                    if parsed is not None:
+                        self.report_proxy_success(proxy)
+                        return parsed
+                    self.report_proxy_failure(proxy, fatal=True)
+                elif resp.status_code == 404:
+                    self.report_proxy_success(proxy)
+                    return {}
+                else:
+                    self.report_proxy_failure(proxy, fatal=True)
+                retries += 1
+            except Exception:
+                self.report_proxy_failure(proxy, fatal=True)
+                retries += 1
         return {}

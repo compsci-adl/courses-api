@@ -63,12 +63,27 @@ def get_short_hash(content: str, even_length=12) -> str:
     return shake_256(content.encode("utf8")).hexdigest(even_length // 2)
 
 
-def db_writer(engine, batch_size: int = 50):
+def _model_to_dict(model):
+    """Convert an ORM model instance to a dict of column names and values."""
+    return {col.name: getattr(model, col.name, None) for col in model.__table__.columns}
+
+
+def db_writer(engine, batch_size: int = 500):
     """Dedicated DB writer thread to serialize all DB operations, batching commits for high performance."""
     pending_items = []
     while True:
         try:
-            item = write_queue.get()
+            try:
+                item = write_queue.get(timeout=1.0)
+            except Exception:
+                item = "TIMEOUT"
+
+            if item == "TIMEOUT":
+                if pending_items:
+                    _flush_batch(engine, pending_items)
+                    pending_items.clear()
+                continue
+
             if item is None:
                 if pending_items:
                     _flush_batch(engine, pending_items)
@@ -83,34 +98,137 @@ def db_writer(engine, batch_size: int = 50):
 
 
 def _flush_batch(engine, items: list):
-    """Flush a batch of items (ORM models or raw dict operations) to the database."""
+    """Flush a batch of items (ORM models or raw dict operations) to the database with high-speed bulk inserts."""
+    if not items:
+        return
     session = Session(bind=engine)
     try:
+        classes = []
+        courses = []
+        outcomes = []
+        assessments = []
+        subjects = []
+        meetings = []
+        fallbacks = []
+
         for item in items:
             if isinstance(item, tuple) and item[0] == "upsert_class":
-                class_dict = item[1]
-                stmt = sqlite_insert(CourseClass).values(class_dict)
-                stmt = stmt.on_conflict_do_update(
-                    index_elements=[
-                        "year",
-                        "course_id",
-                        "class_nbr",
-                        "section",
-                        "group",
-                    ],
-                    set_={
-                        "size": stmt.excluded.size,
-                        "available": stmt.excluded.available,
-                        "component": stmt.excluded.component,
-                    },
-                )
-                session.execute(stmt)
+                classes.append(item[1])
+            elif isinstance(item, Course):
+                courses.append(_model_to_dict(item))
+            elif isinstance(item, LearningOutcome):
+                outcomes.append(_model_to_dict(item))
+            elif isinstance(item, Assessment):
+                assessments.append(_model_to_dict(item))
+            elif isinstance(item, Subject):
+                subjects.append(_model_to_dict(item))
+            elif isinstance(item, Meetings):
+                meetings.append(_model_to_dict(item))
             else:
-                session.merge(item)
+                fallbacks.append(item)
+
+        # Bulk upsert subjects
+        if subjects:
+            stmt = sqlite_insert(Subject).values(subjects)
+            stmt = stmt.on_conflict_do_nothing(index_elements=["id"])
+            session.execute(stmt)
+
+        # Bulk upsert courses
+        if courses:
+            stmt = sqlite_insert(Course).values(courses)
+            update_cols = {
+                col.name: getattr(stmt.excluded, col.name)
+                for col in Course.__table__.columns
+                if col.name != "id"
+            }
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["id"],
+                set_=update_cols,
+            )
+            session.execute(stmt)
+
+        # Bulk insert learning outcomes
+        if outcomes:
+            stmt = sqlite_insert(LearningOutcome).values(outcomes)
+            stmt = stmt.on_conflict_do_nothing(index_elements=["id"])
+            session.execute(stmt)
+
+        # Bulk insert assessments
+        if assessments:
+            stmt = sqlite_insert(Assessment).values(assessments)
+            stmt = stmt.on_conflict_do_nothing(index_elements=["id"])
+            session.execute(stmt)
+
+        # Bulk upsert classes (before meetings so foreign key exists)
+        if classes:
+            dedup = {}
+            for c in classes:
+                key = (
+                    c["year"],
+                    c["course_id"],
+                    str(c.get("class_nbr")),
+                    str(c.get("section")),
+                    str(c.get("group", "") or ""),
+                )
+                dedup[key] = c
+            clean_classes = list(dedup.values())
+            stmt = sqlite_insert(CourseClass).values(clean_classes)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=[
+                    "year",
+                    "course_id",
+                    "class_nbr",
+                    "section",
+                    "group",
+                ],
+                set_={
+                    "size": stmt.excluded.size,
+                    "available": stmt.excluded.available,
+                    "component": stmt.excluded.component,
+                },
+            )
+            session.execute(stmt)
+
+        # Bulk insert meetings (after classes exist)
+        if meetings:
+            dedup_m = {m["id"]: m for m in meetings}
+            stmt = sqlite_insert(Meetings).values(list(dedup_m.values()))
+            stmt = stmt.on_conflict_do_nothing(index_elements=["id"])
+            session.execute(stmt)
+
+        # Any fallback items
+        for item in fallbacks:
+            session.merge(item)
+
         session.commit()
     except Exception as e:
         session.rollback()
-        logger.error(f"[DB BATCH ERROR] {e}")
+        logger.warning(f"[DB BULK BATCH ERROR, falling back to merge] {e}")
+        try:
+            for item in items:
+                if isinstance(item, tuple) and item[0] == "upsert_class":
+                    stmt = sqlite_insert(CourseClass).values(item[1])
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=[
+                            "year",
+                            "course_id",
+                            "class_nbr",
+                            "section",
+                            "group",
+                        ],
+                        set_={
+                            "size": stmt.excluded.size,
+                            "available": stmt.excluded.available,
+                            "component": stmt.excluded.component,
+                        },
+                    )
+                    session.execute(stmt)
+                else:
+                    session.merge(item)
+            session.commit()
+        except Exception as fallback_e:
+            session.rollback()
+            logger.error(f"[DB FALLBACK BATCH ERROR] {fallback_e}")
     finally:
         session.close()
 
@@ -137,6 +255,40 @@ def parse_units(value, default: int = 6) -> int:
     if not match:
         return default
     return int(match.group())
+
+
+def _fetch_single_outline_candidate(outline_url: str) -> tuple[str, str] | None:
+    """Fetch and check a single outline candidate URL. Returns (outline_url, html) if valid, else None."""
+    try:
+        fetcher = data_fetcher.DataFetcher(
+            "", full_url=outline_url, use_class_url=True, timeout=6.0
+        )
+        parsed_res = fetcher.get()
+        resp_html = ""
+        if parsed_res and isinstance(parsed_res, dict):
+            resp_html = parsed_res.get("html", "")
+        elif fetcher.last_response and fetcher.last_response.status_code == 200:
+            resp_html = fetcher.last_response.text
+
+        if not resp_html:
+            resp = requests.get(
+                outline_url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
+                },
+                timeout=6,
+                impersonate="chrome146",
+            )
+            if resp.status_code == 200:
+                resp_html = resp.text
+
+        if resp_html:
+            text = resp_html.lower()
+            if "course overview" in text or "subject area" in text:
+                return (outline_url, resp_html)
+    except Exception as e:
+        logger.debug(f"Failed check for {outline_url}: {e}")
+    return None
 
 
 def _extract_and_queue_classes(
@@ -177,8 +329,8 @@ def _extract_and_queue_classes(
             if collected_classes is not None:
                 with lock:
                     collected_classes.append(class_data)
-            else:
-                write_queue.put(("upsert_class", class_data))
+            # Always stream class into write_queue for real-time SQLite persistence
+            write_queue.put(("upsert_class", class_data))
         except Exception as e:
             logger.error(f"Error preparing class for course {course_code}: {e}")
 
@@ -206,9 +358,9 @@ def _extract_and_queue_classes(
                 if collected_meetings is not None:
                     with lock:
                         collected_meetings.append(meeting_data)
-                else:
-                    db_meeting = Meetings(**meeting_data)
-                    write_queue.put(db_meeting)
+                # Always stream meeting into write_queue for real-time SQLite persistence
+                db_meeting = Meetings(**meeting_data)
+                write_queue.put(db_meeting)
             except Exception as e:
                 logger.error(
                     f"Error inserting meeting for class {class_nbr} of course {course_code}: {e}"
@@ -440,86 +592,71 @@ def process_course(
                     r"([a-zA-Z]+)\s*(\d+)", r"\1_\2", str(code_str)
                 ).replace(" ", "_")
 
-                for suffix in range(1, 4):
-                    course_instance_id = (
-                        f"{year_short}{term_code}_{formatted_code}_{suffix}"
+                candidates = [
+                    (
+                        suffix,
+                        f"https://apps.adelaide.edu.au/public/courseoutline?courseInstanceId={year_short}{term_code}_{formatted_code}_{suffix}",
                     )
-                    outline_url = f"https://apps.adelaide.edu.au/public/courseoutline?courseInstanceId={course_instance_id}"
+                    for suffix in range(1, 4)
+                ]
 
-                    try:
-                        fetcher = data_fetcher.DataFetcher(
-                            "", full_url=outline_url, use_class_url=True, timeout=8.0
+                found_match = None
+                with ThreadPoolExecutor(max_workers=3) as outline_executor:
+                    future_to_suffix = {
+                        outline_executor.submit(
+                            _fetch_single_outline_candidate, url
+                        ): suffix
+                        for suffix, url in candidates
+                    }
+                    results = {}
+                    for future in as_completed(future_to_suffix):
+                        suffix = future_to_suffix[future]
+                        res = future.result()
+                        if res:
+                            results[suffix] = res
+
+                    for suffix in range(1, 4):
+                        if suffix in results:
+                            found_match = results[suffix]
+                            break
+
+                if found_match:
+                    outline_url, resp_html = found_match
+                    db_course.course_outline_url = outline_url
+                    parsed_outline = data_parser.parse_course_outline(resp_html)
+
+                    if parsed_outline.get("aim"):
+                        db_course.course_overview = parsed_outline["aim"]
+
+                    for index, lo_text in enumerate(
+                        parsed_outline.get("learning_outcomes", []),
+                        start=1,
+                    ):
+                        lo_id = get_short_hash(f"{course_cid}lo{lo_text}")
+                        db_lo = LearningOutcome(
+                            id=lo_id,
+                            year=year,
+                            course_id=course_cid,
+                            description=lo_text,
+                            outcome_index=index,
                         )
-                        parsed_res = fetcher.get()
-                        resp_html = ""
-                        if parsed_res and isinstance(parsed_res, dict):
-                            resp_html = parsed_res.get("html", "")
-                        elif (
-                            fetcher.last_response
-                            and fetcher.last_response.status_code == 200
-                        ):
-                            resp_html = fetcher.last_response.text
+                        write_queue.put(db_lo)
 
-                        if not resp_html:
-                            resp = requests.get(
-                                outline_url,
-                                headers={
-                                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
-                                },
-                                timeout=8,
-                                impersonate="chrome146",
-                            )
-                            if resp.status_code == 200:
-                                resp_html = resp.text
+                    db_course.textbooks = parsed_outline.get("textbooks")
 
-                        if resp_html:
-                            text = resp_html.lower()
-                            if "course overview" in text or "subject area" in text:
-                                db_course.course_outline_url = outline_url
-                                parsed_outline = data_parser.parse_course_outline(
-                                    resp_html
-                                )
-
-                                if parsed_outline.get("aim"):
-                                    db_course.course_overview = parsed_outline["aim"]
-
-                                for index, lo_text in enumerate(
-                                    parsed_outline.get("learning_outcomes", []),
-                                    start=1,
-                                ):
-                                    lo_id = get_short_hash(f"{course_cid}lo{lo_text}")
-                                    db_lo = LearningOutcome(
-                                        id=lo_id,
-                                        year=year,
-                                        course_id=course_cid,
-                                        description=lo_text,
-                                        outcome_index=index,
-                                    )
-                                    write_queue.put(db_lo)
-
-                                db_course.textbooks = parsed_outline.get("textbooks")
-
-                                for assess in parsed_outline.get("assessments", []):
-                                    assess_title = assess.get("title")
-                                    assess_id = get_short_hash(
-                                        f"{course_cid}assess{assess_title}"
-                                    )
-                                    db_assess = Assessment(
-                                        id=assess_id,
-                                        year=year,
-                                        course_id=course_cid,
-                                        title=assess_title,
-                                        weighting=assess.get("weighting"),
-                                        hurdle=assess.get("hurdle"),
-                                        learning_outcomes=assess.get(
-                                            "learning_outcomes"
-                                        ),
-                                    )
-                                    write_queue.put(db_assess)
-
-                                break
-                    except Exception as e:
-                        logger.debug(f"Failed check for {outline_url}: {e}")
+                    for assess in parsed_outline.get("assessments", []):
+                        assess_title = assess.get("title")
+                        assess_id = get_short_hash(f"{course_cid}assess{assess_title}")
+                        db_assess = Assessment(
+                            id=assess_id,
+                            year=year,
+                            course_id=course_cid,
+                            title=assess_title,
+                            weighting=assess.get("weighting"),
+                            hurdle=assess.get("hurdle"),
+                            learning_outcomes=assess.get("learning_outcomes"),
+                        )
+                        write_queue.put(db_assess)
 
             write_queue.put(db_course)
 
@@ -561,6 +698,8 @@ def process_subject(
     previous_courses: dict[str, dict] | None = None,
     collected_classes: list[dict] | None = None,
     collected_meetings: list[dict] | None = None,
+    course_executor: ThreadPoolExecutor | None = None,
+    course_workers: int = 24,
 ):
     """Process a single subject and insert data into the database."""
     try:
@@ -577,7 +716,7 @@ def process_subject(
         # Encode & in subject name
         encoded_name = name.replace("&", "%26")
         course_list = None
-        for attempt in range(6):
+        for attempt in range(5):
             courses = data_parser.get_course_codes(encoded_name, year)
             if (
                 courses is not None
@@ -587,23 +726,31 @@ def process_subject(
                 course_list = courses["courses"]
                 break
             logger.warning(
-                f"Subject '{name}' ({year}) course fetch attempt {attempt + 1}/6 failed or blocked by WAF. Retrying with alternate proxy..."
+                f"Subject '{name}' ({year}) course fetch attempt {attempt + 1}/5 failed or blocked by WAF. Retrying with alternate proxy..."
             )
-            time.sleep(1.0 + attempt * 0.5)
+            time.sleep(0.5 + attempt * 0.3)
 
         if course_list is None:
             logger.error(
-                f"Subject '{name}' ({year}) could not be retrieved after 6 attempts. Skipping."
+                f"Subject '{name}' ({year}) could not be retrieved after 5 attempts. Skipping."
             )
             course_list = []
 
         progress.update(subject_task, total=len(course_list))
 
         # Process each course concurrently
-        with ThreadPoolExecutor(max_workers=6) as executor:
+        executor_to_use = course_executor
+        managed_executor = None
+        if executor_to_use is None:
+            managed_executor = ThreadPoolExecutor(
+                max_workers=course_workers, thread_name_prefix="course_worker"
+            )
+            executor_to_use = managed_executor
+
+        try:
             futures = []
             for course in course_list:
-                future = executor.submit(
+                future = executor_to_use.submit(
                     process_course,
                     course,
                     year,
@@ -624,6 +771,9 @@ def process_subject(
             # Wait for all threads to complete
             for future in as_completed(futures):
                 future.result()
+        finally:
+            if managed_executor is not None:
+                managed_executor.shutdown(wait=True)
 
         progress.update(subject_task, advance=1)
         progress.update(all_task, advance=1)
@@ -676,74 +826,88 @@ def scrape_single_year(
         else (is_active or existing_class_count == 0)
     )
 
-    with Progress() as progress:
-        subj_list = []
-        for attempt in range(4):
-            subjects = data_parser.get_subjects(year)
-            subj_list = subjects.get("subjects", [])
-            if subj_list:
-                break
-            logger.warning(
-                f"Subject discovery attempt {attempt + 1}/4 for year {year} returned 0 subjects. Retrying..."
-            )
-            time.sleep(1.0 + attempt * 1.0)
+    subject_workers = int(os.environ.get("SUBJECT_WORKERS", "8"))
+    course_workers = int(os.environ.get("COURSE_WORKERS", "24"))
 
-        if not subj_list:
-            logger.error(
-                f"Could not retrieve subjects for year {year}. Skipping scrape for {year}."
-            )
-            return
-
-        all_task = progress.add_task(f"[cyan bold]{year} Courses", total=len(subj_list))
-
-        # Create a thread pool with balanced workers to prevent network contention from CI runners
-        with ThreadPoolExecutor(max_workers=6) as executor:
-            futures = []
-            for subject in subj_list:
-                future = executor.submit(
-                    process_subject,
-                    subject,
-                    year,
-                    engine,
-                    progress,
-                    all_task,
-                    lock,
-                    should_scrape_classes,
-                    existing_hashes,
-                    existing_courses_for_year,
-                    previous_courses,
-                    collected_classes if should_scrape_classes else None,
-                    collected_meetings if should_scrape_classes else None,
+    try:
+        with Progress() as progress:
+            subj_list = []
+            for attempt in range(4):
+                subjects = data_parser.get_subjects(year)
+                subj_list = subjects.get("subjects", [])
+                if subj_list:
+                    break
+                logger.warning(
+                    f"Subject discovery attempt {attempt + 1}/4 for year {year} returned 0 subjects. Retrying..."
                 )
-                futures.append(future)
+                time.sleep(1.0 + attempt * 1.0)
 
-            # Wait for all threads to complete
-            for future in as_completed(futures):
-                future.result()
+            if not subj_list:
+                logger.error(
+                    f"Could not retrieve subjects for year {year}. Skipping scrape for {year}."
+                )
+                return
 
-    # Bulk atomic replace for active/harvested classes and meetings
-    if should_scrape_classes and collected_classes:
-        logger.info(
-            f"Atomic bulk replacing {len(collected_classes)} classes and "
-            f"{len(collected_meetings)} meetings for year {year}..."
-        )
-        db_session = Session(bind=engine)
-        try:
-            bulk_replace_classes_for_year(
-                db_session,
-                year,
-                collected_classes,
-                collected_meetings,
+            all_task = progress.add_task(
+                f"[cyan bold]{year} Courses", total=len(subj_list)
             )
-        finally:
-            db_session.close()
-    else:
-        if not should_scrape_classes:
+
+            # Create shared course worker pool and subject worker pool for high parallelism without GIL thrashing
+            with ThreadPoolExecutor(
+                max_workers=course_workers, thread_name_prefix="course_worker"
+            ) as course_executor:
+                with ThreadPoolExecutor(
+                    max_workers=subject_workers, thread_name_prefix="subject_worker"
+                ) as executor:
+                    futures = []
+                    for subject in subj_list:
+                        future = executor.submit(
+                            process_subject,
+                            subject,
+                            year,
+                            engine,
+                            progress,
+                            all_task,
+                            lock,
+                            should_scrape_classes,
+                            existing_hashes,
+                            existing_courses_for_year,
+                            previous_courses,
+                            collected_classes if should_scrape_classes else None,
+                            collected_meetings if should_scrape_classes else None,
+                            course_executor=course_executor,
+                            course_workers=course_workers,
+                        )
+                        futures.append(future)
+
+                    # Wait for all threads to complete
+                    for future in as_completed(futures):
+                        future.result()
+
+    finally:
+        # Bulk atomic replace for active/harvested classes and meetings (persists even if interrupted)
+        if should_scrape_classes and collected_classes:
             logger.info(
-                f"Year {year} already has {existing_class_count} classes in DB: skipped class harvesting."
+                f"Atomic bulk replacing {len(collected_classes)} classes and "
+                f"{len(collected_meetings)} meetings for year {year}..."
             )
+            db_session = Session(bind=engine)
+            try:
+                bulk_replace_classes_for_year(
+                    db_session,
+                    year,
+                    collected_classes,
+                    collected_meetings,
+                )
+            finally:
+                db_session.close()
         else:
-            logger.info(f"Year {year} has no classes published yet.")
+            if not should_scrape_classes:
+                logger.info(
+                    f"Year {year} already has {existing_class_count} classes in DB: skipped class harvesting."
+                )
+            else:
+                logger.info(f"Year {year} has no classes published yet.")
 
     logger.info(f"{year} scraping completed directly to SQLite database.")
 
@@ -948,7 +1112,24 @@ def main():
         default="src/dev.sqlite3",
         help="Path to SQLite database file",
     )
+    parser.add_argument(
+        "--course-workers",
+        type=int,
+        default=None,
+        help="Number of concurrent workers for course processing (default: 24)",
+    )
+    parser.add_argument(
+        "--subject-workers",
+        type=int,
+        default=None,
+        help="Number of concurrent workers for subject discovery (default: 8)",
+    )
     args = parser.parse_args()
+
+    if args.course_workers:
+        os.environ["COURSE_WORKERS"] = str(args.course_workers)
+    if args.subject_workers:
+        os.environ["SUBJECT_WORKERS"] = str(args.subject_workers)
 
     asyncio.run(
         run_pipeline(

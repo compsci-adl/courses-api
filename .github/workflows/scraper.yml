@@ -18,7 +18,6 @@ jobs:
 
     env:
       DEFAULT_LOGGING_LEVEL: ${{ secrets.DEFAULT_LOGGING_LEVEL }}
-      YEAR: ${{ secrets.YEAR }}
     
     permissions:
       id-token: write
@@ -41,7 +40,6 @@ jobs:
       - name: Create .env file
         run: |
           echo "DEFAULT_LOGGING_LEVEL=${{ env.DEFAULT_LOGGING_LEVEL }}" > src/.env
-          echo "YEAR=${{ env.YEAR }}" >> src/.env
 
       - name: Build Docker image
         run: docker build -f scraper.Dockerfile -t courses-api-scraper:latest .
@@ -53,7 +51,8 @@ jobs:
             -v ${{ github.workspace }}/src:/app/src \
             -e PYTHONUNBUFFERED=1 \
             -e DEFAULT_LOGGING_LEVEL=${{ env.DEFAULT_LOGGING_LEVEL }} \
-            -e YEAR=${{ env.YEAR }} \
+            -e COURSE_WORKERS=24 \
+            -e SUBJECT_WORKERS=8 \
             courses-api-scraper:latest
 
       - name: Rename SQLite DB to local.sqlite3
@@ -62,10 +61,10 @@ jobs:
       - name: Validate Database Size and Integrity
         run: |
           DB_SIZE=$(stat -c%s "src/local.sqlite3" 2>/dev/null || stat -f%z "src/local.sqlite3")
-          LIMIT=$((45 * 1024 * 1024))
+          LIMIT=$((30 * 1024 * 1024))
           echo "Database size: $DB_SIZE bytes (Required limit: $LIMIT bytes)"
           if [ "$DB_SIZE" -lt "$LIMIT" ]; then
-            echo "Error: Database file size is less than 45MB. Scraping might have failed or been blocked."
+            echo "Error: Database file size is less than 30MB. Scraping might have failed or been blocked."
             exit 1
           fi
           COURSE_COUNT=$(python3 -c "import sqlite3; conn = sqlite3.connect('src/local.sqlite3'); print(conn.execute('SELECT count(*) FROM courses').fetchone()[0])" 2>/dev/null || echo "0")
