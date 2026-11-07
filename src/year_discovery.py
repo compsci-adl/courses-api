@@ -78,6 +78,58 @@ class YearDiscoveryService:
         return fallback
 
     @classmethod
+    async def determine_active_years(
+        cls,
+        client: httpx.AsyncClient,
+        available_years: list[int],
+        sample_course_codes: Optional[list[str]] = None,
+        active_year_override: Optional[int] = None,
+    ) -> set[int]:
+        """Determines all academic years that have published class timetables.
+
+        Allows concurrent active academic years (e.g. current year and next year)
+        to have their live class availability harvested.
+        """
+        if active_year_override is not None:
+            return {int(active_year_override)}
+
+        env_year = os.environ.get("ACTIVE_YEAR") or os.environ.get("YEAR")
+        if env_year and str(env_year).strip().isdigit():
+            return {int(str(env_year).strip())}
+
+        active_years: set[int] = set()
+        codes_to_probe = sample_course_codes or cls.DEFAULT_PROBE_COURSE_CODES
+
+        for year in available_years:
+            for code in codes_to_probe:
+                endpoint = f"https://adelaide.edu.au/study/courses/{year}/{code}/"
+                try:
+                    resp = await client.get(endpoint, follow_redirects=True)
+                    if resp.status_code == 200:
+                        text = resp.text
+                        has_classes = (
+                            ("cmp-course-accordion" in text and "class" in text.lower())
+                            or "class-table" in text
+                            or "Enrolment class:" in text
+                        )
+                        if has_classes:
+                            logger.info(
+                                f"Active year confirmed: {year} (classes published via course {code})"
+                            )
+                            active_years.add(year)
+                            break
+                except Exception as e:
+                    logger.debug(f"Error probing year {year} course {code}: {e}")
+
+        if not active_years:
+            primary = await cls.determine_active_year(
+                client, available_years, sample_course_codes, active_year_override
+            )
+            active_years.add(primary)
+
+        return active_years
+
+    @classmethod
     async def determine_active_year(
         cls,
         client: httpx.AsyncClient,

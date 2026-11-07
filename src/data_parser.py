@@ -192,11 +192,15 @@ def get_course_details(course_code: str, year: int | str | None = None):
                 # Parse the plain-body text for label/value pairs
                 parsed = parse_course_text(body_text)
 
-                # Extract terms from raw HTML accordion titles if present
+                # Extract terms from raw HTML, check meta tags and accordion titles
                 raw_html = data.get("html", "")
                 terms = []
                 if raw_html:
                     html_soup = BeautifulSoup(raw_html, "html.parser")
+                    for meta in html_soup.select('meta[property="term"]'):
+                        val = meta.get("content", "").strip()
+                        if val and val not in terms:
+                            terms.append(val)
                     for el in html_soup.select(".cmp-course-accordion__title"):
                         txt = el.get_text(strip=True)
                         if re.search(
@@ -365,9 +369,27 @@ def get_course_class_list(
         # Use raw HTML for BeautifulSoup parsing
         text = data.get("html", "") or data.get("data", "")
 
+        # Extract any term metadata present on the class page
+        page_terms = []
+        if text:
+            html_soup = BeautifulSoup(text, "html.parser")
+            for meta in html_soup.select('meta[property="term"]'):
+                val = meta.get("content", "").strip()
+                if val and val not in page_terms:
+                    page_terms.append(val)
+            for el in html_soup.select(".cmp-course-accordion__title"):
+                txt = el.get_text(strip=True)
+                if re.search(
+                    r"^(Semester|Trimester|Term|Summer|Winter|Spring|Autumn)\b",
+                    txt,
+                    re.I,
+                ):
+                    if txt not in page_terms:
+                        page_terms.append(txt)
+
         # Parse the plain-body text for class list details
         parsed_classes = parse_course_class_list(text)
-        return {"classes": parsed_classes}
+        return {"classes": parsed_classes, "terms": page_terms}
 
     except Exception as e:
         print(f"An error occurred while fetching course class list: {e}")

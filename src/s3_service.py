@@ -206,13 +206,23 @@ class S3SyncManager:
             return False
 
     @staticmethod
-    def get_synced_years_from_db(db_path: str | Path | Any) -> set[int]:
-        """Queries SQLite directly to identify which years are already populated in courses table."""
+    def get_synced_years_from_db(
+        db_path: str | Path | Any, min_courses: int = 1
+    ) -> set[int]:
+        """Queries SQLite directly to identify which years are sufficiently populated in courses table.
+
+        When min_courses > 1, requires at least min_courses so single-course test years or
+        interrupted scrapes are not falsely skipped as fully populated.
+        """
         # Support SQLAlchemy Engine or direct path
+        if min_courses > 1:
+            query_sql = f"SELECT year FROM courses GROUP BY year HAVING count(*) >= {min_courses}"
+        else:
+            query_sql = "SELECT DISTINCT year FROM courses"
         if hasattr(db_path, "connect"):
             with db_path.connect() as conn:
                 try:
-                    result = conn.execute(text("SELECT DISTINCT year FROM courses"))
+                    result = conn.execute(text(query_sql))
                     return {
                         int(row[0]) for row in result.fetchall() if row[0] is not None
                     }
@@ -226,7 +236,7 @@ class S3SyncManager:
         conn = sqlite3.connect(str(path))
         cursor = conn.cursor()
         try:
-            cursor.execute("SELECT DISTINCT year FROM courses")
+            cursor.execute(query_sql)
             years = {int(row[0]) for row in cursor.fetchall() if row[0] is not None}
             return years
         except sqlite3.OperationalError:

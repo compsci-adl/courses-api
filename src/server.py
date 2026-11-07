@@ -1,3 +1,4 @@
+import os
 import re
 import sys
 from datetime import datetime
@@ -29,7 +30,7 @@ app = FastAPI(
 )
 
 # Determine the database type
-DB_TYPE = dotenv_values().get("DB_TYPE")
+DB_TYPE = os.environ.get("DB_TYPE") or dotenv_values().get("DB_TYPE")
 
 
 if DB_TYPE == "dev":
