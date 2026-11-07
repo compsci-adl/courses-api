@@ -4,6 +4,7 @@ import random
 import re
 import threading
 import time
+import urllib.parse
 from typing import Any
 
 import json_repair
@@ -46,20 +47,42 @@ class DataFetcher:
     _adelaide_semaphore = threading.BoundedSemaphore(6)
     _direct_blocked = False
     _direct_blocked_until = 0.0
+    _direct_blocked_hosts = {}
 
     @classmethod
-    def is_direct_blocked(cls) -> bool:
-        """Check if direct connection is currently paused due to rate limiting or cooldown."""
-        if cls._direct_blocked:
-            if (
-                cls._direct_blocked_until > 0
-                and time.time() >= cls._direct_blocked_until
-            ):
-                cls._direct_blocked = False
-                cls._direct_blocked_until = 0.0
+    def is_direct_blocked(cls, host: str = "") -> bool:
+        """Check if direct connection is currently paused due to rate limiting or cooldown.
+
+        Supports host-specific cooldowns so blocking on Funnelback does not lockout adelaide.edu.au.
+        """
+        now = time.time()
+        with cls._proxy_lock:
+            if host:
+                blocked_until = cls._direct_blocked_hosts.get(host, 0.0)
+                if blocked_until > 0:
+                    if now >= blocked_until:
+                        cls._direct_blocked_hosts.pop(host, None)
+                        return False
+                    return True
                 return False
-            return True
-        return False
+
+            if cls._direct_blocked:
+                if cls._direct_blocked_until > 0 and now >= cls._direct_blocked_until:
+                    cls._direct_blocked = False
+                    cls._direct_blocked_until = 0.0
+                    return False
+                return True
+            return False
+
+    @classmethod
+    def mark_direct_blocked(cls, host: str = "", duration: float = 10.0) -> None:
+        """Mark a specific host (or global direct connection) as paused for cooldown."""
+        now = time.time()
+        with cls._proxy_lock:
+            cls._direct_blocked = True
+            cls._direct_blocked_until = max(cls._direct_blocked_until, now + duration)
+            if host:
+                cls._direct_blocked_hosts[host] = now + duration
 
     @staticmethod
     def _sanitise_for_log(value: Any) -> str:
@@ -330,12 +353,14 @@ class DataFetcher:
 
         headers = self._get_headers()
         request_url = self._build_request_url()
+        parsed_url = urllib.parse.urlparse(request_url)
+        req_host = parsed_url.netloc
 
         # Direct Connection First
         is_ci = bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))
         base_timeout = max(self.timeout, 8.0) if is_ci else max(self.timeout, 5.0)
 
-        if not DataFetcher.is_direct_blocked():
+        if not DataFetcher.is_direct_blocked(req_host):
             sem_ctx = (
                 DataFetcher._adelaide_semaphore
                 if self.use_class_url
@@ -359,12 +384,13 @@ class DataFetcher:
                         logger.warning("HTTP 404 - Not Found: %s", self.url)
                         return {}
                     elif direct_resp.status_code in (403, 429):
-                        DataFetcher._direct_blocked = True
-                        DataFetcher._direct_blocked_until = time.time() + 10.0
+                        DataFetcher.mark_direct_blocked(req_host, duration=10.0)
                         logger.warning(
-                            "Direct connection rate-limited/blocked by WAF (HTTP %s). "
-                            "Pausing direct requests for 10s cooldown and trying proxies.",
+                            "Direct connection to %s rate-limited/blocked by WAF (HTTP %s). "
+                            "Pausing direct requests to %s for 10s cooldown and trying proxies.",
+                            req_host,
                             direct_resp.status_code,
+                            req_host,
                         )
                 except Exception as e:
                     logger.debug(
@@ -381,11 +407,14 @@ class DataFetcher:
         proxy_timeout = min(max(self.timeout, 5.0), 8.0)
         with DataFetcher._proxy_lock:
             pool_size = len(DataFetcher._proxies or [])
-        effective_max = min(max_retries, pool_size) if pool_size > 0 else 0
+        # If pool has proxies, bound retries by pool_size; if pool is empty, allow 2 attempts with direct retry
+        effective_max = (
+            min(max_retries, pool_size) if pool_size > 0 else min(max_retries, 2)
+        )
 
         while retries < effective_max:
-            # Re-attempt direct connection after 1 proxy failure if not blocked by WAF
-            if retries == 1 and not DataFetcher.is_direct_blocked():
+            # Re-attempt direct connection after 1 proxy failure if not blocked for this host
+            if retries == 1 and not DataFetcher.is_direct_blocked(req_host):
                 try:
                     direct_resp = self._execute_http_get(
                         request_url, headers=headers, timeout=base_timeout
@@ -400,6 +429,20 @@ class DataFetcher:
 
             proxy = self.get_random_proxy()
             if not proxy:
+                # If no proxy available and direct is not blocked for this host, retry direct with backoff
+                if not DataFetcher.is_direct_blocked(req_host):
+                    try:
+                        time.sleep(0.5 + retries * 0.5)
+                        direct_resp = self._execute_http_get(
+                            request_url, headers=headers, timeout=base_timeout
+                        )
+                        self.last_response = direct_resp
+                        if direct_resp.status_code == 200:
+                            parsed = self._process_response(direct_resp)
+                            if parsed is not None:
+                                return parsed
+                    except Exception:
+                        pass
                 retries += 1
                 time.sleep(0.2)
                 continue
@@ -413,7 +456,7 @@ class DataFetcher:
 
                 if response.status_code == 429:
                     logger.warning("HTTP 429 - Too Many Requests via proxy.")
-                    self.report_proxy_failure(proxy, fatal=True)
+                    self.report_proxy_failure(proxy, fatal=False)
                     retries += 1
                     continue
 
@@ -428,13 +471,15 @@ class DataFetcher:
                         response.status_code,
                         self._sanitise_for_log(proxy),
                     )
-                    self.report_proxy_failure(proxy, fatal=True)
+                    self.report_proxy_failure(
+                        proxy, fatal=(response.status_code == 406)
+                    )
                     retries += 1
                     continue
 
                 if response.status_code != 200:
                     logger.error("HTTP %s via proxy", response.status_code)
-                    self.report_proxy_failure(proxy, fatal=True)
+                    self.report_proxy_failure(proxy, fatal=False)
                     retries += 1
                     continue
 
@@ -486,9 +531,11 @@ class DataFetcher:
 
         headers = self._get_headers()
         request_url = self._build_request_url()
+        parsed_url = urllib.parse.urlparse(request_url)
+        req_host = parsed_url.netloc
         base_timeout = max(self.timeout, 6.0)
 
-        if not DataFetcher.is_direct_blocked():
+        if not DataFetcher.is_direct_blocked(req_host):
             try:
                 if session is not None:
                     resp = await session.get(
@@ -507,8 +554,7 @@ class DataFetcher:
                 elif resp.status_code == 404:
                     return {}
                 elif resp.status_code in (403, 429):
-                    DataFetcher._direct_blocked = True
-                    DataFetcher._direct_blocked_until = time.time() + 10.0
+                    DataFetcher.mark_direct_blocked(req_host, duration=10.0)
             except Exception as e:
                 logger.debug(f"Direct async connection attempt failed: {e}")
 
@@ -519,10 +565,35 @@ class DataFetcher:
         proxy_timeout = min(max(self.timeout, 5.0), 8.0)
         with DataFetcher._proxy_lock:
             pool_size = len(DataFetcher._proxies or [])
-        effective_max = min(max_retries, pool_size) if pool_size > 0 else 0
+        effective_max = (
+            min(max_retries, pool_size) if pool_size > 0 else min(max_retries, 2)
+        )
         while retries < effective_max:
             proxy = self.get_random_proxy()
             if not proxy:
+                if not DataFetcher.is_direct_blocked(req_host):
+                    try:
+                        await asyncio.sleep(0.5 + retries * 0.5)
+                        if session is not None:
+                            resp = await session.get(
+                                request_url, headers=headers, timeout=base_timeout
+                            )
+                        else:
+                            async with AsyncSession(
+                                impersonate="chrome124"
+                            ) as local_sess:
+                                resp = await local_sess.get(
+                                    request_url,
+                                    headers=headers,
+                                    timeout=base_timeout,
+                                )
+                        self.last_response = resp
+                        if resp.status_code == 200:
+                            parsed = self._process_response(resp)
+                            if parsed is not None:
+                                return parsed
+                    except Exception:
+                        pass
                 retries += 1
                 await asyncio.sleep(0.2)
                 continue

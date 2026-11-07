@@ -94,9 +94,10 @@ def save_working_proxies(proxies, filename="src/working_proxies.txt"):
             pass
 
 
-def main(target_working: int = 30):
+def main(target_working: int = 40):
     proxy_urls = [
         "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/refs/heads/master/http.txt",
+        "https://raw.githubusercontent.com/zevtyardt/proxy-list/main/http.txt",
         "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
         "https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt",
     ]
