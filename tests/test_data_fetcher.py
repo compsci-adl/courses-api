@@ -12,6 +12,14 @@ class TestDataFetcher(unittest.TestCase):
     def setUp(self):
         DataFetcher._proxies = ["1.1.1.1:80", "2.2.2.2:80", "3.3.3.3:80"]
         DataFetcher._proxy_failures = {}
+        DataFetcher._direct_blocked = False
+        DataFetcher._direct_blocked_until = 0.0
+        DataFetcher._direct_blocked_hosts.clear()
+
+    def tearDown(self):
+        DataFetcher._direct_blocked = False
+        DataFetcher._direct_blocked_until = 0.0
+        DataFetcher._direct_blocked_hosts.clear()
 
     def test_proxy_failure_threshold(self):
         fetcher = DataFetcher("?test=1", use_proxy=True)
@@ -96,6 +104,15 @@ class TestDataFetcher(unittest.TestCase):
         parsed = fetcher._process_response(mock_resp)
         self.assertIsNotNone(parsed)
         self.assertEqual(parsed["h1"], "Accounting 1")
+
+    def test_host_specific_direct_blocked(self):
+        DataFetcher.mark_direct_blocked(
+            "uosa-search.funnelback.squiz.cloud", duration=5.0
+        )
+        self.assertTrue(
+            DataFetcher.is_direct_blocked("uosa-search.funnelback.squiz.cloud")
+        )
+        self.assertFalse(DataFetcher.is_direct_blocked("adelaide.edu.au"))
 
 
 if __name__ == "__main__":

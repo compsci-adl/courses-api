@@ -1,10 +1,65 @@
+import os
 import re
+import sqlite3
 import time
 
 from bs4 import BeautifulSoup
 
 import data_fetcher
 from log import logger
+
+
+def _get_database_subjects() -> list[str]:
+    """Extract known subjects from existing SQLite database if available."""
+    candidates = [
+        "src/local.sqlite3",
+        "src/dev.sqlite3",
+        "local.sqlite3",
+        "dev.sqlite3",
+    ]
+    for db_path in candidates:
+        if os.path.exists(db_path) and os.path.getsize(db_path) > 0:
+            try:
+                conn = sqlite3.connect(db_path, timeout=5.0)
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT DISTINCT subject FROM courses WHERE subject IS NOT NULL AND subject != '' ORDER BY subject"
+                )
+                rows = cur.fetchall()
+                conn.close()
+                subjects = [r[0] for r in rows if r[0]]
+                if subjects:
+                    return subjects
+            except Exception:
+                pass
+    return []
+
+
+def _get_database_courses_for_subject(subject: str) -> list[dict[str, str]]:
+    """Extract known course codes for a given subject from local SQLite if available."""
+    candidates = [
+        "src/local.sqlite3",
+        "src/dev.sqlite3",
+        "local.sqlite3",
+        "dev.sqlite3",
+    ]
+    for db_path in candidates:
+        if os.path.exists(db_path) and os.path.getsize(db_path) > 0:
+            try:
+                conn = sqlite3.connect(db_path, timeout=5.0)
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT DISTINCT course_code, terms FROM courses WHERE LOWER(subject) = LOWER(?) AND course_code IS NOT NULL AND course_code != ''",
+                    (subject,),
+                )
+                rows = cur.fetchall()
+                conn.close()
+                courses = [{"code": r[0], "terms": r[1] or ""} for r in rows if r[0]]
+                if courses:
+                    return courses
+            except Exception:
+                pass
+    return []
 
 
 def _extract_subjects_from_facet_data(data) -> list[dict[str, str]]:

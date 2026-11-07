@@ -798,6 +798,20 @@ def process_subject(
             time.sleep(0.5 + attempt * 0.3)
 
         if course_list is None:
+            if previous_courses:
+                fallback_from_prev = [
+                    {"code": v.get("course_code", k), "terms": v.get("terms", "")}
+                    for k, v in previous_courses.items()
+                    if str(v.get("subject", "")).strip().lower() == name.strip().lower()
+                ]
+                if fallback_from_prev:
+                    logger.warning(
+                        f"Subject '{name}' ({year}) could not be retrieved from search API. "
+                        f"Falling back to {len(fallback_from_prev)} courses from previous years."
+                    )
+                    course_list = fallback_from_prev
+
+        if course_list is None:
             logger.error(
                 f"Subject '{name}' ({year}) could not be retrieved after 5 attempts. Skipping."
             )
@@ -911,6 +925,15 @@ def scrape_single_year(
                     f"Subject discovery attempt {attempt + 1}/4 for year {year} returned 0 subjects. Retrying..."
                 )
                 time.sleep(1.0 + attempt * 1.0)
+
+            if not subj_list:
+                db_subjects = data_parser._get_database_subjects()
+                if db_subjects:
+                    logger.warning(
+                        f"Subject discovery for year {year} returned 0 subjects from search API. "
+                        f"Falling back to {len(db_subjects)} known subjects from database."
+                    )
+                    subj_list = [{"subject": s} for s in db_subjects]
 
             if not subj_list:
                 logger.error(

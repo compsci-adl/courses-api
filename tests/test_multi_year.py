@@ -1254,6 +1254,7 @@ class TestFastAPIRouting(unittest.TestCase):
     def test_data_fetcher_direct_blocked_flag_on_403(self):
         # When direct connection gets 403, DataFetcher sets _direct_blocked = True
         data_fetcher.DataFetcher._direct_blocked = False
+        data_fetcher.DataFetcher._direct_blocked_hosts.clear()
 
         mock_resp = MagicMock(status_code=403)
         with patch("curl_cffi.requests.get", return_value=mock_resp):
@@ -1263,6 +1264,7 @@ class TestFastAPIRouting(unittest.TestCase):
 
         # Reset flag
         data_fetcher.DataFetcher._direct_blocked = False
+        data_fetcher.DataFetcher._direct_blocked_hosts.clear()
 
     @patch("scraper.fetch_proxies")
     @patch("scraper.scrape_single_year")
