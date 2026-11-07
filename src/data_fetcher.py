@@ -423,7 +423,11 @@ class DataFetcher:
                     return {}
 
                 if response.status_code in (403, 406):
-                    logger.warning("HTTP %s via proxy: %s", response.status_code, proxy)
+                    logger.warning(
+                        "HTTP %s via proxy: %s",
+                        response.status_code,
+                        self._sanitise_for_log(proxy),
+                    )
                     self.report_proxy_failure(proxy, fatal=True)
                     retries += 1
                     continue
