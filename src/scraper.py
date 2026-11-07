@@ -896,8 +896,8 @@ def scrape_single_year(
         else (is_active or existing_class_count == 0)
     )
 
-    subject_workers = int(os.environ.get("SUBJECT_WORKERS", "8"))
-    course_workers = int(os.environ.get("COURSE_WORKERS", "24"))
+    subject_workers = int(os.environ.get("SUBJECT_WORKERS", "2"))
+    course_workers = int(os.environ.get("COURSE_WORKERS", "6"))
 
     try:
         with Progress() as progress:
@@ -991,7 +991,7 @@ def scrape_single_year(
     logger.info(f"{year} scraping completed directly to SQLite database.")
 
 
-def ensure_proxies_ready(min_proxies: int = 20):
+def ensure_proxies_ready(min_proxies: int = 15):
     """Ensure that a valid working_proxies file exists with at least min_proxies."""
     candidate_files = [
         "src/working_proxies.txt",
@@ -1013,7 +1013,7 @@ def ensure_proxies_ready(min_proxies: int = 20):
             f"Testing and fetching fresh proxies..."
         )
         try:
-            fetch_proxies.main()
+            fetch_proxies.main(target_working=30)
             with data_fetcher.DataFetcher._proxy_lock:
                 data_fetcher.DataFetcher._proxies = None
                 data_fetcher.DataFetcher._proxy_failures.clear()
@@ -1199,13 +1199,13 @@ def main():
         "--course-workers",
         type=int,
         default=None,
-        help="Number of concurrent workers for course processing (default: 24)",
+        help="Number of concurrent workers for course processing (default: 6)",
     )
     parser.add_argument(
         "--subject-workers",
         type=int,
         default=None,
-        help="Number of concurrent workers for subject discovery (default: 8)",
+        help="Number of concurrent workers for subject discovery (default: 2)",
     )
     args = parser.parse_args()
 

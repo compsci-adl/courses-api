@@ -60,24 +60,22 @@ class TestDataFetcher(unittest.TestCase):
         )
         mock_load.assert_called()
 
-    def test_cache_buster_appended_to_request_url(self):
+    def test_clean_request_url(self):
         fetcher = DataFetcher("/study/courses/2026/acct-1001/", use_class_url=True)
         req_url = fetcher._build_request_url()
-        self.assertIn("_cb=", req_url)
-        self.assertTrue(
-            req_url.startswith(
-                "https://adelaide.edu.au/study/courses/2026/acct-1001/?_cb="
-            )
+        self.assertNotIn("_cb=", req_url)
+        self.assertEqual(
+            req_url, "https://adelaide.edu.au/study/courses/2026/acct-1001/"
         )
 
-    def test_strict_cache_control_headers(self):
+    def test_clean_headers_no_proxy_rejection(self):
         fetcher = DataFetcher("/study/courses/2026/acct-1001/", use_class_url=True)
         headers = fetcher._get_headers()
-        self.assertEqual(
-            headers["Cache-Control"], "no-cache, no-store, must-revalidate, max-age=0"
-        )
-        self.assertEqual(headers["Pragma"], "no-cache")
-        self.assertEqual(headers["Expires"], "0")
+        self.assertNotIn("Cache-Control", headers)
+        self.assertNotIn("Pragma", headers)
+        self.assertNotIn("Expires", headers)
+        self.assertIn("Accept", headers)
+        self.assertIn("Referer", headers)
 
     def test_process_response_rejects_empty_or_invalid_proxy_page(self):
         fetcher = DataFetcher("/study/courses/2026/acct-1001/", use_class_url=True)
