@@ -436,7 +436,7 @@ def process_course(
     try:
         course_code = course.get("code")
         if not course_code:
-            print(f"Skipping course with missing code: {course}")
+            logger.warning(f"Skipping course with missing code: {course}")
             progress.update(subject_task, advance=1)
             return
 
@@ -748,7 +748,7 @@ def process_course(
         progress.update(subject_task, advance=1)
 
     except Exception as e:
-        print(f"Error processing course {course.get('code')}: {e}")
+        logger.error(f"Error processing course {course.get('code')}: {e}")
 
 
 def process_subject(
@@ -847,7 +847,7 @@ def process_subject(
         progress.update(all_task, advance=1)
 
     except Exception as e:
-        print(f"Error processing subject {subject['subject']}: {e}")
+        logger.error(f"Error processing subject {subject['subject']}: {e}")
 
 
 def scrape_single_year(
@@ -896,8 +896,8 @@ def scrape_single_year(
         else (is_active or existing_class_count == 0)
     )
 
-    subject_workers = int(os.environ.get("SUBJECT_WORKERS", "2"))
-    course_workers = int(os.environ.get("COURSE_WORKERS", "6"))
+    subject_workers = int(os.environ.get("SUBJECT_WORKERS", "8"))
+    course_workers = int(os.environ.get("COURSE_WORKERS", "24"))
 
     try:
         with Progress() as progress:
@@ -1115,8 +1115,14 @@ async def run_pipeline(
             is_active = yr in active_years
 
             # --- SKIP CHECK ---
-            # If it's not an active year and we already have it sufficiently in DB, skip with ZERO network calls
-            if not is_active and yr in existing_years and not force_all_years:
+            # If this year is already populated in DB (and is a past/historical year relative to primary_active_year,
+            # or not an active year), skip with ZERO network calls unless --force-all-years is passed.
+            should_skip = (
+                not force_all_years
+                and yr in existing_years
+                and (not is_active or yr < primary_active_year)
+            )
+            if should_skip:
                 reason = (
                     "historical/past year"
                     if yr < primary_active_year

@@ -1,3 +1,4 @@
+import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from curl_cffi import requests
@@ -8,6 +9,8 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
+from log import logger
+
 
 def fetch_proxies(url):
     """Fetch the list of proxies from the URL."""
@@ -17,7 +20,7 @@ def fetch_proxies(url):
             return response.text.splitlines()
     except Exception:
         pass
-    print("Failed to retrieve proxies.")
+    logger.warning("Failed to retrieve proxies.")
     return []
 
 
@@ -113,11 +116,12 @@ def main(target_working: int = 30):
         TextColumn("[progress.description]{task.description}"),
         BarColumn(),
         TimeRemainingColumn(),
+        disable=not sys.stdout.isatty(),
     ) as progress:
         task = progress.add_task("Testing Proxies...", total=len(proxies))
 
         # Use ThreadPoolExecutor for concurrency
-        with ThreadPoolExecutor(max_workers=100) as executor:
+        with ThreadPoolExecutor(max_workers=50) as executor:
             future_to_proxy = {
                 executor.submit(test_proxy, proxy): proxy for proxy in proxies
             }
@@ -137,11 +141,11 @@ def main(target_working: int = 30):
     # Save working proxies to file
     if working_proxies:
         save_working_proxies(working_proxies)
-        print(
-            f"\n[+] Saved {len(working_proxies)} working proxies to 'working_proxies.txt'."
+        logger.info(
+            f"Saved {len(working_proxies)} working proxies to 'working_proxies.txt'."
         )
     else:
-        print("\n[-] No working proxies found.")
+        logger.warning("No working proxies found.")
 
 
 if __name__ == "__main__":
