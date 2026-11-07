@@ -60,6 +60,45 @@ class TestDataFetcher(unittest.TestCase):
         )
         mock_load.assert_called()
 
+    def test_cache_buster_appended_to_request_url(self):
+        fetcher = DataFetcher("/study/courses/2026/acct-1001/", use_class_url=True)
+        req_url = fetcher._build_request_url()
+        self.assertIn("_cb=", req_url)
+        self.assertTrue(
+            req_url.startswith(
+                "https://adelaide.edu.au/study/courses/2026/acct-1001/?_cb="
+            )
+        )
+
+    def test_strict_cache_control_headers(self):
+        fetcher = DataFetcher("/study/courses/2026/acct-1001/", use_class_url=True)
+        headers = fetcher._get_headers()
+        self.assertEqual(
+            headers["Cache-Control"], "no-cache, no-store, must-revalidate, max-age=0"
+        )
+        self.assertEqual(headers["Pragma"], "no-cache")
+        self.assertEqual(headers["Expires"], "0")
+
+    def test_process_response_rejects_empty_or_invalid_proxy_page(self):
+        fetcher = DataFetcher("/study/courses/2026/acct-1001/", use_class_url=True)
+        mock_resp = unittest.mock.MagicMock()
+        # Proxy block/error page without course markers or h1
+        mock_resp.status_code = 200
+        mock_resp.text = "<html><body>Squid Error 504 Gateway Timeout</body></html>"
+        mock_resp.content = mock_resp.text.encode("utf-8")
+        parsed = fetcher._process_response(mock_resp)
+        self.assertIsNone(parsed)
+
+    def test_process_response_accepts_valid_course_page(self):
+        fetcher = DataFetcher("/study/courses/2026/acct-1001/", use_class_url=True)
+        mock_resp = unittest.mock.MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.text = "<html><head><title>Course | Adelaide</title></head><body><h1 class='cmp-title'>Accounting 1</h1><div class='cmp-course'>Course ID: 12345</div></body></html>"
+        mock_resp.content = mock_resp.text.encode("utf-8")
+        parsed = fetcher._process_response(mock_resp)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["h1"], "Accounting 1")
+
 
 if __name__ == "__main__":
     unittest.main()

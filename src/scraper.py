@@ -271,11 +271,22 @@ def _fetch_single_outline_candidate(outline_url: str) -> tuple[str, str] | None:
             resp_html = fetcher.last_response.text
 
         if not resp_html:
+            proxy_dict = fetcher.get_random_proxy()
+            cb_url = (
+                f"{outline_url}&_cb={int(time.time() * 1000)}"
+                if "?" in outline_url
+                else f"{outline_url}?_cb={int(time.time() * 1000)}"
+            )
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+                "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            }
             resp = requests.get(
-                outline_url,
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
-                },
+                cb_url,
+                proxies=proxy_dict,
+                headers=headers,
                 timeout=6,
                 impersonate="chrome146",
             )
@@ -887,20 +898,28 @@ def scrape_single_year(
     finally:
         # Bulk atomic replace for active/harvested classes and meetings (persists even if interrupted)
         if should_scrape_classes and collected_classes:
-            logger.info(
-                f"Atomic bulk replacing {len(collected_classes)} classes and "
-                f"{len(collected_meetings)} meetings for year {year}..."
-            )
-            db_session = Session(bind=engine)
-            try:
-                bulk_replace_classes_for_year(
-                    db_session,
-                    year,
-                    collected_classes,
-                    collected_meetings,
+            if existing_class_count > 1000 and len(collected_classes) < (
+                existing_class_count * 0.3
+            ):
+                logger.error(
+                    f"SAFETY GUARD: Harvested only {len(collected_classes)} classes for year {year}, "
+                    f"but DB already has {existing_class_count}. Aborting bulk replace to prevent data loss."
                 )
-            finally:
-                db_session.close()
+            else:
+                logger.info(
+                    f"Atomic bulk replacing {len(collected_classes)} classes and "
+                    f"{len(collected_meetings)} meetings for year {year}..."
+                )
+                db_session = Session(bind=engine)
+                try:
+                    bulk_replace_classes_for_year(
+                        db_session,
+                        year,
+                        collected_classes,
+                        collected_meetings,
+                    )
+                finally:
+                    db_session.close()
         else:
             if not should_scrape_classes:
                 logger.info(

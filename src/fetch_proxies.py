@@ -1,3 +1,4 @@
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
@@ -24,25 +25,33 @@ def fetch_proxies(url):
 def test_proxy(
     proxy,
     test_url="https://adelaide.edu.au/study/courses/",
-    timeout=3,
+    timeout=5,
     retries=1,  # Number of retries
 ):
-    """Test if the given proxy is working by making a request."""
+    """Test if the given proxy is working by making a request with cache prevention and content verification."""
     proxies = {
         "http": f"http://{proxy}",
         "https": f"http://{proxy}",
     }
+    ts = int(time.time() * 1000)
+    url_with_cb = f"{test_url}{'&' if '?' in test_url else '?'}_cb={ts}"
     for attempt in range(retries + 1):  # Retry logic
         try:
-            # Use realistic User-Agent to avoid WAF block
+            # Use realistic User-Agent and strict cache-busting headers
             headers = {
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+                "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "Expires": "0",
             }
             response = requests.get(
-                test_url, proxies=proxies, headers=headers, timeout=timeout
+                url_with_cb, proxies=proxies, headers=headers, timeout=timeout
             )
             if response.status_code == 200:
-                return proxy  # Return the working proxy
+                raw_text = response.text or ""
+                # Verify that response is a genuine Adelaide University page and not a proxy block/error page
+                if "adelaide" in raw_text.lower() or "course" in raw_text.lower():
+                    return proxy  # Return the working proxy
             elif response.status_code == 403:
                 # WAF block, skip immediately
                 return None

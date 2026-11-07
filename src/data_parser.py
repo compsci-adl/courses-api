@@ -175,6 +175,13 @@ def get_course_details(course_code: str, year: int | str | None = None):
                     )
                     return None
 
+                if not data.get("h1", "").strip():
+                    logger.debug(
+                        f"Course {course_code} response has empty title (possible invalid proxy page). Retrying..."
+                    )
+                    time.sleep(0.3)
+                    continue
+
                 text = data.get("data", "")
                 body_text = (
                     BeautifulSoup(text, "html.parser").get_text()
