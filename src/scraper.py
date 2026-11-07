@@ -5,6 +5,7 @@ import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from hashlib import shake_256
 from queue import Queue
 from threading import Lock, Thread
@@ -34,6 +35,7 @@ from db_service import (
     ensure_healthy_database,
     ensure_schema_up_to_date,
     finalize_sqlite_for_s3,
+    get_all_course_ids_for_year,
     get_existing_class_count_for_year,
     get_existing_course_hashes,
     get_existing_course_ids_for_year,
@@ -109,11 +111,14 @@ def _flush_batch(engine, items: list):
         assessments = []
         subjects = []
         meetings = []
+        term_updates = []
         fallbacks = []
 
         for item in items:
             if isinstance(item, tuple) and item[0] == "upsert_class":
                 classes.append(item[1])
+            elif isinstance(item, tuple) and item[0] == "update_course_terms":
+                term_updates.append(item[1])
             elif isinstance(item, Course):
                 courses.append(_model_to_dict(item))
             elif isinstance(item, LearningOutcome):
@@ -133,6 +138,14 @@ def _flush_batch(engine, items: list):
             stmt = stmt.on_conflict_do_nothing(index_elements=["id"])
             session.execute(stmt)
 
+        # Apply real-time term updates for existing courses
+        if term_updates:
+            for upd in term_updates:
+                if upd.get("id") and upd.get("terms"):
+                    session.query(Course).filter(Course.id == upd["id"]).update(
+                        {"terms": upd["terms"]}, synchronize_session=False
+                    )
+
         # Bulk upsert courses
         if courses:
             stmt = sqlite_insert(Course).values(courses)
@@ -145,7 +158,17 @@ def _flush_batch(engine, items: list):
                 index_elements=["id"],
                 set_=update_cols,
             )
-            session.execute(stmt)
+            try:
+                session.execute(stmt)
+            except Exception:
+                session.rollback()
+                # If conflict was on (year, course_id)
+                stmt_fallback = sqlite_insert(Course).values(courses)
+                stmt_fallback = stmt_fallback.on_conflict_do_update(
+                    index_elements=["year", "course_id"],
+                    set_=update_cols,
+                )
+                session.execute(stmt_fallback)
 
         # Bulk insert learning outcomes
         if outcomes:
@@ -316,6 +339,15 @@ def _extract_and_queue_classes(
         course_code, year=year, raw_html=raw_html
     )
     class_items = class_list.get("classes", []) if isinstance(class_list, dict) else []
+    extracted_terms = (
+        class_list.get("terms", []) if isinstance(class_list, dict) else []
+    )
+    if extracted_terms:
+        clean_terms_str = join_str_if_iterable(extracted_terms)
+        if clean_terms_str:
+            write_queue.put(
+                ("update_course_terms", {"id": course_cid, "terms": clean_terms_str})
+            )
 
     for individual_class in class_items:
         class_type = individual_class.get("component")
@@ -392,6 +424,7 @@ def process_course(
     previous_courses: dict[str, dict] | None = None,
     collected_classes: list[dict] | None = None,
     collected_meetings: list[dict] | None = None,
+    all_course_ids_for_year: dict[str, str] | None = None,
 ):
     """Process a single course and insert/upsert data into the database directly.
 
@@ -449,11 +482,33 @@ def process_course(
 
         name = subject["subject"] if isinstance(subject, dict) else str(subject)
         title = course_details.get("title", "")
-        terms = course.get("terms") or course_details.get("terms")
+
+        # Clean and prioritize terms (details from live page prioritized over generic FB search)
+        def _clean_terms(terms_val) -> list[str]:
+            if not terms_val:
+                return []
+            items = (
+                terms_val if isinstance(terms_val, (list, tuple, set)) else [terms_val]
+            )
+            cleaned = []
+            for x in items:
+                s = str(x).strip() if x is not None else ""
+                if s and s not in cleaned:
+                    cleaned.append(s)
+            return cleaned
+
+        detail_terms = _clean_terms(course_details.get("terms"))
+        fb_terms = _clean_terms(course.get("terms"))
+        terms = detail_terms or fb_terms or []
         campus = course_details.get("campus")
 
-        # Course Custom ID
-        course_cid = get_short_hash(f"{name}{code_str}{title}{year}{terms}{campus}")
+        # Course Custom ID: reuse existing DB row ID if present to avoid (year, course_id) unique constraint collision
+        existing_row_id = None
+        if all_course_ids_for_year:
+            existing_row_id = all_course_ids_for_year.get(
+                code_str
+            ) or all_course_ids_for_year.get(norm_code)
+        course_cid = existing_row_id or get_short_hash(f"{name}{code_str}{year}")
         encoded_course_code = re.sub(
             r"([a-zA-Z]+)([0-9]+)", r"\1-\2", str(code_str)
         ).lower()
@@ -711,6 +766,7 @@ def process_subject(
     collected_meetings: list[dict] | None = None,
     course_executor: ThreadPoolExecutor | None = None,
     course_workers: int = 24,
+    all_course_ids_for_year: dict[str, str] | None = None,
 ):
     """Process a single subject and insert data into the database."""
     try:
@@ -776,6 +832,7 @@ def process_subject(
                     previous_courses,
                     collected_classes,
                     collected_meetings,
+                    all_course_ids_for_year,
                 )
                 futures.append(future)
 
@@ -818,9 +875,11 @@ def scrape_single_year(
         existing_courses_for_year = get_existing_course_ids_for_year(
             check_session, year
         )
+        all_course_ids_for_year = get_all_course_ids_for_year(check_session, year)
         existing_class_count = get_existing_class_count_for_year(check_session, year)
         logger.info(
-            f"Preloaded {len(existing_courses_for_year)} existing course records and "
+            f"Preloaded {len(existing_courses_for_year)} existing complete course records "
+            f"({len(all_course_ids_for_year)} total known courses) and "
             f"{existing_class_count} class records for year {year} from DB."
         )
         previous_courses = get_previous_years_course_data(check_session, year)
@@ -888,6 +947,7 @@ def scrape_single_year(
                             collected_meetings if should_scrape_classes else None,
                             course_executor=course_executor,
                             course_workers=course_workers,
+                            all_course_ids_for_year=all_course_ids_for_year,
                         )
                         futures.append(future)
 
@@ -996,27 +1056,29 @@ async def run_pipeline(
             f"Reset legacy database at {db_path} to build clean multi-year schema from scratch."
         )
 
-    existing_years = S3SyncManager.get_synced_years_from_db(db_path)
+    existing_years = S3SyncManager.get_synced_years_from_db(db_path, min_courses=1000)
     logger.info(f"Years already populated in DB: {existing_years}")
 
-    # Discover available academic years and probe active year via persistent connection pool
+    # Discover available academic years and probe active years via persistent connection pool
     async with await create_scraper_client() as http_client:
         available_years = YearDiscoveryService.discover_available_years()
         logger.info(f"Discovered available academic years: {available_years}")
 
-        active_year = await YearDiscoveryService.determine_active_year(
+        active_years = await YearDiscoveryService.determine_active_years(
             http_client, available_years, active_year_override=active_year
         )
+        primary_active_year = max(active_years) if active_years else datetime.now().year
         # Guarantee target multi-year window (2026-2028) is always present
         for y in [2026, 2027, 2028]:
             if y not in available_years:
                 available_years.append(y)
-        if active_year not in available_years:
-            available_years.append(active_year)
+        for y in active_years:
+            if y not in available_years:
+                available_years.append(y)
         available_years.sort()
 
         logger.info(
-            f"Available years: {available_years} | Active year (with classes): {active_year}"
+            f"Available years: {available_years} | Active years (with classes): {sorted(list(active_years))}"
         )
 
     # Initialize SQLite database engine with NullPool and 60s timeout to prevent locking conflicts
@@ -1050,13 +1112,15 @@ async def run_pipeline(
     try:
         # Selective scraping directly into DB
         for yr in available_years:
-            is_active = yr == active_year
+            is_active = yr in active_years
 
             # --- SKIP CHECK ---
-            # If it's not the active year and we already have it in DB, skip with ZERO network calls
+            # If it's not an active year and we already have it sufficiently in DB, skip with ZERO network calls
             if not is_active and yr in existing_years and not force_all_years:
                 reason = (
-                    "historical/past year" if yr < active_year else "static future year"
+                    "historical/past year"
+                    if yr < primary_active_year
+                    else "static future year"
                 )
                 logger.info(f"Skipping year {yr} ({reason}): already present in DB.")
                 continue
@@ -1066,7 +1130,7 @@ async def run_pipeline(
                 if yr in existing_years and not force_all_years:
                     logger.info(
                         f"Active year {yr} courses already in DB. "
-                        f"Harvesting live class availability only (skipping course outline rescrapes)..."
+                        f"Harvesting live class availability and updating incomplete course records..."
                     )
                 else:
                     logger.info(
@@ -1079,7 +1143,7 @@ async def run_pipeline(
                     existing_hashes=existing_hashes,
                 )
             else:
-                tag = "historical" if yr < active_year else "future"
+                tag = "historical" if yr < primary_active_year else "future"
                 logger.info(
                     f"Scraping {tag} year {yr} (courses + class harvesting if unpopulated)..."
                 )

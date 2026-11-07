@@ -68,9 +68,34 @@ def get_existing_course_hashes(session: Session) -> dict[tuple[str, int], str]:
 
 
 def get_existing_course_ids_for_year(session: Session, year: int) -> dict[str, str]:
-    """Preloads existing course identifiers for a specific year from DB.
+    """Preloads existing complete course identifiers for a specific year from DB.
 
-    Maps raw course_code, uppercase course_code, and code to course id.
+    Only courses with non-empty terms are treated as already scraped so that
+    incomplete or placeholder courses are re-fetched and updated.
+    """
+    rows = (
+        session.query(Course.course_code, Course.id)
+        .filter(
+            Course.year == year,
+            Course.terms.isnot(None),
+            Course.terms != "",
+        )
+        .all()
+    )
+    mapping: dict[str, str] = {}
+    for code, cid in rows:
+        if code:
+            mapping[code] = cid
+            mapping[code.replace(" ", "").upper()] = cid
+            mapping[code.strip()] = cid
+    return mapping
+
+
+def get_all_course_ids_for_year(session: Session, year: int) -> dict[str, str]:
+    """Maps all course codes for a year to their existing database IDs regardless of completeness.
+
+    Reusing existing IDs preserves primary key continuity and prevents unique
+    constraint collisions on (year, course_id).
     """
     rows = (
         session.query(Course.course_code, Course.id).filter(Course.year == year).all()

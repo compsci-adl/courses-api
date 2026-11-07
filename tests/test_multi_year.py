@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import data_fetcher
@@ -19,6 +19,7 @@ from db_service import (
     compute_course_hash,
     ensure_healthy_database,
     ensure_schema_up_to_date,
+    get_all_course_ids_for_year,
     get_existing_course_ids_for_year,
     get_previous_years_course_data,
     is_legacy_database,
@@ -35,7 +36,7 @@ from models import (
     Subject,
 )
 from s3_service import S3SyncManager
-from scraper import process_course, run_pipeline
+from scraper import _flush_batch, process_course, run_pipeline
 from server import app, get_db
 from year_discovery import YearDiscoveryService
 
@@ -1377,6 +1378,135 @@ class TestFastAPIRouting(unittest.TestCase):
         self.assertIn(2026, years)
         self.assertIn(2027, years)
         self.assertIn(2028, years)
+
+    def test_determine_active_years_detects_multiple_active_years(self):
+        mock_http = AsyncMock()
+
+        async def mock_get(url, **kwargs):
+            resp = MagicMock()
+            if "2026" in url:
+                resp.status_code = 200
+                resp.text = '<div class="cmp-course-accordion">class-table</div>'
+            elif "2027" in url:
+                resp.status_code = 200
+                resp.text = (
+                    '<div class="cmp-course-accordion">Enrolment class: WS01</div>'
+                )
+            else:
+                resp.status_code = 404
+                resp.text = "Not found"
+            return resp
+
+        mock_http.get.side_effect = mock_get
+
+        active_years = asyncio.run(
+            YearDiscoveryService.determine_active_years(
+                mock_http,
+                [2026, 2027, 2028],
+                sample_course_codes=["acct-1001", "enge-5010"],
+            )
+        )
+        self.assertEqual(active_years, {2026, 2027})
+
+    def test_get_existing_course_ids_ignores_empty_terms(self):
+        engine = create_engine("sqlite://", poolclass=StaticPool)
+        Base.metadata.create_all(engine)
+        session = Session(engine)
+
+        subj = Subject(id="s1", name="Engineering")
+        session.add(subj)
+
+        common_args = {
+            "subject": "Engineering",
+            "campus": "North Terrace",
+            "units": 3,
+            "course_level": "1",
+            "prerequisites": "N/A",
+            "corequisites": "N/A",
+            "antirequisites": "N/A",
+            "university_wide_elective": False,
+            "url": "https://adelaide.edu.au/course",
+        }
+
+        c1 = Course(
+            id="c1",
+            course_id=1,
+            year=2027,
+            terms="Semester 1",
+            course_code="ENGE5010",
+            title="Digital Systems",
+            **common_args,
+        )
+        c2 = Course(
+            id="c2",
+            course_id=2,
+            year=2027,
+            terms="",  # empty terms
+            course_code="MATH1027",
+            title="Algebra",
+            **common_args,
+        )
+        c3 = Course(
+            id="c3",
+            course_id=3,
+            year=2027,
+            terms="",  # empty terms
+            course_code="PHYS1001",
+            title="Physics",
+            **common_args,
+        )
+        session.add_all([c1, c2, c3])
+        session.commit()
+
+        # Existing complete courses should only include c1 with non-empty terms
+        complete = get_existing_course_ids_for_year(session, 2027)
+        self.assertIn("ENGE5010", complete)
+        self.assertNotIn("MATH1027", complete)
+        self.assertNotIn("PHYS1001", complete)
+
+        # All course ids should include all 3 to preserve IDs and avoid unique constraint collisions
+        all_courses = get_all_course_ids_for_year(session, 2027)
+        self.assertIn("ENGE5010", all_courses)
+        self.assertIn("MATH1027", all_courses)
+        self.assertIn("PHYS1001", all_courses)
+
+    def test_flush_batch_updates_course_terms(self):
+        engine = create_engine("sqlite://", poolclass=StaticPool)
+        Base.metadata.create_all(engine)
+        session = Session(engine)
+
+        subj = Subject(id="s2", name="Engineering")
+        session.add(subj)
+
+        c = Course(
+            id="cid_terms_test",
+            course_id=999,
+            year=2027,
+            terms="",
+            course_code="ENGE5010",
+            title="Digital Systems",
+            subject="Engineering",
+            campus="North Terrace",
+            units=3,
+            course_level="1",
+            prerequisites="N/A",
+            corequisites="N/A",
+            antirequisites="N/A",
+            university_wide_elective=False,
+            url="https://adelaide.edu.au/course",
+        )
+        session.add(c)
+        session.commit()
+
+        # Flush batch with update_course_terms
+        _flush_batch(
+            engine,
+            [("update_course_terms", {"id": "cid_terms_test", "terms": "Semester 1"})],
+        )
+
+        session.expire_all()
+        updated = session.query(Course).filter_by(id="cid_terms_test").one()
+        self.assertEqual(updated.terms, "Semester 1")
 
 
 if __name__ == "__main__":
