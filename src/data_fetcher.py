@@ -11,6 +11,7 @@ from bs4 import BeautifulSoup
 from curl_cffi import requests
 from curl_cffi.requests import AsyncSession
 
+import fetch_proxies
 from log import logger
 
 _tls = threading.local()
@@ -131,6 +132,16 @@ class DataFetcher:
                 DataFetcher._proxies = self.load_proxies()
                 DataFetcher._proxy_failures.clear()
             if not DataFetcher._proxies:
+                logger.info(
+                    "Proxy pool exhausted. Discovering fresh working proxies..."
+                )
+                try:
+                    fetch_proxies.main(target_working=30)
+                    DataFetcher._proxies = self.load_proxies()
+                    DataFetcher._proxy_failures.clear()
+                except Exception as e:
+                    logger.debug(f"Fresh proxy discovery attempt: {e}")
+            if not DataFetcher._proxies:
                 logger.warning("No proxies available. Proceeding without a proxy.")
                 return None
             # 70% of the time pick from the top 5 known good proxies if available
@@ -150,6 +161,13 @@ class DataFetcher:
         proxy_str = proxy.get("http", "").replace("http://", "")
         if not proxy_str:
             return
+        # If proxy failed, reset thread-local session so dead connections aren't reused
+        if hasattr(_tls, "session") and _tls.session is not None:
+            try:
+                _tls.session.close()
+            except Exception:
+                pass
+            _tls.session = None
         with DataFetcher._proxy_lock:
             count = DataFetcher._proxy_failures.get(proxy_str, 0) + 1
             DataFetcher._proxy_failures[proxy_str] = count
@@ -199,11 +217,49 @@ class DataFetcher:
                 return self.data
             return None
         else:
+            # Check for empty response
+            resp_text = response.text or ""
+            if not resp_text.strip():
+                return None
+
             soup = BeautifulSoup(response.content, "html.parser")
             main_tag = soup.find("main")
             text = main_tag.get_text() if main_tag else soup.get_text()
             h1_tag = soup.find("h1")
             h1_text = h1_tag.get_text().strip() if h1_tag else ""
+
+            # Check for 404 Page Not Found
+            title_text = soup.title.get_text().strip() if soup.title else ""
+            is_404 = (
+                response.status_code == 404
+                or h1_text.lower() == "page not found"
+                or "page not found" in title_text.lower()
+            )
+            if is_404:
+                self.data = {
+                    "h1": "Page not found",
+                    "data": re.sub(r"\n+", "\n", text),
+                    "html": response.text,
+                }
+                return self.data
+
+            # Validate genuine Adelaide University course page content
+            raw_lower = resp_text.lower()
+            has_course_markers = (
+                "cmp-" in raw_lower
+                or "study/courses" in raw_lower
+                or "adelaide" in raw_lower
+                or "course id" in raw_lower
+                or "unit value" in raw_lower
+                or "course overview" in raw_lower
+            )
+            if not h1_text or not has_course_markers:
+                logger.debug(
+                    "Proxy response rejected: missing h1 or course markers (h1='%s')",
+                    self._sanitise_for_log(h1_text),
+                )
+                return None
+
             self.data = {
                 "h1": h1_text,
                 "data": re.sub(r"\n+", "\n", text),
@@ -211,16 +267,25 @@ class DataFetcher:
             }
             return self.data
 
+    def _build_request_url(self) -> str:
+        """Construct the request URL, appending a unique cache-buster to prevent proxies/CDNs from returning stale cached responses."""
+        cache_buster = f"_cb={int(time.time() * 1000)}"
+        sep = "&" if "?" in self.url else "?"
+        return f"{self.url}{sep}{cache_buster}"
+
     def _get_headers(self) -> dict:
         """Flexible headers depending on target endpoint (html page vs json api)."""
+        cache_headers = {
+            "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        }
         if self.use_class_url:
             return {
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
                 "Accept-Language": "en-US,en;q=0.9",
-                "Referer": "https://www.adelaide.edu.au/",
-                "Cache-Control": "no-cache",
-                "Pragma": "no-cache",
+                "Referer": "https://adelaide.edu.au/",
                 "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="146", "Google Chrome";v="146"',
                 "Sec-Ch-Ua-Mobile": "?0",
                 "Sec-Ch-Ua-Platform": '"macOS"',
@@ -229,16 +294,15 @@ class DataFetcher:
                 "Sec-Fetch-Site": "same-origin",
                 "Sec-Fetch-User": "?1",
                 "Upgrade-Insecure-Requests": "1",
+                **cache_headers,
             }
         else:
             return {
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
                 "Accept": "application/json, text/javascript, */*; q=0.01",
                 "Accept-Language": "en-US,en;q=0.9",
-                "Referer": "https://www.adelaide.edu.au/",
-                "Origin": "https://www.adelaide.edu.au",
-                "Cache-Control": "no-cache",
-                "Pragma": "no-cache",
+                "Referer": "https://adelaide.edu.au/",
+                "Origin": "https://adelaide.edu.au",
                 "X-Requested-With": "XMLHttpRequest",
                 "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="146", "Google Chrome";v="146"',
                 "Sec-Ch-Ua-Mobile": "?0",
@@ -246,6 +310,7 @@ class DataFetcher:
                 "Sec-Fetch-Dest": "empty",
                 "Sec-Fetch-Mode": "cors",
                 "Sec-Fetch-Site": "cross-site",
+                **cache_headers,
             }
 
     def _execute_http_get(
@@ -289,6 +354,7 @@ class DataFetcher:
             return {}
 
         headers = self._get_headers()
+        request_url = self._build_request_url()
 
         # Direct Connection First
         is_ci = bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))
@@ -307,7 +373,7 @@ class DataFetcher:
                         self._sanitise_for_log(self.endpoint),
                     )
                     direct_resp = self._execute_http_get(
-                        self.url, headers=headers, timeout=base_timeout
+                        request_url, headers=headers, timeout=base_timeout
                     )
                     self.last_response = direct_resp
                     if direct_resp.status_code == 200:
@@ -347,7 +413,7 @@ class DataFetcher:
             if retries == 2 and not DataFetcher.is_direct_blocked():
                 try:
                     direct_resp = self._execute_http_get(
-                        self.url, headers=headers, timeout=base_timeout
+                        request_url, headers=headers, timeout=base_timeout
                     )
                     self.last_response = direct_resp
                     if direct_resp.status_code == 200:
@@ -366,7 +432,7 @@ class DataFetcher:
             try:
                 logger.debug("Using proxy: %s", self._sanitise_for_log(proxy))
                 response = self._execute_http_get(
-                    self.url, headers=headers, timeout=proxy_timeout, proxy=proxy
+                    request_url, headers=headers, timeout=proxy_timeout, proxy=proxy
                 )
                 self.last_response = response
 
@@ -440,18 +506,19 @@ class DataFetcher:
             return {}
 
         headers = self._get_headers()
+        request_url = self._build_request_url()
         base_timeout = max(self.timeout, 6.0)
 
         if not DataFetcher.is_direct_blocked():
             try:
                 if session is not None:
                     resp = await session.get(
-                        self.url, headers=headers, timeout=base_timeout
+                        request_url, headers=headers, timeout=base_timeout
                     )
                 else:
                     async with AsyncSession(impersonate="chrome146") as local_sess:
                         resp = await local_sess.get(
-                            self.url, headers=headers, timeout=base_timeout
+                            request_url, headers=headers, timeout=base_timeout
                         )
                 self.last_response = resp
                 if resp.status_code == 200:
@@ -480,7 +547,7 @@ class DataFetcher:
             try:
                 if session is not None:
                     resp = await session.get(
-                        self.url,
+                        request_url,
                         proxies=proxy,
                         headers=headers,
                         timeout=proxy_timeout,
@@ -488,7 +555,7 @@ class DataFetcher:
                 else:
                     async with AsyncSession(impersonate="chrome146") as local_sess:
                         resp = await local_sess.get(
-                            self.url,
+                            request_url,
                             proxies=proxy,
                             headers=headers,
                             timeout=proxy_timeout,
