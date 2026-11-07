@@ -59,7 +59,7 @@ jobs:
 
       - name: Upload Scraper Logs
         if: always()
-        uses: actions/upload-artifact@ea165f8d9516666014e414c24716769f3ef4234f # v5
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: scraper-logs
           path: logs/
