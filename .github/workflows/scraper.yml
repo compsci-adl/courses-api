@@ -51,8 +51,8 @@ jobs:
             -v ${{ github.workspace }}/src:/app/src \
             -e PYTHONUNBUFFERED=1 \
             -e DEFAULT_LOGGING_LEVEL=${{ env.DEFAULT_LOGGING_LEVEL }} \
-            -e COURSE_WORKERS=24 \
-            -e SUBJECT_WORKERS=8 \
+            -e COURSE_WORKERS=6 \
+            -e SUBJECT_WORKERS=2 \
             courses-api-scraper:latest
 
       - name: Rename SQLite DB to local.sqlite3

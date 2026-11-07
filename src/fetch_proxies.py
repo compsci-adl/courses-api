@@ -1,8 +1,7 @@
-import time
+import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import requests
-from requests.exceptions import RequestException, Timeout
+from curl_cffi import requests
 from rich.progress import (
     BarColumn,
     Progress,
@@ -10,16 +9,19 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
+from log import logger
+
 
 def fetch_proxies(url):
     """Fetch the list of proxies from the URL."""
-    response = requests.get(url)
-    if response.status_code == 200:
-        # Split the response content by newline to get each proxy
-        return response.text.splitlines()
-    else:
-        print("Failed to retrieve proxies.")
-        return []
+    try:
+        response = requests.get(url, timeout=10, impersonate="chrome124")
+        if response.status_code == 200:
+            return response.text.splitlines()
+    except Exception:
+        pass
+    logger.warning("Failed to retrieve proxies.")
+    return []
 
 
 def test_proxy(
@@ -28,49 +30,71 @@ def test_proxy(
     timeout=5,
     retries=1,  # Number of retries
 ):
-    """Test if the given proxy is working by making a request with cache prevention and content verification."""
+    """Test if the given proxy is genuinely working for Adelaide University."""
     proxies = {
         "http": f"http://{proxy}",
         "https": f"http://{proxy}",
     }
-    ts = int(time.time() * 1000)
-    url_with_cb = f"{test_url}{'&' if '?' in test_url else '?'}_cb={ts}"
-    for attempt in range(retries + 1):  # Retry logic
+    headers = {
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Referer": "https://adelaide.edu.au/",
+    }
+    for attempt in range(retries + 1):
         try:
-            # Use realistic User-Agent and strict cache-busting headers
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
-                "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
-                "Pragma": "no-cache",
-                "Expires": "0",
-            }
             response = requests.get(
-                url_with_cb, proxies=proxies, headers=headers, timeout=timeout
+                test_url,
+                proxies=proxies,
+                headers=headers,
+                timeout=timeout,
+                impersonate="chrome124",
             )
             if response.status_code == 200:
                 raw_text = response.text or ""
-                # Verify that response is a genuine Adelaide University page and not a proxy block/error page
-                if "adelaide" in raw_text.lower() or "course" in raw_text.lower():
-                    return proxy  # Return the working proxy
-            elif response.status_code == 403:
-                # WAF block, skip immediately
+                raw_lower = raw_text.lower()
+                has_genuine_markers = "<html" in raw_lower and (
+                    "university of adelaide" in raw_lower
+                    or "study at adelaide" in raw_lower
+                    or "course" in raw_lower
+                )
+                is_proxy_error = any(
+                    err in raw_lower
+                    for err in [
+                        "squid",
+                        "access denied",
+                        "proxy error",
+                        "gateway timeout",
+                        "connection refused",
+                        "not acceptable",
+                        "attention required",
+                        "cloudflare",
+                        "406 not acceptable",
+                        "502 bad gateway",
+                    ]
+                )
+                if has_genuine_markers and not is_proxy_error:
+                    return proxy
+            elif response.status_code in (403, 406, 429):
                 return None
-        except (RequestException, Timeout):
+        except Exception:
             if attempt < retries:
-                continue  # Retry on failure
-            else:
-                return None  # Skip the proxy if all retries fail
+                continue
+            return None
     return None
 
 
 def save_working_proxies(proxies, filename="src/working_proxies.txt"):
-    """Save working proxies to a text file."""
-    with open(filename, "w") as file:
-        for proxy in proxies:
-            file.write(f"{proxy}\n")
+    """Save working proxies to text file, writing to both candidate paths."""
+    candidates = [filename, "src/working_proxies.txt", "working_proxies.txt"]
+    for path in set(candidates):
+        try:
+            with open(path, "w") as file:
+                for proxy in proxies:
+                    file.write(f"{proxy}\n")
+        except Exception:
+            pass
 
 
-def main(target_working: int = 500):
+def main(target_working: int = 30):
     proxy_urls = [
         "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/refs/heads/master/http.txt",
         "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
@@ -92,11 +116,12 @@ def main(target_working: int = 500):
         TextColumn("[progress.description]{task.description}"),
         BarColumn(),
         TimeRemainingColumn(),
+        disable=not sys.stdout.isatty(),
     ) as progress:
         task = progress.add_task("Testing Proxies...", total=len(proxies))
 
         # Use ThreadPoolExecutor for concurrency
-        with ThreadPoolExecutor(max_workers=100) as executor:
+        with ThreadPoolExecutor(max_workers=50) as executor:
             future_to_proxy = {
                 executor.submit(test_proxy, proxy): proxy for proxy in proxies
             }
@@ -116,11 +141,11 @@ def main(target_working: int = 500):
     # Save working proxies to file
     if working_proxies:
         save_working_proxies(working_proxies)
-        print(
-            f"\n[+] Saved {len(working_proxies)} working proxies to 'working_proxies.txt'."
+        logger.info(
+            f"Saved {len(working_proxies)} working proxies to 'working_proxies.txt'."
         )
     else:
-        print("\n[-] No working proxies found.")
+        logger.warning("No working proxies found.")
 
 
 if __name__ == "__main__":

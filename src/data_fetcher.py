@@ -20,7 +20,7 @@ _tls = threading.local()
 def _get_tls_session() -> requests.Session:
     """Get or create a thread-local persistent Session for connection pooling."""
     if not hasattr(_tls, "session") or _tls.session is None:
-        _tls.session = requests.Session(impersonate="chrome146")
+        _tls.session = requests.Session(impersonate="chrome124")
     return _tls.session
 
 
@@ -42,7 +42,8 @@ class DataFetcher:
     _proxies = None
     _proxy_failures = {}
     _proxy_lock = threading.Lock()
-    _funnelback_semaphore = threading.BoundedSemaphore(12)
+    _funnelback_semaphore = threading.BoundedSemaphore(6)
+    _adelaide_semaphore = threading.BoundedSemaphore(6)
     _direct_blocked = False
     _direct_blocked_until = 0.0
 
@@ -161,13 +162,6 @@ class DataFetcher:
         proxy_str = proxy.get("http", "").replace("http://", "")
         if not proxy_str:
             return
-        # If proxy failed, reset thread-local session so dead connections aren't reused
-        if hasattr(_tls, "session") and _tls.session is not None:
-            try:
-                _tls.session.close()
-            except Exception:
-                pass
-            _tls.session = None
         with DataFetcher._proxy_lock:
             count = DataFetcher._proxy_failures.get(proxy_str, 0) + 1
             DataFetcher._proxy_failures[proxy_str] = count
@@ -268,49 +262,30 @@ class DataFetcher:
             return self.data
 
     def _build_request_url(self) -> str:
-        """Construct the request URL, appending a unique cache-buster to prevent proxies/CDNs from returning stale cached responses."""
-        cache_buster = f"_cb={int(time.time() * 1000)}"
-        sep = "&" if "?" in self.url else "?"
-        return f"{self.url}{sep}{cache_buster}"
+        """Construct the request URL."""
+        return self.url
 
     def _get_headers(self) -> dict:
         """Flexible headers depending on target endpoint (html page vs json api)."""
-        cache_headers = {
-            "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
-            "Pragma": "no-cache",
-            "Expires": "0",
-        }
         if self.use_class_url:
             return {
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
                 "Accept-Language": "en-US,en;q=0.9",
-                "Referer": "https://adelaide.edu.au/",
-                "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="146", "Google Chrome";v="146"',
-                "Sec-Ch-Ua-Mobile": "?0",
-                "Sec-Ch-Ua-Platform": '"macOS"',
+                "Referer": "https://adelaide.edu.au/study/courses/",
                 "Sec-Fetch-Dest": "document",
                 "Sec-Fetch-Mode": "navigate",
                 "Sec-Fetch-Site": "same-origin",
                 "Sec-Fetch-User": "?1",
                 "Upgrade-Insecure-Requests": "1",
-                **cache_headers,
             }
         else:
             return {
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
                 "Accept": "application/json, text/javascript, */*; q=0.01",
                 "Accept-Language": "en-US,en;q=0.9",
                 "Referer": "https://adelaide.edu.au/",
-                "Origin": "https://adelaide.edu.au",
-                "X-Requested-With": "XMLHttpRequest",
-                "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="146", "Google Chrome";v="146"',
-                "Sec-Ch-Ua-Mobile": "?0",
-                "Sec-Ch-Ua-Platform": '"macOS"',
                 "Sec-Fetch-Dest": "empty",
                 "Sec-Fetch-Mode": "cors",
                 "Sec-Fetch-Site": "cross-site",
-                **cache_headers,
             }
 
     def _execute_http_get(
@@ -330,20 +305,20 @@ class DataFetcher:
                     proxies=proxy,
                     headers=headers,
                     timeout=timeout,
-                    impersonate="chrome146",
+                    impersonate="chrome124",
                 )
             return requests.get(
                 url,
                 headers=headers,
                 timeout=timeout,
-                impersonate="chrome146",
+                impersonate="chrome124",
             )
         sess = _get_tls_session()
         if proxy:
             return sess.get(url, proxies=proxy, headers=headers, timeout=timeout)
         return sess.get(url, headers=headers, timeout=timeout)
 
-    def get(self, max_retries: int = 10) -> dict:
+    def get(self, max_retries: int = 3) -> dict:
         """Fetch data from the API, trying direct connection first with smart proxy fallback."""
         logger.debug("Fetching %s...", self._sanitise_for_log(self.endpoint))
         if self.data is not None:
@@ -362,9 +337,9 @@ class DataFetcher:
 
         if not DataFetcher.is_direct_blocked():
             sem_ctx = (
-                DataFetcher._funnelback_semaphore
-                if not self.use_class_url
-                else threading.Lock()
+                DataFetcher._adelaide_semaphore
+                if self.use_class_url
+                else DataFetcher._funnelback_semaphore
             )
             with sem_ctx:
                 try:
@@ -385,10 +360,10 @@ class DataFetcher:
                         return {}
                     elif direct_resp.status_code in (403, 429):
                         DataFetcher._direct_blocked = True
-                        DataFetcher._direct_blocked_until = time.time() + 15.0
+                        DataFetcher._direct_blocked_until = time.time() + 10.0
                         logger.warning(
                             "Direct connection rate-limited/blocked by WAF (HTTP %s). "
-                            "Pausing direct requests for 15s cooldown and trying proxies.",
+                            "Pausing direct requests for 10s cooldown and trying proxies.",
                             direct_resp.status_code,
                         )
                 except Exception as e:
@@ -401,16 +376,16 @@ class DataFetcher:
         if not self.use_proxy:
             return {}
 
-        # Smart Proxy Fallback with generous timeout and priority queue of working proxies
+        # Smart Proxy Fallback with bounded retries and fast failure
         retries = 0
-        proxy_timeout = min(max(self.timeout, 6.0), 12.0)
+        proxy_timeout = min(max(self.timeout, 5.0), 8.0)
         with DataFetcher._proxy_lock:
             pool_size = len(DataFetcher._proxies or [])
-        max_retries = max(min(max_retries, pool_size), 15)
+        effective_max = min(max_retries, pool_size) if pool_size > 0 else 0
 
-        while retries < max_retries:
-            # Re-attempt direct connection after 2 proxy failures only if not blocked by WAF
-            if retries == 2 and not DataFetcher.is_direct_blocked():
+        while retries < effective_max:
+            # Re-attempt direct connection after 1 proxy failure if not blocked by WAF
+            if retries == 1 and not DataFetcher.is_direct_blocked():
                 try:
                     direct_resp = self._execute_http_get(
                         request_url, headers=headers, timeout=base_timeout
@@ -426,7 +401,7 @@ class DataFetcher:
             proxy = self.get_random_proxy()
             if not proxy:
                 retries += 1
-                time.sleep(0.3)
+                time.sleep(0.2)
                 continue
 
             try:
@@ -447,8 +422,12 @@ class DataFetcher:
                     logger.warning("HTTP 404 - Not Found: %s", self.url)
                     return {}
 
-                if response.status_code == 403:
-                    logger.warning("HTTP 403 - Forbidden for proxy: %s", proxy)
+                if response.status_code in (403, 406):
+                    logger.warning(
+                        "HTTP %s via proxy: %s",
+                        response.status_code,
+                        self._sanitise_for_log(proxy),
+                    )
                     self.report_proxy_failure(proxy, fatal=True)
                     retries += 1
                     continue
@@ -492,12 +471,12 @@ class DataFetcher:
         logger.error(
             "Failed to fetch data from %s after %s attempts.",
             self.url,
-            max_retries,
+            effective_max,
         )
         return {}
 
     async def async_get(
-        self, session: AsyncSession | None = None, max_retries: int = 10
+        self, session: AsyncSession | None = None, max_retries: int = 3
     ) -> dict:
         """Asynchronously fetch data with browser TLS impersonation and connection reuse."""
         if self.data is not None:
@@ -516,7 +495,7 @@ class DataFetcher:
                         request_url, headers=headers, timeout=base_timeout
                     )
                 else:
-                    async with AsyncSession(impersonate="chrome146") as local_sess:
+                    async with AsyncSession(impersonate="chrome124") as local_sess:
                         resp = await local_sess.get(
                             request_url, headers=headers, timeout=base_timeout
                         )
@@ -529,7 +508,7 @@ class DataFetcher:
                     return {}
                 elif resp.status_code in (403, 429):
                     DataFetcher._direct_blocked = True
-                    DataFetcher._direct_blocked_until = time.time() + 15.0
+                    DataFetcher._direct_blocked_until = time.time() + 10.0
             except Exception as e:
                 logger.debug(f"Direct async connection attempt failed: {e}")
 
@@ -537,8 +516,11 @@ class DataFetcher:
             return {}
 
         retries = 0
-        proxy_timeout = min(max(self.timeout, 6.0), 12.0)
-        while retries < min(max_retries, 15):
+        proxy_timeout = min(max(self.timeout, 5.0), 8.0)
+        with DataFetcher._proxy_lock:
+            pool_size = len(DataFetcher._proxies or [])
+        effective_max = min(max_retries, pool_size) if pool_size > 0 else 0
+        while retries < effective_max:
             proxy = self.get_random_proxy()
             if not proxy:
                 retries += 1
@@ -553,7 +535,7 @@ class DataFetcher:
                         timeout=proxy_timeout,
                     )
                 else:
-                    async with AsyncSession(impersonate="chrome146") as local_sess:
+                    async with AsyncSession(impersonate="chrome124") as local_sess:
                         resp = await local_sess.get(
                             request_url,
                             proxies=proxy,

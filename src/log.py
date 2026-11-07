@@ -8,32 +8,43 @@ from dotenv import dotenv_values
 
 
 def setup_logger() -> logging.Logger:
-    """
-    Sets up a logger that writes logs to a file in the form {timestamp}.log
-    and streams to standard output for console and CI visibility.
-    The level of logging that is written depends on the environment
-    variable "DEFAULT_LOGGING_LEVEL".
-    Returns:
-        logging.Logger = a customised logger object
+    """Sets up a logger that writes all logs (DEBUG, INFO, WARNING, ERROR) to a file
+
+    in logs/{timestamp}.log, while only streaming ERROR (and CRITICAL) logs to the
+    console (sys.stdout).
     """
     env_config = dotenv_values()
     raw_level = (
-        env_config.get("DEFAULT_LOGGING_LEVEL")
+        os.getenv("FILE_LOGGING_LEVEL")
+        or env_config.get("FILE_LOGGING_LEVEL")
+        or env_config.get("DEFAULT_LOGGING_LEVEL")
         or os.getenv("DEFAULT_LOGGING_LEVEL")
-        or "INFO"
+        or "DEBUG"
     )
-    logging_level = getattr(logging, str(raw_level).upper(), logging.INFO)
+    # File receives all info, debug, warnings, and errors by default
+    file_logging_level = (
+        getattr(logging, str(raw_level).upper(), logging.DEBUG)
+        if str(raw_level).upper() != "ERROR"
+        else logging.DEBUG
+    )
 
-    # Initialise logger
+    # Initialise logger with DEBUG so all records reach handlers
     logger = logging.getLogger("courseAPICallLogger")
-    logger.setLevel(logging_level)
+    logger.setLevel(logging.DEBUG)
+
+    file_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+
+    # Console level: only ERROR printed to console
+    console_level = getattr(
+        logging,
+        os.getenv("CONSOLE_LOGGING_LEVEL", "ERROR").upper(),
+        logging.ERROR,
+    )
 
     if not logger.hasHandlers():
-        file_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-
-        # Stream handler for stdout (visible in CI runner and console)
+        # Stream handler for stdout: ONLY print errors to console
         stream_handler = logging.StreamHandler(sys.stdout)
-        stream_handler.setLevel(logging_level)
+        stream_handler.setLevel(console_level)
         stream_handler.setFormatter(file_formatter)
         logger.addHandler(stream_handler)
 
@@ -45,12 +56,26 @@ def setup_logger() -> logging.Logger:
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         log_file_path = logs_dir / f"{timestamp}.log"
 
-        # Setup log file handler
+        # Setup log file handler: ALL info, debug, warnings, and errors go to file
         log_file_handler = logging.FileHandler(log_file_path, mode="w", delay=True)
-        log_file_handler.setLevel(logging_level)
+        log_file_handler.setLevel(file_logging_level)
         log_file_handler.setFormatter(file_formatter)
-        # Add handler to logger
         logger.addHandler(log_file_handler)
+
+        # Optional latest.log symlink for convenience
+        try:
+            latest_log_path = logs_dir / "latest.log"
+            if latest_log_path.is_symlink() or latest_log_path.exists():
+                latest_log_path.unlink()
+            latest_log_path.symlink_to(log_file_path.name)
+        except Exception:
+            pass
+    else:
+        for handler in logger.handlers:
+            if isinstance(handler, logging.FileHandler):
+                handler.setLevel(file_logging_level)
+            elif isinstance(handler, logging.StreamHandler):
+                handler.setLevel(console_level)
 
     return logger
 

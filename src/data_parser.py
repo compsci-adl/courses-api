@@ -392,7 +392,7 @@ def get_course_class_list(
         return {"classes": parsed_classes, "terms": page_terms}
 
     except Exception as e:
-        print(f"An error occurred while fetching course class list: {e}")
+        logger.error(f"An error occurred while fetching course class list: {e}")
         return {}
 
 

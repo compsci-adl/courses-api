@@ -13,10 +13,12 @@ from sqlalchemy.orm import Session, sessionmaker
 
 try:
     from .db_service import ensure_schema_up_to_date
+    from .log import logger
     from .models import Base, Course, CourseClass
     from .schemas import CourseSchema
 except ImportError:
     from db_service import ensure_schema_up_to_date
+    from log import logger
     from models import Base, Course, CourseClass  # noqa: F401
     from schemas import CourseSchema  # noqa: F401
 
@@ -42,8 +44,8 @@ else:
     DATABASE_URL = "sqlite:///src/local.sqlite3"
     engine = create_engine(DATABASE_URL)
 
-print("DB_TYPE:", DB_TYPE)
-print("DATABASE_URL:", DATABASE_URL)
+logger.info("DB_TYPE: %s", DB_TYPE)
+logger.info("DATABASE_URL: %s", DATABASE_URL)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 ensure_schema_up_to_date(engine)

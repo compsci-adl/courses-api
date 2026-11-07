@@ -436,7 +436,7 @@ def process_course(
     try:
         course_code = course.get("code")
         if not course_code:
-            print(f"Skipping course with missing code: {course}")
+            logger.warning(f"Skipping course with missing code: {course}")
             progress.update(subject_task, advance=1)
             return
 
@@ -748,7 +748,7 @@ def process_course(
         progress.update(subject_task, advance=1)
 
     except Exception as e:
-        print(f"Error processing course {course.get('code')}: {e}")
+        logger.error(f"Error processing course {course.get('code')}: {e}")
 
 
 def process_subject(
@@ -847,7 +847,7 @@ def process_subject(
         progress.update(all_task, advance=1)
 
     except Exception as e:
-        print(f"Error processing subject {subject['subject']}: {e}")
+        logger.error(f"Error processing subject {subject['subject']}: {e}")
 
 
 def scrape_single_year(
@@ -991,7 +991,7 @@ def scrape_single_year(
     logger.info(f"{year} scraping completed directly to SQLite database.")
 
 
-def ensure_proxies_ready(min_proxies: int = 20):
+def ensure_proxies_ready(min_proxies: int = 15):
     """Ensure that a valid working_proxies file exists with at least min_proxies."""
     candidate_files = [
         "src/working_proxies.txt",
@@ -1013,7 +1013,7 @@ def ensure_proxies_ready(min_proxies: int = 20):
             f"Testing and fetching fresh proxies..."
         )
         try:
-            fetch_proxies.main()
+            fetch_proxies.main(target_working=30)
             with data_fetcher.DataFetcher._proxy_lock:
                 data_fetcher.DataFetcher._proxies = None
                 data_fetcher.DataFetcher._proxy_failures.clear()
@@ -1115,8 +1115,14 @@ async def run_pipeline(
             is_active = yr in active_years
 
             # --- SKIP CHECK ---
-            # If it's not an active year and we already have it sufficiently in DB, skip with ZERO network calls
-            if not is_active and yr in existing_years and not force_all_years:
+            # If this year is already populated in DB (and is a past/historical year relative to primary_active_year,
+            # or not an active year), skip with ZERO network calls unless --force-all-years is passed.
+            should_skip = (
+                not force_all_years
+                and yr in existing_years
+                and (not is_active or yr < primary_active_year)
+            )
+            if should_skip:
                 reason = (
                     "historical/past year"
                     if yr < primary_active_year
@@ -1199,13 +1205,13 @@ def main():
         "--course-workers",
         type=int,
         default=None,
-        help="Number of concurrent workers for course processing (default: 24)",
+        help="Number of concurrent workers for course processing (default: 6)",
     )
     parser.add_argument(
         "--subject-workers",
         type=int,
         default=None,
-        help="Number of concurrent workers for subject discovery (default: 8)",
+        help="Number of concurrent workers for subject discovery (default: 2)",
     )
     args = parser.parse_args()
 

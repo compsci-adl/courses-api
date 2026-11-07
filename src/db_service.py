@@ -473,7 +473,7 @@ def finalize_sqlite_for_s3(db_path: str):
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
         conn.close()
     except Exception as e:
-        print(f"[DB CLEANUP WARNING] Could not checkpoint WAL: {e}")
+        logger.warning(f"[DB CLEANUP WARNING] Could not checkpoint WAL: {e}")
 
 
 def ensure_healthy_database(db_path: str, base_dir: str = ".") -> bool:
@@ -495,12 +495,14 @@ def ensure_healthy_database(db_path: str, base_dir: str = ".") -> bool:
         conn.close()
         if integrity_res == [("ok",)]:
             return True
-        print(f"[DB HEALTH CHECK] Database {db_path} is malformed: {integrity_res[:2]}")
+        logger.error(
+            f"[DB HEALTH CHECK] Database {db_path} is malformed: {integrity_res[:2]}"
+        )
     except Exception as e:
-        print(f"[DB HEALTH CHECK] Error checking integrity of {db_path}: {e}")
+        logger.error(f"[DB HEALTH CHECK] Error checking integrity of {db_path}: {e}")
 
     # Database is corrupted. Search for a healthy candidate to restore from.
-    print(
+    logger.info(
         f"[DB HEALTH CHECK] Attempting recovery of {db_path} from backup candidates..."
     )
     base = Path(base_dir)
@@ -532,12 +534,14 @@ def ensure_healthy_database(db_path: str, base_dir: str = ".") -> bool:
                     r_conn = sqlite3.connect(str(path), timeout=10.0)
                     r_conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
                     r_conn.close()
-                    print(
+                    logger.info(
                         f"[DB HEALTH CHECK] Successfully recovered {db_path} from healthy {cand}."
                     )
                     return True
             except Exception as e:
-                print(f"[DB HEALTH CHECK] Candidate {cand} failed integrity check: {e}")
+                logger.warning(
+                    f"[DB HEALTH CHECK] Candidate {cand} failed integrity check: {e}"
+                )
 
     return False
 
