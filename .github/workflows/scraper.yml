@@ -47,13 +47,24 @@ jobs:
       - name: Run scraper
         timeout-minutes: 180
         run: |
+          mkdir -p logs
           docker run --rm \
             -v ${{ github.workspace }}/src:/app/src \
+            -v ${{ github.workspace }}/logs:/app/logs \
             -e PYTHONUNBUFFERED=1 \
             -e DEFAULT_LOGGING_LEVEL=${{ env.DEFAULT_LOGGING_LEVEL }} \
             -e COURSE_WORKERS=24 \
             -e SUBJECT_WORKERS=8 \
             courses-api-scraper:latest
+
+      - name: Upload scraper log artifact
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: scraper-log
+          path: logs/*.log
+          if-no-files-found: warn
 
       - name: Rename SQLite DB to local.sqlite3
         run: mv src/dev.sqlite3 src/local.sqlite3
