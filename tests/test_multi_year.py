@@ -1241,14 +1241,16 @@ class TestFastAPIRouting(unittest.TestCase):
             self.assertTrue(modern_db.exists())
 
     def test_get_course_codes_returns_none_on_403_so_subject_is_not_skipped(self):
-        # When Funnelback returns 403, get_course_codes must return None (not empty list)
+        # When Funnelback returns 403, get_course_codes must return ParseResult with BLOCKED_OR_ERROR
         mock_fetcher = MagicMock()
         mock_fetcher.get.return_value = {}
         mock_fetcher.last_response = MagicMock(status_code=403)
 
         with patch("data_fetcher.DataFetcher", return_value=mock_fetcher):
             res = data_parser.get_course_codes("Accounting", 2027)
-            self.assertIsNone(res)
+            self.assertIsInstance(res, data_parser.ParseResult)
+            self.assertEqual(res.status, data_parser.FetchStatus.BLOCKED_OR_ERROR)
+            self.assertIsNone(res.data)
 
     def test_data_fetcher_direct_blocked_flag_on_403(self):
         # When direct connection gets 403, DataFetcher sets _direct_blocked = True

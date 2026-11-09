@@ -52,9 +52,10 @@ jobs:
             -v ${{ github.workspace }}/src:/app/src \
             -v ${{ github.workspace }}/logs:/app/logs \
             -e PYTHONUNBUFFERED=1 \
+            -e GITHUB_ACTIONS=true \
             -e DEFAULT_LOGGING_LEVEL=${{ env.DEFAULT_LOGGING_LEVEL }} \
-            -e COURSE_WORKERS=24 \
-            -e SUBJECT_WORKERS=8 \
+            -e COURSE_WORKERS=18 \
+            -e SUBJECT_WORKERS=6 \
             courses-api-scraper:latest
 
       - name: Upload scraper log artifact

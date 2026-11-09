@@ -101,6 +101,12 @@ class DataFetcher:
             if DataFetcher._proxies is None:
                 DataFetcher._proxies = self.load_proxies()
 
+    @classmethod
+    def get_working_proxy(cls) -> dict | None:
+        """Helper to get a random working proxy dictionary."""
+        fetcher = cls("", use_proxy=True)
+        return fetcher.get_random_proxy()
+
     def load_proxies(self) -> list:
         """Load proxies from file, checking candidate paths."""
         candidates = [
@@ -138,9 +144,14 @@ class DataFetcher:
                 proxy = random.choice(DataFetcher._proxies[:5])
             else:
                 proxy = random.choice(DataFetcher._proxies)
+        http_val = (
+            proxy
+            if proxy.startswith("http://") or proxy.startswith("https://")
+            else f"http://{proxy}"
+        )
         return {
-            "http": f"http://{proxy}",
-            "https": f"http://{proxy}",
+            "http": http_val,
+            "https": http_val,
         }
 
     def report_proxy_failure(self, proxy: dict, fatal: bool = False) -> None:

@@ -106,7 +106,9 @@ Yes
         mock_fetcher_cls.assert_called_once_with(
             "/study/courses/2026/envi-2013/", use_class_url=True
         )
-        self.assertIsNone(res)
+        self.assertIsInstance(res, data_parser.ParseResult)
+        self.assertEqual(res.status, data_parser.FetchStatus.NOT_OFFERED)
+        self.assertIsNone(res.data)
 
     @patch("data_parser.data_fetcher.DataFetcher")
     def test_get_course_details_page_not_found_h1(self, mock_fetcher_cls):
@@ -120,7 +122,37 @@ Yes
         mock_fetcher.last_response.status_code = 200
 
         res = data_parser.get_course_details("ENVI2013", year=2026)
-        self.assertIsNone(res)
+        self.assertIsInstance(res, data_parser.ParseResult)
+        self.assertEqual(res.status, data_parser.FetchStatus.NOT_OFFERED)
+        self.assertIsNone(res.data)
+
+    @patch("data_parser.data_fetcher.DataFetcher")
+    def test_get_course_details_blocked_403(self, mock_fetcher_cls):
+        mock_fetcher = MagicMock()
+        mock_fetcher_cls.return_value = mock_fetcher
+        mock_fetcher.get.return_value = {}
+        mock_fetcher.last_response.status_code = 403
+
+        res = data_parser.get_course_details("COMP2002", year=2026)
+        self.assertIsInstance(res, data_parser.ParseResult)
+        self.assertEqual(res.status, data_parser.FetchStatus.BLOCKED_OR_ERROR)
+        self.assertIsNone(res.data)
+
+    @patch("data_parser.data_fetcher.DataFetcher")
+    def test_get_course_details_waf_challenge_in_200(self, mock_fetcher_cls):
+        mock_fetcher = MagicMock()
+        mock_fetcher_cls.return_value = mock_fetcher
+        mock_fetcher.get.return_value = {
+            "h1": "Attention Required! | Cloudflare",
+            "data": "Please complete the security check to access the website",
+            "html": "<html><body>Just a moment... cf-browser-verification</body></html>",
+        }
+        mock_fetcher.last_response.status_code = 200
+
+        res = data_parser.get_course_details("COMP2002", year=2026)
+        self.assertIsInstance(res, data_parser.ParseResult)
+        self.assertEqual(res.status, data_parser.FetchStatus.BLOCKED_OR_ERROR)
+        self.assertIsNone(res.data)
 
 
 if __name__ == "__main__":

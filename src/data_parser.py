@@ -1,10 +1,52 @@
 import re
 import time
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any, Optional
 
 from bs4 import BeautifulSoup
 
 import data_fetcher
 from log import logger
+
+
+class FetchStatus(str, Enum):
+    SUCCESS = "success"
+    NOT_OFFERED = (
+        "not_offered"  # Verified 404 or explicit "not offered" university page
+    )
+    BLOCKED_OR_ERROR = (
+        "blocked_or_error"  # 403, 429, WAF captcha/challenge, timeout, connection reset
+    )
+
+
+@dataclass
+class ParseResult:
+    status: FetchStatus
+    data: Optional[Any] = None
+    error_message: Optional[str] = None
+
+    def __bool__(self) -> bool:
+        """Allow backwards compatibility with boolean checks (e.g. if not res:)."""
+        return bool(self.data)
+
+    def __getitem__(self, item):
+        """Allow backwards compatibility with dict-style item access (e.g. res['title'])."""
+        if isinstance(self.data, dict):
+            return self.data[item]
+        raise TypeError(f"ParseResult data is not subscriptable: {type(self.data)}")
+
+    def __contains__(self, item):
+        """Allow backwards compatibility with 'in' checks (e.g. 'courses' in res)."""
+        if isinstance(self.data, dict):
+            return item in self.data
+        return False
+
+    def get(self, key, default=None):
+        """Allow backwards compatibility with dict-style .get()."""
+        if isinstance(self.data, dict):
+            return self.data.get(key, default)
+        return default
 
 
 def _extract_subjects_from_facet_data(data) -> list[dict[str, str]]:
@@ -84,8 +126,39 @@ def get_subjects(year: int, timeout: float = 3.0) -> dict[str, list[dict[str, st
     return {"subjects": []}
 
 
-def get_course_codes(subject: str, year: int, timeout: float = 12.0):
-    """Return a list of course codes for a given subject code and year."""
+WAF_SIGNATURES = [
+    "attention required",
+    "cloudflare",
+    "cf-browser-verification",
+    "access denied",
+    "just a moment",
+    "security check",
+    "captcha",
+    "challenge-running",
+]
+
+
+def _is_waf_blocked(response_obj, data_dict: dict | None = None) -> bool:
+    """Check if the response indicates a WAF block or challenge."""
+    if response_obj is not None:
+        status_code = getattr(response_obj, "status_code", None)
+        if status_code in (403, 429):
+            return True
+        resp_text = (getattr(response_obj, "text", "") or "").lower()
+        if any(sig in resp_text for sig in WAF_SIGNATURES):
+            return True
+    if data_dict and isinstance(data_dict, dict):
+        html_val = str(data_dict.get("html", "")).lower()
+        data_val = str(data_dict.get("data", "")).lower()
+        h1_val = str(data_dict.get("h1", "")).lower()
+        combined = f"{h1_val} {data_val} {html_val}"
+        if any(sig in combined for sig in WAF_SIGNATURES):
+            return True
+    return False
+
+
+def get_course_codes(subject: str, year: int, timeout: float = 12.0) -> ParseResult:
+    """Return a ParseResult with course codes for a given subject code and year."""
     # Ensure spaces and & are safely encoded for query string
     safe_subject = str(subject).replace(" ", "%20").replace("&", "%26")
     endpoint = (
@@ -94,6 +167,8 @@ def get_course_codes(subject: str, year: int, timeout: float = 12.0):
         f"&collection=uosa%7Esp-aem-prod&f.Study+type%7CstudyType=Course"
     )
 
+    last_error = None
+    courses = None
     for attempt in range(3):
         courses = data_fetcher.DataFetcher(
             endpoint,
@@ -126,8 +201,25 @@ def get_course_codes(subject: str, year: int, timeout: float = 12.0):
                 logger.debug(
                     f"Course codes extracted successfully for {subject}: {len(course_codes)}"
                 )
-                return {"courses": course_codes}
+                return ParseResult(
+                    status=FetchStatus.SUCCESS,
+                    data={"courses": course_codes},
+                )
+            elif (
+                courses.last_response is not None
+                and courses.last_response.status_code == 404
+            ):
+                return ParseResult(
+                    status=FetchStatus.NOT_OFFERED,
+                    data={"courses": []},
+                    error_message="HTTP 404",
+                )
+            elif _is_waf_blocked(
+                courses.last_response, data if isinstance(data, dict) else None
+            ):
+                last_error = f"WAF block (HTTP {getattr(courses.last_response, 'status_code', 'unknown')})"
         except Exception as e:
+            last_error = str(e)
             logger.debug(
                 f"Attempt {attempt + 1} for course codes {subject} failed: {e}"
             )
@@ -136,17 +228,21 @@ def get_course_codes(subject: str, year: int, timeout: float = 12.0):
 
     status = (
         courses.last_response.status_code
-        if "courses" in locals() and courses.last_response
+        if courses and courses.last_response
         else "NO_RESPONSE"
     )
     logger.warning(
         f"Error fetching course codes for {subject} after 3 attempts: HTTP {status}"
     )
-    return None
+    return ParseResult(
+        status=FetchStatus.BLOCKED_OR_ERROR,
+        data=None,
+        error_message=last_error or f"HTTP {status}",
+    )
 
 
-def get_course_details(course_code: str, year: int | str | None = None):
-    """Return the details for a given course with retries."""
+def get_course_details(course_code: str, year: int | str | None = None) -> ParseResult:
+    """Return ParseResult with the details for a given course with retries."""
     logger.debug(f"Fetching details for course {course_code}")
     code_str = course_code[0] if isinstance(course_code, (list, tuple)) else course_code
     encoded_course_code = re.sub(
@@ -159,6 +255,8 @@ def get_course_details(course_code: str, year: int | str | None = None):
         else f"/study/courses/{encoded_course_code}/"
     )
 
+    last_error = None
+    course_details = None
     for attempt in range(3):
         course_details = data_fetcher.DataFetcher(endpoint, use_class_url=True)
         try:
@@ -169,11 +267,25 @@ def get_course_details(course_code: str, year: int | str | None = None):
                 and data
                 and isinstance(data, dict)
             ):
-                if data.get("h1", "").lower() == "page not found":
+                h1_text = (data.get("h1") or "").strip()
+                if (
+                    h1_text.lower() == "page not found"
+                    or "not offered" in h1_text.lower()
+                ):
                     logger.info(
                         f"Course {course_code} is not offered for year {year} (404 Page Not Found)."
                     )
-                    return None
+                    return ParseResult(
+                        status=FetchStatus.NOT_OFFERED,
+                        data=None,
+                        error_message="Page not found",
+                    )
+
+                if _is_waf_blocked(course_details.last_response, data):
+                    last_error = "WAF challenge page detected in 200 OK body"
+                    logger.warning(f"Course {course_code} returned WAF challenge page.")
+                    time.sleep(0.5 + attempt * 0.5)
+                    continue
 
                 text = data.get("data", "")
                 body_text = (
@@ -226,7 +338,10 @@ def get_course_details(course_code: str, year: int | str | None = None):
                 }
 
                 logger.debug("Course details extracted successfully.")
-                return course_info
+                return ParseResult(
+                    status=FetchStatus.SUCCESS,
+                    data=course_info,
+                )
 
             elif (
                 course_details.last_response is not None
@@ -235,8 +350,17 @@ def get_course_details(course_code: str, year: int | str | None = None):
                 logger.info(
                     f"Course {course_code} is not offered for year {year} (404 Not Found)."
                 )
-                return None
+                return ParseResult(
+                    status=FetchStatus.NOT_OFFERED,
+                    data=None,
+                    error_message="HTTP 404",
+                )
+            elif _is_waf_blocked(
+                course_details.last_response, data if isinstance(data, dict) else None
+            ):
+                last_error = f"WAF block (HTTP {getattr(course_details.last_response, 'status_code', 'unknown')})"
         except Exception as e:
+            last_error = str(e)
             logger.debug(
                 f"Attempt {attempt + 1} for course details {course_code} failed: {e}"
             )
@@ -245,13 +369,17 @@ def get_course_details(course_code: str, year: int | str | None = None):
 
     status = (
         course_details.last_response.status_code
-        if "course_details" in locals() and course_details.last_response
+        if course_details and course_details.last_response
         else "NO_RESPONSE"
     )
     logger.warning(
         f"Could not retrieve details for course {course_code} after 3 attempts (HTTP {status})."
     )
-    return None
+    return ParseResult(
+        status=FetchStatus.BLOCKED_OR_ERROR,
+        data=None,
+        error_message=last_error or f"HTTP {status}",
+    )
 
 
 def parse_course_text(text: str) -> dict:

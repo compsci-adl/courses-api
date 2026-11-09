@@ -2,7 +2,9 @@ import argparse
 import asyncio
 import atexit
 import os
+import random
 import re
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from hashlib import shake_256
@@ -271,6 +273,8 @@ def _fetch_single_outline_candidate(outline_url: str) -> tuple[str, str] | None:
             resp_html = fetcher.last_response.text
 
         if not resp_html:
+            proxy = data_fetcher.DataFetcher.get_working_proxy()
+            proxy_arg = proxy if proxy else None
             resp = requests.get(
                 outline_url,
                 headers={
@@ -278,6 +282,7 @@ def _fetch_single_outline_candidate(outline_url: str) -> tuple[str, str] | None:
                 },
                 timeout=6,
                 impersonate="chrome146",
+                proxies=proxy_arg,
             )
             if resp.status_code == 200:
                 resp_html = resp.text
@@ -381,6 +386,7 @@ def process_course(
     previous_courses: dict[str, dict] | None = None,
     collected_classes: list[dict] | None = None,
     collected_meetings: list[dict] | None = None,
+    failed_courses: list | None = None,
 ):
     """Process a single course and insert/upsert data into the database directly.
 
@@ -390,6 +396,9 @@ def process_course(
     3. Only new courses not in any previous year are fetched from the web.
     """
     try:
+        # Subtle randomized jitter to prevent burst concurrency spikes
+        time.sleep(random.uniform(0.1, 0.4))
+
         course_code = course.get("code")
         if not course_code:
             print(f"Skipping course with missing code: {course}")
@@ -428,10 +437,38 @@ def process_course(
             return
 
         # Fetch course details for this year from the web
-        course_details = data_parser.get_course_details(course_code, year=year)
-        if not course_details:
+        fetch_res = data_parser.get_course_details(course_code, year=year)
+
+        # Distinguish between genuine not offered vs blocked / network failure
+        if isinstance(fetch_res, data_parser.ParseResult):
+            if fetch_res.status == data_parser.FetchStatus.BLOCKED_OR_ERROR:
+                logger.warning(
+                    f"Course {course_code} failed due to WAF/Network error ({fetch_res.error_message}). Queueing for retry."
+                )
+                if failed_courses is not None:
+                    with lock:
+                        failed_courses.append((course, subject))
+                progress.update(subject_task, advance=1)
+                return
+            elif fetch_res.status == data_parser.FetchStatus.NOT_OFFERED:
+                logger.info(
+                    f"Course {course_code} is not offered for year {year}. Skipping course."
+                )
+                progress.update(subject_task, advance=1)
+                return
+            course_details = fetch_res.data
+        elif fetch_res is None or not fetch_res:
             logger.info(
                 f"Course {course_code} is not offered for year {year}. Skipping course."
+            )
+            progress.update(subject_task, advance=1)
+            return
+        else:
+            course_details = fetch_res
+
+        if not course_details:
+            logger.info(
+                f"Course {course_code} has no details for year {year}. Skipping course."
             )
             progress.update(subject_task, advance=1)
             return
@@ -717,20 +754,35 @@ def process_subject(
         encoded_name = name.replace("&", "%26")
         course_list = None
         for attempt in range(5):
-            courses = data_parser.get_course_codes(encoded_name, year)
-            if (
-                courses is not None
-                and isinstance(courses, dict)
-                and "courses" in courses
+            courses_res = data_parser.get_course_codes(encoded_name, year)
+            if isinstance(courses_res, data_parser.ParseResult):
+                if (
+                    courses_res.status == data_parser.FetchStatus.SUCCESS
+                    and courses_res.data
+                ):
+                    course_list = courses_res.data.get("courses", [])
+                    break
+                elif courses_res.status == data_parser.FetchStatus.NOT_OFFERED:
+                    course_list = []
+                    break
+            elif (
+                courses_res is not None
+                and isinstance(courses_res, dict)
+                and "courses" in courses_res
             ):
-                course_list = courses["courses"]
+                course_list = courses_res["courses"]
                 break
+
             logger.warning(
                 f"Subject '{name}' ({year}) course fetch attempt {attempt + 1}/5 failed or blocked by WAF. Retrying with alternate proxy..."
             )
-            time.sleep(0.5 + attempt * 0.3)
+            backoff = 2.0 + (attempt * 1.5) + random.uniform(0.5, 1.5)
+            time.sleep(backoff)
 
         if course_list is None:
+            sys.stderr.write(
+                f"[ERROR] Subject '{name}' ({year}) could not be retrieved after 5 attempts due to persistent WAF/Network blocks. Skipping.\n"
+            )
             logger.error(
                 f"Subject '{name}' ({year}) could not be retrieved after 5 attempts. Skipping."
             )
@@ -747,6 +799,7 @@ def process_subject(
             )
             executor_to_use = managed_executor
 
+        failed_courses: list = []
         try:
             futures = []
             for course in course_list:
@@ -765,12 +818,58 @@ def process_subject(
                     previous_courses,
                     collected_classes,
                     collected_meetings,
+                    failed_courses,
                 )
                 futures.append(future)
 
             # Wait for all threads to complete
             for future in as_completed(futures):
                 future.result()
+
+            # Secondary Retry Pass for courses failed due to WAF / Network blocks
+            for retry_attempt in range(3):
+                if not failed_courses:
+                    break
+                courses_to_retry = list(failed_courses)
+                failed_courses.clear()
+                retry_backoff = (2**retry_attempt) + random.uniform(0.5, 1.5)
+                logger.info(
+                    f"Subject '{name}' ({year}): Retrying {len(courses_to_retry)} failed courses (attempt {retry_attempt + 1}/3) after {retry_backoff:.1f}s backoff..."
+                )
+                time.sleep(retry_backoff)
+
+                retry_futures = []
+                for c_item, s_item in courses_to_retry:
+                    rfuture = executor_to_use.submit(
+                        process_course,
+                        c_item,
+                        year,
+                        s_item,
+                        engine,
+                        progress,
+                        subject_task,
+                        lock,
+                        scrape_classes,
+                        existing_hashes,
+                        existing_courses_for_year,
+                        previous_courses,
+                        collected_classes,
+                        collected_meetings,
+                        failed_courses,
+                    )
+                    retry_futures.append(rfuture)
+
+                for rfuture in as_completed(retry_futures):
+                    rfuture.result()
+
+            if failed_courses:
+                failed_codes = [c.get("code") for c, _ in failed_courses]
+                sys.stderr.write(
+                    f"[ERROR] Subject '{name}' ({year}): {len(failed_courses)} courses permanently failed after retries: {failed_codes}\n"
+                )
+                logger.error(
+                    f"Subject '{name}' ({year}): {len(failed_courses)} courses could not be retrieved after retries."
+                )
         finally:
             if managed_executor is not None:
                 managed_executor.shutdown(wait=True)
@@ -826,8 +925,11 @@ def scrape_single_year(
         else (is_active or existing_class_count == 0)
     )
 
-    subject_workers = int(os.environ.get("SUBJECT_WORKERS", "8"))
-    course_workers = int(os.environ.get("COURSE_WORKERS", "24"))
+    is_ci = bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))
+    default_sub_workers = "4" if is_ci else "8"
+    default_crs_workers = "12" if is_ci else "24"
+    subject_workers = int(os.environ.get("SUBJECT_WORKERS", default_sub_workers))
+    course_workers = int(os.environ.get("COURSE_WORKERS", default_crs_workers))
 
     try:
         with Progress() as progress:
