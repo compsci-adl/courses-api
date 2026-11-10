@@ -126,7 +126,13 @@ class DataFetcher:
             self.url = self.BASE_URL + endpoint
         self.data = None
         self.last_response = None
-        self.use_proxy = use_proxy
+        self.last_used_proxy = None
+        scraper_use_proxies = os.environ.get("SCRAPER_USE_PROXIES", "true").lower() in (
+            "true",
+            "1",
+            "yes",
+        )
+        self.use_proxy = use_proxy and scraper_use_proxies
 
         # Load proxies globally if not already loaded
         with DataFetcher._proxy_lock:
@@ -373,6 +379,7 @@ class DataFetcher:
                         self.url, headers=headers, timeout=base_timeout
                     )
                     self.last_response = direct_resp
+                    self.last_used_proxy = "direct"
                     if direct_resp.status_code == 200:
                         parsed = self._process_response(direct_resp)
                         if parsed is not None:
@@ -405,6 +412,7 @@ class DataFetcher:
                         self.url, headers=headers, timeout=base_timeout
                     )
                     self.last_response = direct_resp
+                    self.last_used_proxy = "direct"
                     if direct_resp.status_code == 200:
                         parsed = self._process_response(direct_resp)
                         if parsed is not None:
@@ -424,6 +432,9 @@ class DataFetcher:
                     self.url, headers=headers, timeout=proxy_timeout, proxy=proxy
                 )
                 self.last_response = response
+                self.last_used_proxy = (
+                    proxy.get("http") if isinstance(proxy, dict) else str(proxy)
+                )
 
                 if response.status_code == 429:
                     logger.warning("HTTP 429 - Too Many Requests via proxy.")

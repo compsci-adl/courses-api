@@ -438,6 +438,7 @@ def get_course_class_list(
     course_code: int | str,
     year: int | str | None = None,
     raw_html: str | None = None,
+    terms: Any = None,
 ) -> dict:
     """Extract class timetable with explicit network outcome status.
 
@@ -445,6 +446,8 @@ def get_course_class_list(
         dict: {"status": "success" | "error", "classes": list[dict], ...}
     """
     code_str = course_code[0] if isinstance(course_code, (list, tuple)) else course_code
+    fetcher_status = 200
+    used_proxy = None
 
     if raw_html is None:
         # Encode course code to match URL format
@@ -461,6 +464,10 @@ def get_course_class_list(
         try:
             parsed_res = fetcher.get()
             html_content = ""
+            if fetcher.last_response:
+                fetcher_status = fetcher.last_response.status_code
+            used_proxy = getattr(fetcher, "last_used_proxy", None)
+
             if parsed_res and isinstance(parsed_res, dict):
                 # If page is explicitly not offered (e.g. 404 Page Not Found)
                 if parsed_res.get("h1", "").lower() == "page not found":
@@ -471,6 +478,9 @@ def get_course_class_list(
                         "title": parsed_res.get("h1", ""),
                         "course_id": None,
                         "classes": [],
+                        "http_status": fetcher_status,
+                        "raw_html": "",
+                        "proxy": used_proxy,
                     }
                 html_content = parsed_res.get("html", "") or parsed_res.get("data", "")
             elif fetcher.last_response and fetcher.last_response.status_code == 200:
@@ -483,6 +493,9 @@ def get_course_class_list(
                     "title": "",
                     "course_id": None,
                     "classes": [],
+                    "http_status": 404,
+                    "raw_html": "",
+                    "proxy": used_proxy,
                 }
 
             if not html_content or not str(html_content).strip():
@@ -502,6 +515,9 @@ def get_course_class_list(
                     "course_id": None,
                     "classes": [],
                     "error": f"HTTP {status}",
+                    "http_status": status,
+                    "raw_html": "",
+                    "proxy": used_proxy,
                 }
             raw_html = html_content
         except Exception as e:
@@ -514,6 +530,9 @@ def get_course_class_list(
                 "course_id": None,
                 "classes": [],
                 "error": str(e),
+                "http_status": fetcher_status,
+                "raw_html": "",
+                "proxy": used_proxy,
             }
 
     if not raw_html or not str(raw_html).strip():
@@ -525,14 +544,61 @@ def get_course_class_list(
             "course_id": None,
             "classes": [],
             "error": "Empty HTML content",
+            "http_status": fetcher_status,
+            "raw_html": "",
+            "proxy": used_proxy,
         }
 
-    parsed_classes = parse_course_class_list(raw_html)
+    raw_html_str = str(raw_html)
+    # Check minimum sensible body length (e.g. 500 characters)
+    if len(raw_html_str.strip()) < 500:
+        logger.warning(
+            f"Suspiciously short HTML body ({len(raw_html_str)} chars) for {code_str}."
+        )
+        return {
+            "status": "error",
+            "success": False,
+            "code": code_str,
+            "title": "",
+            "course_id": None,
+            "classes": [],
+            "error": f"HTML body too short ({len(raw_html_str)} bytes)",
+            "http_status": fetcher_status,
+            "raw_html": raw_html_str,
+            "proxy": used_proxy,
+        }
+
+    # If course is offered in terms, verify expected page markers are present
+    has_terms = bool(terms)
+    has_markers = ("Class details" in raw_html_str) or ("Enrol by date" in raw_html_str)
+    if has_terms and not has_markers:
+        logger.warning(
+            f"Course {code_str} has terms '{terms}' but HTML lacks class markers ('Class details' / 'Enrol by date')."
+        )
+        return {
+            "status": "error",
+            "success": False,
+            "code": code_str,
+            "title": "",
+            "course_id": None,
+            "classes": [],
+            "error": "Missing class timetable markers on page with active terms",
+            "http_status": fetcher_status,
+            "raw_html": raw_html_str,
+            "proxy": used_proxy,
+            "markers_found": False,
+        }
+
+    parsed_classes = parse_course_class_list(raw_html_str)
     return {
         "status": "success",
         "success": True,
         "code": code_str,
         "classes": parsed_classes,
+        "http_status": fetcher_status,
+        "raw_html": raw_html_str,
+        "proxy": used_proxy,
+        "markers_found": has_markers,
     }
 
 

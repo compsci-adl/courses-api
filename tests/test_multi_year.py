@@ -957,6 +957,135 @@ class TestFastAPIRouting(unittest.TestCase):
         self.assertEqual(len(db_meetings), 1)
         self.assertEqual(db_classes[0].available, 5)
 
+    def test_bulk_replace_classes_for_year_scoped_course_ids(self):
+        # Seed 2 courses with classes and meetings
+        initial_classes = [
+            {
+                "id": "cls_course_a",
+                "year": 2027,
+                "class_nbr": 100,
+                "section": "01",
+                "group": "A",
+                "size": 50,
+                "available": 20,
+                "component": "Lecture",
+                "course_id": "course_a",
+            },
+            {
+                "id": "cls_course_b",
+                "year": 2027,
+                "class_nbr": 200,
+                "section": "01",
+                "group": "A",
+                "size": 40,
+                "available": 15,
+                "component": "Workshop",
+                "course_id": "course_b",
+            },
+        ]
+        initial_meetings = [
+            {
+                "id": "meet_a",
+                "year": 2027,
+                "dates": "01 Jan - 01 Feb",
+                "days": "Monday",
+                "start_time": "09:00",
+                "end_time": "10:00",
+                "campus": "North Terrace",
+                "location": "Ligertwood",
+                "instructor": "Dr. A",
+                "course_class_id": "cls_course_a",
+            },
+            {
+                "id": "meet_b",
+                "year": 2027,
+                "dates": "01 Jan - 01 Feb",
+                "days": "Tuesday",
+                "start_time": "10:00",
+                "end_time": "11:00",
+                "campus": "North Terrace",
+                "location": "Ligertwood",
+                "instructor": "Dr. B",
+                "course_class_id": "cls_course_b",
+            },
+        ]
+        bulk_replace_classes_for_year(
+            self.db_session, 2027, initial_classes, initial_meetings, course_ids=None
+        )
+
+        # Replace only course_a with updated class data
+        updated_classes = [
+            {
+                "id": "cls_course_a_new",
+                "year": 2027,
+                "class_nbr": 100,
+                "section": "01",
+                "group": "A",
+                "size": 50,
+                "available": 5,  # Changed availability
+                "component": "Lecture",
+                "course_id": "course_a",
+            }
+        ]
+        updated_meetings = [
+            {
+                "id": "meet_a_new",
+                "year": 2027,
+                "dates": "01 Jan - 01 Feb",
+                "days": "Monday",
+                "start_time": "09:00",
+                "end_time": "10:00",
+                "campus": "North Terrace",
+                "location": "Ligertwood 333",
+                "instructor": "Dr. A New",
+                "course_class_id": "cls_course_a_new",
+            }
+        ]
+
+        bulk_replace_classes_for_year(
+            self.db_session,
+            2027,
+            updated_classes,
+            updated_meetings,
+            course_ids={"course_a"},
+        )
+
+        # Verify course_a was updated
+        ca = (
+            self.db_session.query(CourseClass)
+            .filter(CourseClass.year == 2027, CourseClass.course_id == "course_a")
+            .all()
+        )
+        self.assertEqual(len(ca), 1)
+        self.assertEqual(ca[0].available, 5)
+
+        ma = (
+            self.db_session.query(Meetings)
+            .filter(
+                Meetings.year == 2027, Meetings.course_class_id == "cls_course_a_new"
+            )
+            .all()
+        )
+        self.assertEqual(len(ma), 1)
+        self.assertEqual(ma[0].location, "Ligertwood 333")
+
+        # Verify course_b is completely intact (rows untouched)
+        cb = (
+            self.db_session.query(CourseClass)
+            .filter(CourseClass.year == 2027, CourseClass.course_id == "course_b")
+            .all()
+        )
+        self.assertEqual(len(cb), 1)
+        self.assertEqual(cb[0].available, 15)
+
+        mb = (
+            self.db_session.query(Meetings)
+            .filter(Meetings.year == 2027, Meetings.course_class_id == "cls_course_b")
+            .all()
+        )
+        self.assertEqual(len(mb), 1)
+        self.assertEqual(mb[0].instructor, "Dr. B")
+
     def test_determine_active_year_override_and_env(self):
         async def run():
             mock_client = AsyncMock()
@@ -1261,15 +1390,19 @@ class TestFastAPIRouting(unittest.TestCase):
     def test_data_fetcher_direct_blocked_flag_on_403(self):
         # When direct connection gets 403, DataFetcher sets _direct_blocked = True
         data_fetcher.DataFetcher._direct_blocked = False
+        data_fetcher.DataFetcher._direct_blocked_permanently = False
+        data_fetcher.DataFetcher._direct_blocked_until = 0.0
 
         mock_resp = MagicMock(status_code=403)
-        with patch("curl_cffi.requests.get", return_value=mock_resp):
-            fetcher = data_fetcher.DataFetcher("?test", use_proxy=False)
-            fetcher.get()
-            self.assertTrue(data_fetcher.DataFetcher._direct_blocked)
+        with patch.dict(os.environ, {"GITHUB_ACTIONS": "", "CI": ""}, clear=False):
+            with patch("curl_cffi.requests.get", return_value=mock_resp):
+                fetcher = data_fetcher.DataFetcher("?test", use_proxy=False)
+                fetcher.get()
+                self.assertTrue(data_fetcher.DataFetcher._direct_blocked)
 
         # Reset flag
         data_fetcher.DataFetcher._direct_blocked = False
+        data_fetcher.DataFetcher._direct_blocked_permanently = False
 
     @patch("scraper.fetch_proxies")
     @patch("scraper.scrape_single_year")
@@ -1433,6 +1566,42 @@ class TestFastAPIRouting(unittest.TestCase):
                 lock=Lock(),
             )
             self.assertFalse(res)
+
+    def test_process_course_puts_course_into_failed_courses_when_class_fetch_fails(
+        self,
+    ):
+        mock_progress = MagicMock()
+        mock_task = "task1"
+        lock = Lock()
+        failed_courses = []
+        harvested_course_ids = set()
+
+        course = {"code": "ENGE5010", "terms": "Semester 1"}
+        subject = {"subject": "Engineering"}
+
+        with patch(
+            "scraper._extract_and_queue_classes",
+            return_value=False,
+        ):
+            process_course(
+                course=course,
+                year=2027,
+                subject=subject,
+                engine=self.engine,
+                progress=mock_progress,
+                subject_task=mock_task,
+                lock=lock,
+                scrape_classes=True,
+                existing_courses_for_year={"ENGE5010": "cid_enge5010"},
+                failed_courses=failed_courses,
+                harvested_course_ids=harvested_course_ids,
+            )
+
+        self.assertEqual(len(failed_courses), 1)
+        self.assertEqual(failed_courses[0][0]["code"], "ENGE5010")
+        self.assertNotIn("cid_enge5010", harvested_course_ids)
+        # progress.update should not have been called for failed course
+        mock_progress.update.assert_not_called()
 
     def test_data_fetcher_direct_blocked_immediately_in_ci(self):
         with patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}):

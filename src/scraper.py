@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from hashlib import shake_256
 from queue import Queue
 from threading import Lock, Thread
+from typing import Any
 
 import httpx
 
@@ -39,6 +40,7 @@ from db_service import (
     get_existing_class_count_for_year,
     get_existing_course_hashes,
     get_existing_course_ids_for_year,
+    get_existing_courses_with_classes_for_year,
     get_previous_years_course_data,
     reset_legacy_database,
 )
@@ -304,20 +306,47 @@ def _extract_and_queue_classes(
     collected_classes: list[dict] | None,
     collected_meetings: list[dict] | None,
     lock: Lock,
+    terms: Any = None,
 ) -> bool:
     """Harvest classes and meetings for a course and either append to batch lists or put to write_queue."""
-    class_list = data_parser.get_course_class_list(
-        course_code, year=year, raw_html=raw_html
+    if terms is not None:
+        class_list = data_parser.get_course_class_list(
+            course_code, year=year, raw_html=raw_html, terms=terms
+        )
+    else:
+        class_list = data_parser.get_course_class_list(
+            course_code, year=year, raw_html=raw_html
+        )
+    http_status = (
+        class_list.get("http_status") if isinstance(class_list, dict) else None
     )
+    proxy_used = class_list.get("proxy") if isinstance(class_list, dict) else None
+    html_len = (
+        len(class_list.get("raw_html", "")) if isinstance(class_list, dict) else 0
+    )
+    markers_found = (
+        class_list.get("markers_found") if isinstance(class_list, dict) else None
+    )
+
     # Check class_list status
     if isinstance(class_list, dict) and class_list.get("status") == "error":
+        err = class_list.get("error", "Unknown error")
         logger.warning(
-            f"Failed to fetch classes for {course_code} due to network/WAF drop. "
-            "Retaining existing database records."
+            f"Failed to fetch classes for {course_code} ({year}) due to: {err}. "
+            f"[status={http_status}, html_len={html_len}, proxy={proxy_used}]. "
+            "Skipping course replacement so existing DB records remain intact."
         )
         return False
 
     class_items = class_list.get("classes", []) if isinstance(class_list, dict) else []
+    total_meetings = sum(
+        len(individual_class.get("meetings", [])) for individual_class in class_items
+    )
+
+    logger.debug(
+        f"Class harvest for {course_code} ({year}): status={http_status}, html_len={html_len}, "
+        f"markers_found={markers_found}, classes={len(class_items)}, meetings={total_meetings}, proxy={proxy_used}"
+    )
 
     for individual_class in class_items:
         class_type = individual_class.get("component")
@@ -396,6 +425,7 @@ def process_course(
     collected_classes: list[dict] | None = None,
     collected_meetings: list[dict] | None = None,
     failed_courses: list | None = None,
+    harvested_course_ids: set[str] | None = None,
 ):
     """Process a single course and insert/upsert data into the database directly.
 
@@ -438,8 +468,11 @@ def process_course(
                     logger.debug(
                         f"Course {code_str} has empty terms for year {year}. Skipping class crawl."
                     )
+                    if harvested_course_ids is not None:
+                        with lock:
+                            harvested_course_ids.add(course_cid)
                 else:
-                    _extract_and_queue_classes(
+                    success = _extract_and_queue_classes(
                         code_str,
                         year,
                         course_cid,
@@ -447,7 +480,20 @@ def process_course(
                         collected_classes=collected_classes,
                         collected_meetings=collected_meetings,
                         lock=lock,
+                        terms=course_terms,
                     )
+                    if not success:
+                        logger.warning(
+                            f"Class harvest for existing course {code_str} failed. Queueing for retry."
+                        )
+                        if failed_courses is not None:
+                            with lock:
+                                failed_courses.append((course, subject))
+                        # Do not advance progress on failure so progress is advanced only once on final resolution
+                        return
+                    if harvested_course_ids is not None:
+                        with lock:
+                            harvested_course_ids.add(course_cid)
             progress.update(subject_task, advance=1)
             return
 
@@ -463,7 +509,7 @@ def process_course(
                 if failed_courses is not None:
                     with lock:
                         failed_courses.append((course, subject))
-                progress.update(subject_task, advance=1)
+                # Do not advance progress on failure so progress is advanced only once on final resolution
                 return
             elif fetch_res.status == data_parser.FetchStatus.NOT_OFFERED:
                 logger.info(
@@ -721,7 +767,7 @@ def process_course(
         # Scrape classes ONLY if scrape_classes is True (active year)
         # Pass raw_html from course_details so 0 extra network calls are made for classes!
         if scrape_classes:
-            _extract_and_queue_classes(
+            success = _extract_and_queue_classes(
                 code_str,
                 year,
                 course_cid,
@@ -729,7 +775,20 @@ def process_course(
                 collected_classes=collected_classes,
                 collected_meetings=collected_meetings,
                 lock=lock,
+                terms=terms,
             )
+            if not success:
+                logger.warning(
+                    f"Class harvest for new course {code_str} failed. Queueing for retry."
+                )
+                if failed_courses is not None:
+                    with lock:
+                        failed_courses.append((course, subject))
+                # Do not advance progress on failure so progress is advanced only once on final resolution
+                return
+            if harvested_course_ids is not None:
+                with lock:
+                    harvested_course_ids.add(course_cid)
 
         progress.update(subject_task, advance=1)
 
@@ -752,6 +811,9 @@ def process_subject(
     collected_meetings: list[dict] | None = None,
     course_executor: ThreadPoolExecutor | None = None,
     course_workers: int = 24,
+    harvested_course_ids: set[str] | None = None,
+    permanently_failed_codes: list[str] | None = None,
+    courses_attempted_codes: set[str] | None = None,
 ):
     """Process a single subject and insert data into the database."""
     try:
@@ -818,6 +880,14 @@ def process_subject(
         try:
             futures = []
             for course in course_list:
+                c_code = course.get("code")
+                if c_code and courses_attempted_codes is not None:
+                    code_val = (
+                        c_code[0] if isinstance(c_code, (list, tuple)) else c_code
+                    )
+                    with lock:
+                        courses_attempted_codes.add(str(code_val))
+
                 future = executor_to_use.submit(
                     process_course,
                     course,
@@ -834,6 +904,7 @@ def process_subject(
                     collected_classes,
                     collected_meetings,
                     failed_courses,
+                    harvested_course_ids,
                 )
                 futures.append(future)
 
@@ -871,6 +942,7 @@ def process_subject(
                         collected_classes,
                         collected_meetings,
                         failed_courses,
+                        harvested_course_ids,
                     )
                     retry_futures.append(rfuture)
 
@@ -879,11 +951,18 @@ def process_subject(
 
             if failed_courses:
                 failed_codes = [c.get("code") for c, _ in failed_courses]
+                if permanently_failed_codes is not None:
+                    with lock:
+                        for fc in failed_codes:
+                            code_str_fc = fc[0] if isinstance(fc, (list, tuple)) else fc
+                            permanently_failed_codes.append(str(code_str_fc))
+                # For any permanently failed courses that never advanced progress, advance progress once now
+                progress.update(subject_task, advance=len(failed_courses))
                 sys.stderr.write(
                     f"[ERROR] Subject '{name}' ({year}): {len(failed_courses)} courses permanently failed after retries: {failed_codes}\n"
                 )
                 logger.error(
-                    f"Subject '{name}' ({year}): {len(failed_courses)} courses could not be retrieved after retries."
+                    f"Subject '{name}' ({year}): {len(failed_courses)} courses could not be retrieved after retries: {failed_codes}"
                 )
         finally:
             if managed_executor is not None:
@@ -914,6 +993,9 @@ def scrape_single_year(
     lock = Lock()
     collected_classes: list[dict] = []
     collected_meetings: list[dict] = []
+    harvested_course_ids: set[str] = set()
+    permanently_failed_codes: list[str] = []
+    courses_attempted_codes: set[str] = set()
 
     # Preload existing course identifiers for this year and reusable previous years
     check_session = Session(bind=engine)
@@ -922,8 +1004,12 @@ def scrape_single_year(
             check_session, year
         )
         existing_class_count = get_existing_class_count_for_year(check_session, year)
+        existing_courses_with_classes = get_existing_courses_with_classes_for_year(
+            check_session, year
+        )
         logger.info(
-            f"Preloaded {len(existing_courses_for_year)} existing course records and "
+            f"Preloaded {len(existing_courses_for_year)} existing course records, "
+            f"{len(existing_courses_with_classes)} courses with classes, and "
             f"{existing_class_count} class records for year {year} from DB."
         )
         previous_courses = get_previous_years_course_data(check_session, year)
@@ -997,6 +1083,11 @@ def scrape_single_year(
                             collected_meetings if should_scrape_classes else None,
                             course_executor=course_executor,
                             course_workers=course_workers,
+                            harvested_course_ids=harvested_course_ids
+                            if should_scrape_classes
+                            else None,
+                            permanently_failed_codes=permanently_failed_codes,
+                            courses_attempted_codes=courses_attempted_codes,
                         )
                         futures.append(future)
 
@@ -1005,43 +1096,83 @@ def scrape_single_year(
                         future.result()
 
     finally:
-        # Bulk atomic replace for active/harvested classes and meetings (persists even if interrupted)
-        if should_scrape_classes and collected_classes:
-            if existing_class_count > 0 and len(collected_classes) < (
-                existing_class_count * 0.90
-            ):
+        # Per-course atomic replace for active/harvested classes and meetings (persists even if interrupted)
+        if should_scrape_classes and harvested_course_ids:
+            # Check circuit breaker: evaluate failure rate among existing courses with classes
+            failed_existing_count = 0
+            for cid in existing_courses_with_classes:
+                if cid not in harvested_course_ids:
+                    failed_existing_count += 1
+
+            existing_count = len(existing_courses_with_classes)
+            failure_rate = (
+                (failed_existing_count / existing_count) if existing_count > 0 else 0.0
+            )
+
+            if existing_count > 0 and failure_rate > 0.10:
                 logger.error(
-                    f"[CIRCUIT BREAKER] Harvested {len(collected_classes)} classes, but DB has {existing_class_count}. "
-                    "Aborting bulk table replacement to prevent data loss. Relying on stream upserts."
+                    f"[CIRCUIT BREAKER] {failed_existing_count}/{existing_count} ({failure_rate:.1%}) "
+                    f"existing courses with classes failed to harvest for year {year}. "
+                    "Skipping bulk replacement for failed courses and strictly replacing harvested courses."
                 )
-            else:
-                logger.info(
-                    f"Atomic bulk replacing {len(collected_classes)} classes and "
-                    f"{len(collected_meetings)} meetings for year {year}..."
+
+            logger.info(
+                f"Atomic bulk replacing classes for {len(harvested_course_ids)} successfully harvested courses "
+                f"({len(collected_classes)} classes and {len(collected_meetings)} meetings) for year {year}..."
+            )
+            db_session = Session(bind=engine)
+            try:
+                bulk_replace_classes_for_year(
+                    db_session,
+                    year,
+                    collected_classes,
+                    collected_meetings,
+                    course_ids=harvested_course_ids,
                 )
-                db_session = Session(bind=engine)
-                try:
-                    bulk_replace_classes_for_year(
-                        db_session,
-                        year,
-                        collected_classes,
-                        collected_meetings,
-                    )
-                finally:
-                    db_session.close()
+            finally:
+                db_session.close()
         else:
             if not should_scrape_classes:
                 logger.info(
                     f"Year {year} already has {existing_class_count} classes in DB: skipped class harvesting."
                 )
             else:
-                logger.info(f"Year {year} has no classes published yet.")
+                logger.info(f"Year {year} has no classes published or harvested yet.")
+
+        # End-of-run diagnostics and audit summary
+        if should_scrape_classes:
+            courses_with_classes_unharvested = [
+                cid
+                for cid in existing_courses_with_classes
+                if cid not in harvested_course_ids
+            ]
+            logger.info(
+                f"=== Academic Year {year} Class Harvesting Summary ===\n"
+                f"  Courses Attempted: {len(courses_attempted_codes)}\n"
+                f"  Courses Harvested OK: {len(harvested_course_ids)}\n"
+                f"  Courses Failed After Retries: {len(permanently_failed_codes)} -> {sorted(set(permanently_failed_codes))}\n"
+                f"  Existing Courses With Classes Not Harvested: {len(courses_with_classes_unharvested)} (Retained in DB untouched)"
+            )
+            if courses_with_classes_unharvested:
+                logger.warning(
+                    f"Existing courses with classes that were NOT harvested this run: {courses_with_classes_unharvested[:20]}"
+                    + (" ..." if len(courses_with_classes_unharvested) > 20 else "")
+                )
 
     logger.info(f"{year} scraping completed directly to SQLite database.")
 
 
 def ensure_proxies_ready(min_proxies: int = 20):
     """Ensure that a valid working_proxies file exists with at least min_proxies."""
+    scraper_use_proxies = os.environ.get("SCRAPER_USE_PROXIES", "true").lower() in (
+        "true",
+        "1",
+        "yes",
+    )
+    if not scraper_use_proxies:
+        logger.info("SCRAPER_USE_PROXIES is false. Bypassing proxy pool preparation.")
+        return
+
     candidate_files = [
         "src/working_proxies.txt",
         "working_proxies.txt",

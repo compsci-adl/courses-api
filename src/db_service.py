@@ -84,6 +84,20 @@ def get_existing_course_ids_for_year(session: Session, year: int) -> dict[str, s
     return mapping
 
 
+def get_existing_courses_with_classes_for_year(session: Session, year: int) -> set[str]:
+    """Returns a set of course_ids for a specific year that currently have classes in DB."""
+    try:
+        rows = (
+            session.query(CourseClass.course_id)
+            .filter(CourseClass.year == year)
+            .distinct()
+            .all()
+        )
+        return {r[0] for r in rows if r[0]}
+    except Exception:
+        return set()
+
+
 def get_existing_class_count_for_year(session: Session, year: int) -> int:
     """Returns the count of existing classes in DB for a specific year."""
     try:
@@ -302,15 +316,27 @@ def bulk_replace_classes_for_year(
     year: int,
     classes_data: list[dict],
     meetings_data: list[dict] | None = None,
+    course_ids: set[str] | list[str] | None = None,
 ):
-    """Since class availability is dynamic and ephemeral, replace the entire year's
+    """Replace classes and meetings for the specified courses (or entire year if course_ids is None).
 
-    classes and meetings in atomic operations rather than checking row by row.
+    When course_ids is provided, only deletes and inserts records for those courses,
+    leaving any failed or unharvested courses completely untouched in the database.
     Deduplicates in memory on the unique constraint and chunks inserts using
     SQLite ON CONFLICT DO UPDATE.
     """
-    if not classes_data:
-        return
+    if course_ids is not None:
+        target_course_ids = set(course_ids)
+        if not target_course_ids:
+            return
+    else:
+        target_course_ids = None
+
+    # Filter incoming classes to target_course_ids if provided
+    if target_course_ids is not None:
+        classes_data = [
+            c for c in classes_data if c.get("course_id") in target_course_ids
+        ]
 
     # In-memory deduplication on the unique key constraint
     # Prevents collisions when the scraper extracts the same class/section/group twice
@@ -327,13 +353,33 @@ def bulk_replace_classes_for_year(
 
     clean_classes = list(deduped_classes.values())
 
-    # Delete existing meetings and classes for this year
-    session.query(Meetings).filter(Meetings.year == year).delete(
-        synchronize_session=False
-    )
-    session.query(CourseClass).filter(CourseClass.year == year).delete(
-        synchronize_session=False
-    )
+    chunk_size = 2000
+
+    # Delete existing meetings and classes only for target courses (or whole year if None)
+    if target_course_ids is not None:
+        target_list = list(target_course_ids)
+        for i in range(0, len(target_list), chunk_size):
+            chunk_ids = target_list[i : i + chunk_size]
+            # Subquery matching class IDs belonging to these courses and year
+            subq = (
+                session.query(CourseClass.id)
+                .filter(CourseClass.year == year, CourseClass.course_id.in_(chunk_ids))
+                .scalar_subquery()
+            )
+            session.query(Meetings).filter(
+                Meetings.year == year, Meetings.course_class_id.in_(subq)
+            ).delete(synchronize_session=False)
+
+            session.query(CourseClass).filter(
+                CourseClass.year == year, CourseClass.course_id.in_(chunk_ids)
+            ).delete(synchronize_session=False)
+    else:
+        session.query(Meetings).filter(Meetings.year == year).delete(
+            synchronize_session=False
+        )
+        session.query(CourseClass).filter(CourseClass.year == year).delete(
+            synchronize_session=False
+        )
 
     # Ensure unique index exists on SQLite for ON CONFLICT target
     try:
@@ -346,7 +392,6 @@ def bulk_replace_classes_for_year(
 
     # Batch insert using SQLite ON CONFLICT
     # Chunking by 2,000 prevents exceeding SQLite's bound parameter limits
-    chunk_size = 2000
     for i in range(0, len(clean_classes), chunk_size):
         chunk = clean_classes[i : i + chunk_size]
         stmt = sqlite_insert(CourseClass).values(chunk)
@@ -370,6 +415,13 @@ def bulk_replace_classes_for_year(
             session.execute(fallback_stmt)
 
     if meetings_data:
+        # If target_course_ids is provided, filter meetings to classes in clean_classes
+        if target_course_ids is not None:
+            valid_class_ids = {c["id"] for c in clean_classes}
+            meetings_data = [
+                m for m in meetings_data if m.get("course_class_id") in valid_class_ids
+            ]
+
         # Deduplicate meetings by ID
         deduped_meetings = {m["id"]: m for m in meetings_data}
         clean_meetings = list(deduped_meetings.values())

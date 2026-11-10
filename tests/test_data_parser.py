@@ -195,6 +195,69 @@ Yes
         self.assertFalse(res.get("success"))
         self.assertEqual(res.get("classes"), [])
 
+    def test_parse_enge_5010_fixture(self):
+        fixture_path = os.path.join(
+            os.path.dirname(__file__), "fixtures", "enge_5010_2027.html"
+        )
+        with open(fixture_path, "r", encoding="utf-8") as f:
+            html = f.read()
+
+        res = data_parser.get_course_class_list(
+            "ENGE5010", year=2027, raw_html=html, terms="Semester 1"
+        )
+        self.assertEqual(res.get("status"), "success")
+        self.assertTrue(res.get("success"))
+        classes = res.get("classes", [])
+        self.assertEqual(len(classes), 1)
+
+        ws = classes[0]
+        self.assertEqual(ws.get("class_number"), "34094")
+        self.assertEqual(ws.get("section"), "WS01")
+        self.assertEqual(ws.get("size"), "70")
+        self.assertEqual(ws.get("available"), "51")
+        self.assertEqual(ws.get("component"), "Enrolment class: Workshop")
+
+        meetings = ws.get("meetings", [])
+        self.assertEqual(len(meetings), 2)
+
+        m1, m2 = meetings[0], meetings[1]
+        self.assertEqual(m1.get("dates"), "4 May - 25 May")
+        self.assertEqual(m1.get("days"), "Tuesday")
+        self.assertEqual(m1.get("time"), "9:10am - 11am")
+        self.assertEqual(m1.get("location"), "Ligertwood, 333")
+        self.assertEqual(m1.get("instructor"), "")
+
+        self.assertEqual(m2.get("dates"), "23 Feb - 13 Apr")
+        self.assertEqual(m2.get("days"), "Tuesday")
+        self.assertEqual(m2.get("time"), "9:10am - 11am")
+        self.assertEqual(m2.get("location"), "Ligertwood, 333")
+        self.assertEqual(m2.get("instructor"), "")
+
+    def test_get_course_class_list_degraded_html_fails(self):
+        degraded_html = (
+            "<html><body><h1>Hello World</h1><p>Not much here.</p></body></html>"
+        )
+        res = data_parser.get_course_class_list(
+            "ENGE5010", year=2027, raw_html=degraded_html, terms="Semester 1"
+        )
+        self.assertEqual(res.get("status"), "error")
+        self.assertFalse(res.get("success"))
+        self.assertEqual(res.get("classes"), [])
+        self.assertIn("HTML body too short", res.get("error", ""))
+
+    def test_get_course_class_list_missing_markers_with_terms_fails(self):
+        # Long enough HTML to pass minimum length, but missing 'Class details' or 'Enrol by date'
+        fake_html = (
+            "<html><body>" + ("<p>University Content</p>" * 100) + "</body></html>"
+        )
+        res = data_parser.get_course_class_list(
+            "ENGE5010", year=2027, raw_html=fake_html, terms="Semester 1"
+        )
+        self.assertEqual(res.get("status"), "error")
+        self.assertFalse(res.get("success"))
+        self.assertEqual(res.get("classes"), [])
+        self.assertIn("Missing class timetable markers", res.get("error", ""))
+
 
 if __name__ == "__main__":
     unittest.main()
