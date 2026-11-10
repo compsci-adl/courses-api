@@ -309,6 +309,18 @@ def _extract_and_queue_classes(
     class_list = data_parser.get_course_class_list(
         course_code, year=year, raw_html=raw_html
     )
+    # If the network call failed (raw_html is None and fetch unsuccessful), skip updating this course
+    if (
+        raw_html is None
+        and isinstance(class_list, dict)
+        and class_list.get("success") is False
+    ):
+        logger.warning(
+            f"Failed to fetch class list for {course_code} ({year}): {class_list.get('error')}. "
+            "Skipping class update to preserve existing database records."
+        )
+        return
+
     class_items = class_list.get("classes", []) if isinstance(class_list, dict) else []
 
     for individual_class in class_items:
@@ -925,9 +937,9 @@ def scrape_single_year(
         else (is_active or existing_class_count == 0)
     )
 
-    is_ci = bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))
-    default_sub_workers = "4" if is_ci else "8"
-    default_crs_workers = "12" if is_ci else "24"
+    is_ci = os.getenv("GITHUB_ACTIONS") == "true" or bool(os.environ.get("CI"))
+    default_sub_workers = "2" if is_ci else "8"
+    default_crs_workers = "6" if is_ci else "24"
     subject_workers = int(os.environ.get("SUBJECT_WORKERS", default_sub_workers))
     course_workers = int(os.environ.get("COURSE_WORKERS", default_crs_workers))
 
@@ -989,20 +1001,28 @@ def scrape_single_year(
     finally:
         # Bulk atomic replace for active/harvested classes and meetings (persists even if interrupted)
         if should_scrape_classes and collected_classes:
-            logger.info(
-                f"Atomic bulk replacing {len(collected_classes)} classes and "
-                f"{len(collected_meetings)} meetings for year {year}..."
-            )
-            db_session = Session(bind=engine)
-            try:
-                bulk_replace_classes_for_year(
-                    db_session,
-                    year,
-                    collected_classes,
-                    collected_meetings,
+            if existing_class_count > 0 and len(collected_classes) < (
+                existing_class_count * 0.85
+            ):
+                logger.critical(
+                    f"CRITICAL: Incomplete scrape detected (harvested {len(collected_classes)} < "
+                    f"existing {existing_class_count} * 0.85). Aborting destructive bulk replace."
                 )
-            finally:
-                db_session.close()
+            else:
+                logger.info(
+                    f"Atomic bulk replacing {len(collected_classes)} classes and "
+                    f"{len(collected_meetings)} meetings for year {year}..."
+                )
+                db_session = Session(bind=engine)
+                try:
+                    bulk_replace_classes_for_year(
+                        db_session,
+                        year,
+                        collected_classes,
+                        collected_meetings,
+                    )
+                finally:
+                    db_session.close()
         else:
             if not should_scrape_classes:
                 logger.info(
@@ -1016,6 +1036,15 @@ def scrape_single_year(
 
 def ensure_proxies_ready(min_proxies: int = 20):
     """Ensure that a valid working_proxies file exists with at least min_proxies."""
+    if os.environ.get("PROXY_URL"):
+        logger.info(
+            "PROXY_URL configured via environment. Bypassing public proxy verification."
+        )
+        with data_fetcher.DataFetcher._proxy_lock:
+            data_fetcher.DataFetcher._proxies = [os.environ.get("PROXY_URL")]
+            data_fetcher.DataFetcher._proxy_failures.clear()
+        return
+
     candidate_files = [
         "src/working_proxies.txt",
         "working_proxies.txt",

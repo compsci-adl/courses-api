@@ -10,6 +10,18 @@ import data_fetcher
 from log import logger
 
 
+class ScraperFetchError(Exception):
+    """Raised when fetching fails due to network, proxy, or server errors."""
+
+    pass
+
+
+class WAFBlockedError(ScraperFetchError):
+    """Raised when request is blocked or challenged by WAF / rate limiting."""
+
+    pass
+
+
 class FetchStatus(str, Enum):
     SUCCESS = "success"
     NOT_OFFERED = (
@@ -430,7 +442,7 @@ def get_course_class_list(
     """Return the class list of a course for a given course code."""
     if raw_html:
         parsed_classes = parse_course_class_list(raw_html)
-        return {"classes": parsed_classes}
+        return {"classes": parsed_classes, "success": True}
 
     # Encode course code to match URL format
     code_str = course_code[0] if isinstance(course_code, (list, tuple)) else course_code
@@ -461,10 +473,12 @@ def get_course_class_list(
                 if course_details.last_response
                 else "NO_RESPONSE"
             )
-            if status != 404 and not (
+            is_not_offered = status == 404 or (
                 isinstance(data, dict)
                 and data.get("h1", "").lower() == "page not found"
-            ):
+            )
+
+            if not is_not_offered:
                 text = (
                     course_details.last_response.text
                     if course_details.last_response
@@ -473,7 +487,7 @@ def get_course_class_list(
                 logger.error(
                     f"Error fetching class list for {course_code}: Status {status} - {text[:200]}"
                 )
-            # Return a minimal dict so callers don't KeyError when accessing title/course_id
+
             title = ""
             if isinstance(data, dict):
                 title = data.get("h1", "")
@@ -482,17 +496,19 @@ def get_course_class_list(
                 "title": title,
                 "course_id": None,
                 "classes": [],
+                "success": is_not_offered,
+                "error": None if is_not_offered else f"HTTP {status}",
             }
         # Use raw HTML for BeautifulSoup parsing
         text = data.get("html", "") or data.get("data", "")
 
         # Parse the plain-body text for class list details
         parsed_classes = parse_course_class_list(text)
-        return {"classes": parsed_classes}
+        return {"classes": parsed_classes, "success": True}
 
     except Exception as e:
-        print(f"An error occurred while fetching course class list: {e}")
-        return {}
+        logger.error(f"An error occurred while fetching course class list: {e}")
+        return {"classes": [], "success": False, "error": str(e)}
 
 
 def parse_course_class_list(text: str) -> list[dict]:

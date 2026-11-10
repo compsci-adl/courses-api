@@ -103,12 +103,20 @@ class DataFetcher:
 
     @classmethod
     def get_working_proxy(cls) -> dict | None:
-        """Helper to get a random working proxy dictionary."""
+        """Helper to get a configured or random working proxy dictionary."""
+        proxy_url = os.environ.get("PROXY_URL")
+        if proxy_url:
+            return {"http": proxy_url, "https": proxy_url}
         fetcher = cls("", use_proxy=True)
         return fetcher.get_random_proxy()
 
     def load_proxies(self) -> list:
-        """Load proxies from file, checking candidate paths."""
+        """Load proxies from file, checking candidate paths or environment."""
+        proxy_url = os.environ.get("PROXY_URL")
+        if proxy_url:
+            logger.info("Using PROXY_URL from environment.")
+            return [proxy_url]
+
         candidates = [
             self.PROXY_FILE,
             "src/working_proxies.txt",
@@ -132,6 +140,10 @@ class DataFetcher:
         """Get a proxy from the loaded list, prioritising known working proxies."""
         if not self.use_proxy:
             return None
+        proxy_url = os.environ.get("PROXY_URL")
+        if proxy_url:
+            return {"http": proxy_url, "https": proxy_url}
+
         with DataFetcher._proxy_lock:
             if not DataFetcher._proxies:
                 DataFetcher._proxies = self.load_proxies()
@@ -348,7 +360,8 @@ class DataFetcher:
 
         # Smart Proxy Fallback with generous timeout and priority queue of working proxies
         retries = 0
-        proxy_timeout = min(max(self.timeout, 6.0), 12.0)
+        min_proxy_timeout = 12.0 if is_ci else 6.0
+        proxy_timeout = min(max(self.timeout, min_proxy_timeout), 15.0)
         with DataFetcher._proxy_lock:
             pool_size = len(DataFetcher._proxies or [])
         max_retries = max(min(max_retries, pool_size), 15)
@@ -481,7 +494,9 @@ class DataFetcher:
             return {}
 
         retries = 0
-        proxy_timeout = min(max(self.timeout, 6.0), 12.0)
+        is_ci = bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))
+        min_proxy_timeout = 12.0 if is_ci else 6.0
+        proxy_timeout = min(max(self.timeout, min_proxy_timeout), 15.0)
         while retries < min(max_retries, 15):
             proxy = self.get_random_proxy()
             if not proxy:

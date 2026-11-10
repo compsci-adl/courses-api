@@ -54,8 +54,9 @@ jobs:
             -e PYTHONUNBUFFERED=1 \
             -e GITHUB_ACTIONS=true \
             -e DEFAULT_LOGGING_LEVEL=${{ env.DEFAULT_LOGGING_LEVEL }} \
-            -e COURSE_WORKERS=18 \
-            -e SUBJECT_WORKERS=6 \
+            -e COURSE_WORKERS=12 \
+            -e SUBJECT_WORKERS=4 \
+            -e PROXY_URL="${{ secrets.PROXY_URL }}" \
             courses-api-scraper:latest
 
       - name: Upload scraper log artifact

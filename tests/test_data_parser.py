@@ -154,6 +154,33 @@ Yes
         self.assertEqual(res.status, data_parser.FetchStatus.BLOCKED_OR_ERROR)
         self.assertIsNone(res.data)
 
+    @patch("data_parser.data_fetcher.DataFetcher")
+    def test_get_course_class_list_403_returns_failure(self, mock_fetcher_cls):
+        mock_fetcher = MagicMock()
+        mock_fetcher_cls.return_value = mock_fetcher
+        mock_fetcher.get.return_value = {}
+        mock_fetcher.last_response.status_code = 403
+        mock_fetcher.last_response.text = "Forbidden"
+
+        res = data_parser.get_course_class_list("COMP2002", year=2026)
+        self.assertFalse(res.get("success"))
+        self.assertEqual(res.get("classes"), [])
+        self.assertIn("HTTP 403", res.get("error", ""))
+
+    @patch("data_parser.data_fetcher.DataFetcher")
+    def test_get_course_class_list_404_treated_as_empty_not_error(
+        self, mock_fetcher_cls
+    ):
+        mock_fetcher = MagicMock()
+        mock_fetcher_cls.return_value = mock_fetcher
+        mock_fetcher.get.return_value = {}
+        mock_fetcher.last_response.status_code = 404
+
+        res = data_parser.get_course_class_list("COMP2002", year=2026)
+        self.assertTrue(res.get("success"))
+        self.assertEqual(res.get("classes"), [])
+        self.assertIsNone(res.get("error"))
+
 
 if __name__ == "__main__":
     unittest.main()

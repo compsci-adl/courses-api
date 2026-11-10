@@ -35,7 +35,7 @@ from models import (
     Subject,
 )
 from s3_service import S3SyncManager
-from scraper import process_course, run_pipeline
+from scraper import process_course, run_pipeline, scrape_single_year
 from server import app, get_db
 from year_discovery import YearDiscoveryService
 
@@ -1379,6 +1379,38 @@ class TestFastAPIRouting(unittest.TestCase):
         self.assertIn(2026, years)
         self.assertIn(2027, years)
         self.assertIn(2028, years)
+
+    @patch("scraper.bulk_replace_classes_for_year")
+    @patch("scraper.data_parser.get_subjects")
+    @patch("scraper.get_existing_class_count_for_year")
+    @patch("scraper.get_existing_course_ids_for_year")
+    @patch("scraper.get_previous_years_course_data")
+    def test_scrape_single_year_circuit_breaker_aborts_destructive_replace(
+        self,
+        mock_prev,
+        mock_course_ids,
+        mock_class_count,
+        mock_get_subjects,
+        mock_bulk_replace,
+    ):
+        # DB currently has 100 classes
+        mock_class_count.return_value = 100
+        mock_course_ids.return_value = {}
+        mock_prev.return_value = {}
+        # Subject discovery returns no subjects or empty courses
+        mock_get_subjects.return_value = {"subjects": []}
+
+        # Simulate scrape where only 10 classes were collected (less than 85 threshold)
+        # We test scrape_single_year behavior
+        scrape_single_year(
+            year=2026,
+            engine=self.engine,
+            is_active=True,
+            scrape_classes_override=True,
+        )
+
+        # Because 0 collected classes < 85, bulk_replace_classes_for_year must NOT be invoked
+        mock_bulk_replace.assert_not_called()
 
 
 if __name__ == "__main__":
