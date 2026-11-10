@@ -11,6 +11,7 @@ from bs4 import BeautifulSoup
 from curl_cffi import requests
 from curl_cffi.requests import AsyncSession
 
+import fetch_proxies
 from log import logger
 
 _tls = threading.local()
@@ -141,7 +142,8 @@ class DataFetcher:
         fetcher = cls("", use_proxy=True)
         return fetcher.get_random_proxy()
 
-    def load_proxies(self) -> list:
+    @classmethod
+    def _load_proxies(cls) -> list:
         """Load proxies from file, checking candidate paths or environment."""
         proxy_url = os.environ.get("PROXY_URL")
         if proxy_url:
@@ -149,7 +151,7 @@ class DataFetcher:
             return [proxy_url]
 
         candidates = [
-            self.PROXY_FILE,
+            cls.PROXY_FILE,
             "src/working_proxies.txt",
             "working_proxies.txt",
             os.path.join(os.path.dirname(__file__), "working_proxies.txt"),
@@ -167,6 +169,10 @@ class DataFetcher:
         logger.debug("No working proxies file found among candidates.")
         return []
 
+    def load_proxies(self) -> list:
+        """Load proxies from file, checking candidate paths or environment."""
+        return self._load_proxies()
+
     def get_random_proxy(self) -> dict:
         """Get a proxy from the loaded list, prioritising known working proxies."""
         if not self.use_proxy:
@@ -176,6 +182,23 @@ class DataFetcher:
             return {"http": proxy_url, "https": proxy_url}
 
         with DataFetcher._proxy_lock:
+            if (
+                not proxy_url
+                and DataFetcher._proxies is not None
+                and len(DataFetcher._proxies) < 35
+            ):
+                logger.warning(
+                    f"Proxy pool critical ({len(DataFetcher._proxies)} remaining). Fetching fresh proxies..."
+                )
+                try:
+                    fetch_proxies.main()
+                    fresh_proxies = DataFetcher._load_proxies()
+                    if fresh_proxies:
+                        DataFetcher._proxies = fresh_proxies
+                        DataFetcher._proxy_failures.clear()
+                except Exception as e:
+                    logger.error(f"Mid-run proxy replenishment failed: {e}")
+
             if not DataFetcher._proxies:
                 DataFetcher._proxies = self.load_proxies()
                 DataFetcher._proxy_failures.clear()
@@ -306,7 +329,7 @@ class DataFetcher:
         self,
         url: str,
         headers: dict,
-        timeout: float,
+        timeout: float | tuple[float, float],
         proxy: dict | None = None,
     ):
         """Execute HTTP GET using persistent Session pooling, falling back to requests.get if mocked."""
@@ -332,7 +355,7 @@ class DataFetcher:
             return sess.get(url, proxies=proxy, headers=headers, timeout=timeout)
         return sess.get(url, headers=headers, timeout=timeout)
 
-    def get(self, max_retries: int = 10) -> dict:
+    def get(self, max_retries: int = 3) -> dict:
         """Fetch data from the API, trying direct connection first with smart proxy fallback."""
         logger.debug("Fetching %s...", self._sanitise_for_log(self.endpoint))
         if self.data is not None:
@@ -346,7 +369,7 @@ class DataFetcher:
 
         # Direct Connection First
         is_ci = bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))
-        base_timeout = max(self.timeout, 8.0) if is_ci else max(self.timeout, 5.0)
+        base_timeout = (3.0, 5.0) if is_ci else (3.0, max(self.timeout, 5.0))
 
         if not DataFetcher.is_direct_blocked():
             sem_ctx = (
@@ -383,13 +406,10 @@ class DataFetcher:
         if not self.use_proxy:
             return {}
 
-        # Smart Proxy Fallback with generous timeout and priority queue of working proxies
+        # Smart Proxy Fallback with fail-fast timeout and capped retries
         retries = 0
-        min_proxy_timeout = 12.0 if is_ci else 6.0
-        proxy_timeout = min(max(self.timeout, min_proxy_timeout), 15.0)
-        with DataFetcher._proxy_lock:
-            pool_size = len(DataFetcher._proxies or [])
-        max_retries = max(min(max_retries, pool_size), 15)
+        proxy_timeout = (3.0, 5.0)
+        max_retries = min(max_retries, 3)
 
         while retries < max_retries:
             # Re-attempt direct connection after 2 proxy failures only if not blocked by WAF
@@ -480,7 +500,7 @@ class DataFetcher:
         return {}
 
     async def async_get(
-        self, session: AsyncSession | None = None, max_retries: int = 10
+        self, session: AsyncSession | None = None, max_retries: int = 3
     ) -> dict:
         """Asynchronously fetch data with browser TLS impersonation and connection reuse."""
         if self.data is not None:
@@ -489,7 +509,8 @@ class DataFetcher:
             return {}
 
         headers = self._get_headers()
-        base_timeout = max(self.timeout, 6.0)
+        is_ci = bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))
+        base_timeout = (3.0, 5.0) if is_ci else (3.0, max(self.timeout, 5.0))
 
         if not DataFetcher.is_direct_blocked():
             try:
@@ -518,10 +539,9 @@ class DataFetcher:
             return {}
 
         retries = 0
-        is_ci = bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))
-        min_proxy_timeout = 12.0 if is_ci else 6.0
-        proxy_timeout = min(max(self.timeout, min_proxy_timeout), 15.0)
-        while retries < min(max_retries, 15):
+        proxy_timeout = (3.0, 5.0)
+        max_retries = min(max_retries, 3)
+        while retries < max_retries:
             proxy = self.get_random_proxy()
             if not proxy:
                 retries += 1

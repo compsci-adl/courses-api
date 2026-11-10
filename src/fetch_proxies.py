@@ -25,7 +25,7 @@ def fetch_proxies(url):
 def test_proxy(
     proxy,
     test_url="https://adelaide.edu.au/study/courses/",
-    timeout=3,
+    timeout=2.5,
     retries=1,  # Number of retries
 ):
     """Test if the given proxy is working by making a request."""
