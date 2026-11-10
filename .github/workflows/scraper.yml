@@ -56,7 +56,6 @@ jobs:
             -e DEFAULT_LOGGING_LEVEL=${{ env.DEFAULT_LOGGING_LEVEL }} \
             -e COURSE_WORKERS=12 \
             -e SUBJECT_WORKERS=4 \
-            -e PROXY_URL="${{ secrets.PROXY_URL }}" \
             courses-api-scraper:latest
 
       - name: Upload scraper log artifact

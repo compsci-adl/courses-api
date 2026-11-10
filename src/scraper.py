@@ -406,7 +406,7 @@ def process_course(
     """
     try:
         # Subtle randomized jitter to prevent burst concurrency spikes
-        time.sleep(random.uniform(0.1, 0.4))
+        time.sleep(random.uniform(0.05, 0.25))
 
         course_code = course.get("code")
         if not course_code:
@@ -433,15 +433,21 @@ def process_course(
             course_cid = existing_cid
 
             if scrape_classes:
-                _extract_and_queue_classes(
-                    code_str,
-                    year,
-                    course_cid,
-                    raw_html=None,
-                    collected_classes=collected_classes,
-                    collected_meetings=collected_meetings,
-                    lock=lock,
-                )
+                course_terms = course.get("terms")
+                if course_terms is not None and not course_terms:
+                    logger.debug(
+                        f"Course {code_str} has empty terms for year {year}. Skipping class crawl."
+                    )
+                else:
+                    _extract_and_queue_classes(
+                        code_str,
+                        year,
+                        course_cid,
+                        raw_html=None,
+                        collected_classes=collected_classes,
+                        collected_meetings=collected_meetings,
+                        lock=lock,
+                    )
             progress.update(subject_task, advance=1)
             return
 
@@ -1036,15 +1042,6 @@ def scrape_single_year(
 
 def ensure_proxies_ready(min_proxies: int = 20):
     """Ensure that a valid working_proxies file exists with at least min_proxies."""
-    if os.environ.get("PROXY_URL"):
-        logger.info(
-            "PROXY_URL configured via environment. Bypassing public proxy verification."
-        )
-        with data_fetcher.DataFetcher._proxy_lock:
-            data_fetcher.DataFetcher._proxies = [os.environ.get("PROXY_URL")]
-            data_fetcher.DataFetcher._proxy_failures.clear()
-        return
-
     candidate_files = [
         "src/working_proxies.txt",
         "working_proxies.txt",

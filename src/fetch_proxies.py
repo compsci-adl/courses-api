@@ -1,4 +1,3 @@
-import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
@@ -63,14 +62,6 @@ def save_working_proxies(proxies, filename="src/working_proxies.txt"):
 
 
 def main(target_working: int = 500):
-    proxy_url = os.environ.get("PROXY_URL")
-    if proxy_url:
-        print(
-            f"[+] PROXY_URL provided via environment: {proxy_url}. Skipping public proxy scraping."
-        )
-        save_working_proxies([proxy_url])
-        return
-
     proxy_urls = [
         "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/refs/heads/master/http.txt",
         "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",

@@ -1,7 +1,9 @@
 import os
 import sys
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+
+from curl_cffi.requests.errors import RequestsError
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -48,9 +50,10 @@ class TestDataFetcher(unittest.TestCase):
         fetcher.report_proxy_failure(proxy, fatal=True)
         self.assertNotIn("3.3.3.3:80", DataFetcher._proxies)
 
+    @patch("data_fetcher.fetch_proxies.main")
     @patch.object(DataFetcher, "load_proxies")
-    def test_get_random_proxy_reloads_when_empty(self, mock_load):
-        mock_load.return_value = ["4.4.4.4:80"]
+    def test_get_random_proxy_reloads_when_empty(self, mock_load, mock_fetch):
+        mock_load.return_value = ["4.4.4.4:80"] * 40
         DataFetcher._proxies = []
         fetcher = DataFetcher("?test=1", use_proxy=True)
 
@@ -59,6 +62,44 @@ class TestDataFetcher(unittest.TestCase):
             proxy, {"http": "http://4.4.4.4:80", "https": "http://4.4.4.4:80"}
         )
         mock_load.assert_called()
+
+    @patch("data_fetcher.fetch_proxies.main")
+    def test_proxy_replenishment_trigger(self, mock_fetch_main):
+        DataFetcher._proxies = [f"1.1.1.{i}:80" for i in range(20)]
+        fetcher = DataFetcher("?test=1", use_proxy=True)
+
+        with patch.object(fetcher, "load_proxies") as mock_load:
+            mock_load.return_value = [f"2.2.2.{i}:80" for i in range(50)]
+            fetcher.get_random_proxy()
+            mock_fetch_main.assert_called_once()
+            self.assertEqual(len(DataFetcher._proxies), 50)
+
+    @patch.object(DataFetcher, "_execute_http_get")
+    def test_timeout_and_retry_ceiling(self, mock_http_get):
+        DataFetcher._proxies = [f"3.3.3.{i}:80" for i in range(40)]
+        fetcher = DataFetcher("?test=1", use_proxy=True)
+
+        # Force direct to fail with 403 to trigger direct block
+        mock_resp_403 = MagicMock()
+        mock_resp_403.status_code = 403
+        mock_http_get.side_effect = [
+            mock_resp_403,
+            RequestsError("Fail 1"),
+            RequestsError("Fail 2"),
+            RequestsError("Fail 3"),
+        ]
+
+        DataFetcher._direct_blocked = False
+        DataFetcher._direct_blocked_permanently = False
+        res = fetcher.get(max_retries=10)
+
+        # Must return empty dict after max 3 proxy retries
+        self.assertEqual(res, {})
+        # Direct attempt + 3 proxy retries = 4 calls total
+        self.assertEqual(mock_http_get.call_count, 4)
+        # Verify proxy call timeout was (3.0, 5.0)
+        proxy_call_kwargs = mock_http_get.call_args_list[-1].kwargs
+        self.assertEqual(proxy_call_kwargs["timeout"], (3.0, 5.0))
 
 
 if __name__ == "__main__":

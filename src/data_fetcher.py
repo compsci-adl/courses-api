@@ -135,21 +135,13 @@ class DataFetcher:
 
     @classmethod
     def get_working_proxy(cls) -> dict | None:
-        """Helper to get a configured or random working proxy dictionary."""
-        proxy_url = os.environ.get("PROXY_URL")
-        if proxy_url:
-            return {"http": proxy_url, "https": proxy_url}
+        """Helper to get a random working proxy dictionary."""
         fetcher = cls("", use_proxy=True)
         return fetcher.get_random_proxy()
 
     @classmethod
     def _load_proxies(cls) -> list:
-        """Load proxies from file, checking candidate paths or environment."""
-        proxy_url = os.environ.get("PROXY_URL")
-        if proxy_url:
-            logger.info("Using PROXY_URL from environment.")
-            return [proxy_url]
-
+        """Load proxies from file, checking candidate paths."""
         candidates = [
             cls.PROXY_FILE,
             "src/working_proxies.txt",
@@ -177,31 +169,25 @@ class DataFetcher:
         """Get a proxy from the loaded list, prioritising known working proxies."""
         if not self.use_proxy:
             return None
-        proxy_url = os.environ.get("PROXY_URL")
-        if proxy_url:
-            return {"http": proxy_url, "https": proxy_url}
 
         with DataFetcher._proxy_lock:
-            if (
-                not proxy_url
-                and DataFetcher._proxies is not None
-                and len(DataFetcher._proxies) < 35
-            ):
+            if not DataFetcher._proxies:
+                DataFetcher._proxies = self.load_proxies()
+                DataFetcher._proxy_failures.clear()
+
+            if DataFetcher._proxies is not None and 0 < len(DataFetcher._proxies) < 35:
                 logger.warning(
                     f"Proxy pool critical ({len(DataFetcher._proxies)} remaining). Fetching fresh proxies..."
                 )
                 try:
                     fetch_proxies.main()
-                    fresh_proxies = DataFetcher._load_proxies()
+                    fresh_proxies = self.load_proxies()
                     if fresh_proxies:
                         DataFetcher._proxies = fresh_proxies
                         DataFetcher._proxy_failures.clear()
                 except Exception as e:
                     logger.error(f"Mid-run proxy replenishment failed: {e}")
 
-            if not DataFetcher._proxies:
-                DataFetcher._proxies = self.load_proxies()
-                DataFetcher._proxy_failures.clear()
             if not DataFetcher._proxies:
                 logger.warning("No proxies available. Proceeding without a proxy.")
                 return None
