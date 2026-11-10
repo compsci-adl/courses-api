@@ -1,4 +1,5 @@
 import asyncio
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -35,7 +36,12 @@ from models import (
     Subject,
 )
 from s3_service import S3SyncManager
-from scraper import process_course, run_pipeline, scrape_single_year
+from scraper import (
+    _extract_and_queue_classes,
+    process_course,
+    run_pipeline,
+    scrape_single_year,
+)
 from server import app, get_db
 from year_discovery import YearDiscoveryService
 
@@ -1400,7 +1406,7 @@ class TestFastAPIRouting(unittest.TestCase):
         # Subject discovery returns no subjects or empty courses
         mock_get_subjects.return_value = {"subjects": []}
 
-        # Simulate scrape where only 10 classes were collected (less than 85 threshold)
+        # Simulate scrape where only 10 classes were collected (less than 90% threshold)
         # We test scrape_single_year behavior
         scrape_single_year(
             year=2026,
@@ -1409,8 +1415,38 @@ class TestFastAPIRouting(unittest.TestCase):
             scrape_classes_override=True,
         )
 
-        # Because 0 collected classes < 85, bulk_replace_classes_for_year must NOT be invoked
+        # Because 0 collected classes < 90, bulk_replace_classes_for_year must NOT be invoked
         mock_bulk_replace.assert_not_called()
+
+    def test_extract_and_queue_classes_returns_false_on_error(self):
+        with patch(
+            "data_parser.get_course_class_list",
+            return_value={"status": "error", "classes": []},
+        ):
+            res = _extract_and_queue_classes(
+                course_code="COMP2002",
+                year=2027,
+                course_cid="cid123",
+                raw_html=None,
+                collected_classes=[],
+                collected_meetings=[],
+                lock=Lock(),
+            )
+            self.assertFalse(res)
+
+    def test_data_fetcher_direct_blocked_immediately_in_ci(self):
+        with patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}):
+            self.assertFalse(data_fetcher.DataFetcher._should_attempt_direct())
+            self.assertTrue(data_fetcher.DataFetcher.is_direct_blocked())
+
+    def test_data_fetcher_record_direct_failure_permanent(self):
+        data_fetcher.DataFetcher._direct_blocked_permanently = False
+        with patch.dict(os.environ, {"GITHUB_ACTIONS": "", "CI": ""}, clear=False):
+            data_fetcher.DataFetcher._record_direct_failure(403)
+            self.assertTrue(data_fetcher.DataFetcher._direct_blocked_permanently)
+            self.assertFalse(data_fetcher.DataFetcher._should_attempt_direct())
+        # Reset for subsequent tests
+        data_fetcher.DataFetcher._direct_blocked_permanently = False
 
 
 if __name__ == "__main__":

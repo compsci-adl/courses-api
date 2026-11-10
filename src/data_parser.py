@@ -438,77 +438,102 @@ def get_course_class_list(
     course_code: int | str,
     year: int | str | None = None,
     raw_html: str | None = None,
-):
-    """Return the class list of a course for a given course code."""
-    if raw_html:
-        parsed_classes = parse_course_class_list(raw_html)
-        return {"classes": parsed_classes, "success": True}
+) -> dict:
+    """Extract class timetable with explicit network outcome status.
 
-    # Encode course code to match URL format
+    Returns:
+        dict: {"status": "success" | "error", "classes": list[dict], ...}
+    """
     code_str = course_code[0] if isinstance(course_code, (list, tuple)) else course_code
-    encoded_course_code = re.sub(
-        r"([a-zA-Z]+)([0-9]+)", r"\1-\2", str(code_str)
-    ).lower()
 
-    endpoint = (
-        f"/study/courses/{year}/{encoded_course_code}/"
-        if year
-        else f"/study/courses/{encoded_course_code}/"
-    )
-    course_details = data_fetcher.DataFetcher(endpoint, use_class_url=True)
+    if raw_html is None:
+        # Encode course code to match URL format
+        encoded_course_code = re.sub(
+            r"([a-zA-Z]+)([0-9]+)", r"\1-\2", str(code_str)
+        ).lower()
 
-    try:
-        data = course_details.get()
-        if (
-            course_details.last_response is None
-            or course_details.last_response.status_code != 200
-            or not data
-            or (
-                isinstance(data, dict)
-                and data.get("h1", "").lower() == "page not found"
-            )
-        ):
-            status = (
-                course_details.last_response.status_code
-                if course_details.last_response
-                else "NO_RESPONSE"
-            )
-            is_not_offered = status == 404 or (
-                isinstance(data, dict)
-                and data.get("h1", "").lower() == "page not found"
-            )
+        endpoint = (
+            f"/study/courses/{year}/{encoded_course_code}/"
+            if year
+            else f"/study/courses/{encoded_course_code}/"
+        )
+        fetcher = data_fetcher.DataFetcher(endpoint, use_class_url=True)
+        try:
+            parsed_res = fetcher.get()
+            html_content = ""
+            if parsed_res and isinstance(parsed_res, dict):
+                # If page is explicitly not offered (e.g. 404 Page Not Found)
+                if parsed_res.get("h1", "").lower() == "page not found":
+                    return {
+                        "status": "success",
+                        "success": True,
+                        "code": code_str,
+                        "title": parsed_res.get("h1", ""),
+                        "course_id": None,
+                        "classes": [],
+                    }
+                html_content = parsed_res.get("html", "") or parsed_res.get("data", "")
+            elif fetcher.last_response and fetcher.last_response.status_code == 200:
+                html_content = fetcher.last_response.text
+            elif fetcher.last_response and fetcher.last_response.status_code == 404:
+                return {
+                    "status": "success",
+                    "success": True,
+                    "code": code_str,
+                    "title": "",
+                    "course_id": None,
+                    "classes": [],
+                }
 
-            if not is_not_offered:
-                text = (
-                    course_details.last_response.text
-                    if course_details.last_response
-                    else ""
+            if not html_content or not str(html_content).strip():
+                status = (
+                    fetcher.last_response.status_code
+                    if fetcher.last_response
+                    else "NO_RESPONSE"
                 )
                 logger.error(
-                    f"Error fetching class list for {course_code}: Status {status} - {text[:200]}"
+                    f"Error fetching class list for {course_code}: Status {status}"
                 )
-
-            title = ""
-            if isinstance(data, dict):
-                title = data.get("h1", "")
+                return {
+                    "status": "error",
+                    "success": False,
+                    "code": code_str,
+                    "title": "",
+                    "course_id": None,
+                    "classes": [],
+                    "error": f"HTTP {status}",
+                }
+            raw_html = html_content
+        except Exception as e:
+            logger.error(f"An error occurred while fetching course class list: {e}")
             return {
+                "status": "error",
+                "success": False,
                 "code": code_str,
-                "title": title,
+                "title": "",
                 "course_id": None,
                 "classes": [],
-                "success": is_not_offered,
-                "error": None if is_not_offered else f"HTTP {status}",
+                "error": str(e),
             }
-        # Use raw HTML for BeautifulSoup parsing
-        text = data.get("html", "") or data.get("data", "")
 
-        # Parse the plain-body text for class list details
-        parsed_classes = parse_course_class_list(text)
-        return {"classes": parsed_classes, "success": True}
+    if not raw_html or not str(raw_html).strip():
+        return {
+            "status": "error",
+            "success": False,
+            "code": code_str,
+            "title": "",
+            "course_id": None,
+            "classes": [],
+            "error": "Empty HTML content",
+        }
 
-    except Exception as e:
-        logger.error(f"An error occurred while fetching course class list: {e}")
-        return {"classes": [], "success": False, "error": str(e)}
+    parsed_classes = parse_course_class_list(raw_html)
+    return {
+        "status": "success",
+        "success": True,
+        "code": code_str,
+        "classes": parsed_classes,
+    }
 
 
 def parse_course_class_list(text: str) -> list[dict]:

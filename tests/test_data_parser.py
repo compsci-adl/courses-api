@@ -163,6 +163,7 @@ Yes
         mock_fetcher.last_response.text = "Forbidden"
 
         res = data_parser.get_course_class_list("COMP2002", year=2026)
+        self.assertEqual(res.get("status"), "error")
         self.assertFalse(res.get("success"))
         self.assertEqual(res.get("classes"), [])
         self.assertIn("HTTP 403", res.get("error", ""))
@@ -177,9 +178,22 @@ Yes
         mock_fetcher.last_response.status_code = 404
 
         res = data_parser.get_course_class_list("COMP2002", year=2026)
+        self.assertEqual(res.get("status"), "success")
         self.assertTrue(res.get("success"))
         self.assertEqual(res.get("classes"), [])
         self.assertIsNone(res.get("error"))
+
+    @patch("data_parser.data_fetcher.DataFetcher")
+    def test_get_course_class_list_empty_html_returns_error(self, mock_fetcher_cls):
+        mock_fetcher = MagicMock()
+        mock_fetcher_cls.return_value = mock_fetcher
+        mock_fetcher.get.return_value = {"html": "", "data": ""}
+        mock_fetcher.last_response.status_code = 200
+
+        res = data_parser.get_course_class_list("COMP2002", year=2026)
+        self.assertEqual(res.get("status"), "error")
+        self.assertFalse(res.get("success"))
+        self.assertEqual(res.get("classes"), [])
 
 
 if __name__ == "__main__":

@@ -304,22 +304,18 @@ def _extract_and_queue_classes(
     collected_classes: list[dict] | None,
     collected_meetings: list[dict] | None,
     lock: Lock,
-):
+) -> bool:
     """Harvest classes and meetings for a course and either append to batch lists or put to write_queue."""
     class_list = data_parser.get_course_class_list(
         course_code, year=year, raw_html=raw_html
     )
-    # If the network call failed (raw_html is None and fetch unsuccessful), skip updating this course
-    if (
-        raw_html is None
-        and isinstance(class_list, dict)
-        and class_list.get("success") is False
-    ):
+    # Check class_list status
+    if isinstance(class_list, dict) and class_list.get("status") == "error":
         logger.warning(
-            f"Failed to fetch class list for {course_code} ({year}): {class_list.get('error')}. "
-            "Skipping class update to preserve existing database records."
+            f"Failed to fetch classes for {course_code} due to network/WAF drop. "
+            "Retaining existing database records."
         )
-        return
+        return False
 
     class_items = class_list.get("classes", []) if isinstance(class_list, dict) else []
 
@@ -382,6 +378,7 @@ def _extract_and_queue_classes(
                 logger.error(
                     f"Error inserting meeting for class {class_nbr} of course {course_code}: {e}"
                 )
+    return True
 
 
 def process_course(
@@ -937,11 +934,14 @@ def scrape_single_year(
         else (is_active or existing_class_count == 0)
     )
 
-    is_ci = os.getenv("GITHUB_ACTIONS") == "true" or bool(os.environ.get("CI"))
-    default_sub_workers = "2" if is_ci else "8"
-    default_crs_workers = "6" if is_ci else "24"
-    subject_workers = int(os.environ.get("SUBJECT_WORKERS", default_sub_workers))
-    course_workers = int(os.environ.get("COURSE_WORKERS", default_crs_workers))
+    is_ci = os.getenv("GITHUB_ACTIONS") == "true" or os.getenv("CI") == "true"
+    default_course_workers = 6 if is_ci else 24
+    default_subject_workers = 2 if is_ci else 8
+
+    subject_workers = int(
+        os.environ.get("SUBJECT_WORKERS", str(default_subject_workers))
+    )
+    course_workers = int(os.environ.get("COURSE_WORKERS", str(default_course_workers)))
 
     try:
         with Progress() as progress:
@@ -1002,11 +1002,11 @@ def scrape_single_year(
         # Bulk atomic replace for active/harvested classes and meetings (persists even if interrupted)
         if should_scrape_classes and collected_classes:
             if existing_class_count > 0 and len(collected_classes) < (
-                existing_class_count * 0.85
+                existing_class_count * 0.90
             ):
-                logger.critical(
-                    f"CRITICAL: Incomplete scrape detected (harvested {len(collected_classes)} < "
-                    f"existing {existing_class_count} * 0.85). Aborting destructive bulk replace."
+                logger.error(
+                    f"[CIRCUIT BREAKER] Harvested {len(collected_classes)} classes, but DB has {existing_class_count}. "
+                    "Aborting bulk table replacement to prevent data loss. Relying on stream upserts."
                 )
             else:
                 logger.info(

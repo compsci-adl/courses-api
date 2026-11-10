@@ -44,10 +44,15 @@ class DataFetcher:
     _funnelback_semaphore = threading.BoundedSemaphore(12)
     _direct_blocked = False
     _direct_blocked_until = 0.0
+    _direct_blocked_permanently = False
 
     @classmethod
-    def is_direct_blocked(cls) -> bool:
-        """Check if direct connection is currently paused due to rate limiting or cooldown."""
+    def _should_attempt_direct(cls) -> bool:
+        """Check if direct connection should be attempted."""
+        if os.getenv("GITHUB_ACTIONS") == "true" or os.getenv("CI") == "true":
+            return False
+        if cls._direct_blocked_permanently:
+            return False
         if cls._direct_blocked:
             if (
                 cls._direct_blocked_until > 0
@@ -55,9 +60,35 @@ class DataFetcher:
             ):
                 cls._direct_blocked = False
                 cls._direct_blocked_until = 0.0
-                return False
-            return True
-        return False
+                return True
+            return False
+        return True
+
+    @classmethod
+    def _record_direct_failure(cls, status_code: int | None = None) -> None:
+        """Record direct failure and set cooldown or permanent block."""
+        cls._direct_blocked = True
+        cls._direct_blocked_until = time.time() + 15.0
+        if (
+            status_code in (403, 429)
+            or os.getenv("GITHUB_ACTIONS") == "true"
+            or os.getenv("CI") == "true"
+        ):
+            cls._direct_blocked_permanently = True
+            logger.warning(
+                f"Direct connection 403/429 detected (HTTP {status_code}). "
+                "Permanently routing through proxy layer."
+            )
+        else:
+            logger.warning(
+                f"Direct connection rate-limited/blocked by WAF (HTTP {status_code}). "
+                "Pausing direct requests for 15s cooldown and trying proxies."
+            )
+
+    @classmethod
+    def is_direct_blocked(cls) -> bool:
+        """Check if direct connection is currently paused due to rate limiting or cooldown."""
+        return not cls._should_attempt_direct()
 
     @staticmethod
     def _sanitise_for_log(value: Any) -> str:
@@ -341,13 +372,7 @@ class DataFetcher:
                         logger.warning("HTTP 404 - Not Found: %s", self.url)
                         return {}
                     elif direct_resp.status_code in (403, 429):
-                        DataFetcher._direct_blocked = True
-                        DataFetcher._direct_blocked_until = time.time() + 15.0
-                        logger.warning(
-                            "Direct connection rate-limited/blocked by WAF (HTTP %s). "
-                            "Pausing direct requests for 15s cooldown and trying proxies.",
-                            direct_resp.status_code,
-                        )
+                        DataFetcher._record_direct_failure(direct_resp.status_code)
                 except Exception as e:
                     logger.debug(
                         "Direct connection attempt failed (%s). Falling back to proxies.",
@@ -485,8 +510,7 @@ class DataFetcher:
                 elif resp.status_code == 404:
                     return {}
                 elif resp.status_code in (403, 429):
-                    DataFetcher._direct_blocked = True
-                    DataFetcher._direct_blocked_until = time.time() + 15.0
+                    DataFetcher._record_direct_failure(resp.status_code)
             except Exception as e:
                 logger.debug(f"Direct async connection attempt failed: {e}")
 
