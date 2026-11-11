@@ -21,8 +21,8 @@ def fetch_proxies(url):
 def test_proxy(
     proxy,
     test_url="https://adelaide.edu.au/study/courses/",
-    timeout=2.5,
-    retries=1,  # Number of retries
+    timeout=2.0,
+    retries=0,  # Fast single-shot candidate check without retrying dead proxies
 ):
     """Test if the given proxy is working by making a request."""
     proxies = {
@@ -109,7 +109,8 @@ def discover_working_proxies(
         deduped = deduped[:max_candidates]
 
     working_proxies = []
-    executor = ThreadPoolExecutor(max_workers=100)
+    test_workers = int(os.environ.get("PROXY_TEST_WORKERS", "40"))
+    executor = ThreadPoolExecutor(max_workers=test_workers)
     try:
         future_to_proxy = {
             executor.submit(test_proxy, proxy): proxy for proxy in deduped

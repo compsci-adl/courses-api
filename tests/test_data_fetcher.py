@@ -14,6 +14,7 @@ class TestDataFetcher(unittest.TestCase):
     def setUp(self):
         DataFetcher._proxies = ["1.1.1.1:80", "2.2.2.2:80", "3.3.3.3:80"]
         DataFetcher._proxy_failures = {}
+        DataFetcher._active_proxies = set()
 
     def test_proxy_failure_threshold(self):
         fetcher = DataFetcher("?test=1", use_proxy=True)
@@ -98,6 +99,42 @@ class TestDataFetcher(unittest.TestCase):
         # Verify proxy call timeout was (3.0, 5.0)
         proxy_call_kwargs = mock_http_get.call_args_list[-1].kwargs
         self.assertEqual(proxy_call_kwargs["timeout"], (3.0, 5.0))
+
+    def test_active_proxy_tracking_and_release(self):
+        DataFetcher._proxies = ["1.1.1.1:80", "2.2.2.2:80"]
+        fetcher = DataFetcher("?test=1", use_proxy=True)
+
+        proxy1 = fetcher.get_random_proxy()
+        self.assertIsNotNone(proxy1)
+        clean1 = proxy1["http"].replace("http://", "")
+        self.assertIn(clean1, DataFetcher._active_proxies)
+
+        # Second request should prefer the idle proxy
+        proxy2 = fetcher.get_random_proxy()
+        self.assertIsNotNone(proxy2)
+        clean2 = proxy2["http"].replace("http://", "")
+        self.assertIn(clean2, DataFetcher._active_proxies)
+        self.assertNotEqual(clean1, clean2)
+
+        # Release proxy1
+        DataFetcher.release_proxy(proxy1)
+        self.assertNotIn(clean1, DataFetcher._active_proxies)
+        self.assertIn(clean2, DataFetcher._active_proxies)
+
+    @patch.object(DataFetcher, "_execute_http_get")
+    def test_transient_timeout_does_not_fatal_remove_proxy(self, mock_http_get):
+        DataFetcher._proxies = ["9.9.9.9:80"]
+        fetcher = DataFetcher("?test=1", use_proxy=True)
+        DataFetcher._direct_blocked_permanently = True
+
+        mock_http_get.side_effect = RequestsError("Connection timeout")
+        res = fetcher.get(max_retries=1)
+        self.assertEqual(res, {})
+        # 1 failure on 9.9.9.9:80 should NOT remove it because it is not fatal
+        self.assertIn("9.9.9.9:80", DataFetcher._proxies)
+        self.assertEqual(DataFetcher._proxy_failures.get("9.9.9.9:80"), 1)
+        # Active proxy should be released
+        self.assertNotIn("9.9.9.9:80", DataFetcher._active_proxies)
 
 
 if __name__ == "__main__":

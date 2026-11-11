@@ -42,6 +42,7 @@ class DataFetcher:
     MAX_PROXY_FAILURES = 3
     _proxies = None
     _proxy_failures = {}
+    _active_proxies = set()
     _proxy_lock = threading.Lock()
     _funnelback_semaphore = threading.BoundedSemaphore(12)
     _direct_blocked = False
@@ -310,8 +311,8 @@ class DataFetcher:
         """Load proxies from file, checking candidate paths or environment."""
         return self._load_proxies()
 
-    def get_random_proxy(self) -> dict:
-        """Get a proxy from the loaded list, prioritising known working proxies."""
+    def get_random_proxy(self) -> dict | None:
+        """Get a proxy from the loaded list, preferring idle proxies to prevent stampedes."""
         if not self.use_proxy:
             return None
 
@@ -325,11 +326,19 @@ class DataFetcher:
             if not DataFetcher._proxies:
                 logger.warning("No proxies available. Proceeding without a proxy.")
                 return None
-            # 70% of the time pick from the top 5 known good proxies if available
-            if len(DataFetcher._proxies) > 5 and random.random() < 0.7:
-                proxy = random.choice(DataFetcher._proxies[:5])
+
+            # Prefer proxies not currently in use by another thread to eliminate collisions and resets
+            idle_proxies = [
+                p for p in DataFetcher._proxies if p not in DataFetcher._active_proxies
+            ]
+            if idle_proxies:
+                proxy = random.choice(idle_proxies)
             else:
                 proxy = random.choice(DataFetcher._proxies)
+
+            proxy_clean = proxy.replace("http://", "").replace("https://", "")
+            DataFetcher._active_proxies.add(proxy_clean)
+
         http_val = (
             proxy
             if proxy.startswith("http://") or proxy.startswith("https://")
@@ -340,11 +349,26 @@ class DataFetcher:
             "https": http_val,
         }
 
+    @classmethod
+    def release_proxy(cls, proxy: dict | None) -> None:
+        """Release an active proxy back to the idle pool."""
+        if not proxy:
+            return
+        proxy_str = (
+            proxy.get("http", "").replace("http://", "").replace("https://", "")
+            if isinstance(proxy, dict)
+            else str(proxy).replace("http://", "").replace("https://", "")
+        )
+        if not proxy_str:
+            return
+        with cls._proxy_lock:
+            cls._active_proxies.discard(proxy_str)
+
     def report_proxy_failure(self, proxy: dict, fatal: bool = False) -> None:
         """Record a failure for a proxy. Remove it only if it exceeds MAX_PROXY_FAILURES or fatal is True."""
         if not proxy:
             return
-        proxy_str = proxy.get("http", "").replace("http://", "")
+        proxy_str = proxy.get("http", "").replace("http://", "").replace("https://", "")
         if not proxy_str:
             return
         should_trigger = False
@@ -355,6 +379,7 @@ class DataFetcher:
                 if DataFetcher._proxies and proxy_str in DataFetcher._proxies:
                     try:
                         DataFetcher._proxies.remove(proxy_str)
+                        DataFetcher._active_proxies.discard(proxy_str)
                         logger.info(
                             f"Removed bad proxy: {proxy_str} (failures: {count}). Remaining: {len(DataFetcher._proxies)}"
                         )
@@ -370,17 +395,14 @@ class DataFetcher:
             self.trigger_refill_if_low()
 
     def report_proxy_success(self, proxy: dict) -> None:
-        """Reset failure count and promote working proxy to the top of the pool."""
+        """Reset failure count for working proxy."""
         if not proxy:
             return
-        proxy_str = proxy.get("http", "").replace("http://", "")
+        proxy_str = proxy.get("http", "").replace("http://", "").replace("https://", "")
         if not proxy_str:
             return
         with DataFetcher._proxy_lock:
             DataFetcher._proxy_failures.pop(proxy_str, None)
-            if DataFetcher._proxies and proxy_str in DataFetcher._proxies:
-                DataFetcher._proxies.remove(proxy_str)
-                DataFetcher._proxies.insert(0, proxy_str)
 
     def remove_proxy(self, proxy: dict) -> None:
         """Explicitly remove a proxy (fatal failure)."""
@@ -593,19 +615,20 @@ class DataFetcher:
                     time.sleep(0.3)
                     continue
 
+                self.last_used_proxy = (
+                    proxy.get("http") if isinstance(proxy, dict) else str(proxy)
+                )
+
                 try:
                     logger.debug("Using proxy: %s", self._sanitise_for_log(proxy))
                     response = self._execute_http_get(
                         self.url, headers=headers, timeout=proxy_timeout, proxy=proxy
                     )
                     self.last_response = response
-                    self.last_used_proxy = (
-                        proxy.get("http") if isinstance(proxy, dict) else str(proxy)
-                    )
 
                     if response.status_code == 429:
                         logger.warning("HTTP 429 - Too Many Requests via proxy.")
-                        self.report_proxy_failure(proxy, fatal=True)
+                        self.report_proxy_failure(proxy, fatal=False)
                         host_strategy.record_proxy_outcome(host, success=False)
                         retries += 1
                         continue
@@ -618,14 +641,14 @@ class DataFetcher:
 
                     if response.status_code == 403:
                         logger.warning("HTTP 403 - Forbidden for proxy: %s", proxy)
-                        self.report_proxy_failure(proxy, fatal=True)
+                        self.report_proxy_failure(proxy, fatal=False)
                         host_strategy.record_proxy_outcome(host, success=False)
                         retries += 1
                         continue
 
                     if response.status_code != 200:
                         logger.error("HTTP %s via proxy", response.status_code)
-                        self.report_proxy_failure(proxy, fatal=True)
+                        self.report_proxy_failure(proxy, fatal=False)
                         host_strategy.record_proxy_outcome(host, success=False)
                         retries += 1
                         continue
@@ -637,13 +660,21 @@ class DataFetcher:
                         host_strategy.record_proxy_outcome(host, success=True)
                         return parsed
                     else:
-                        self.report_proxy_failure(proxy, fatal=True)
+                        self.report_proxy_failure(proxy, fatal=False)
                         host_strategy.record_proxy_outcome(host, success=False)
                     retries += 1
 
+                except requests.exceptions.ProxyError as e:
+                    logger.debug(
+                        "Proxy tunnel error (%s): %s",
+                        self._sanitise_for_log(e),
+                        self._sanitise_for_log(proxy),
+                    )
+                    self.report_proxy_failure(proxy, fatal=True)
+                    host_strategy.record_proxy_outcome(host, success=False)
+                    retries += 1
                 except (
                     requests.exceptions.Timeout,
-                    requests.exceptions.ProxyError,
                     requests.exceptions.RequestException,
                 ) as e:
                     logger.debug(
@@ -651,7 +682,7 @@ class DataFetcher:
                         self._sanitise_for_log(e),
                         self._sanitise_for_log(proxy),
                     )
-                    self.report_proxy_failure(proxy, fatal=True)
+                    self.report_proxy_failure(proxy, fatal=False)
                     host_strategy.record_proxy_outcome(host, success=False)
                     retries += 1
                 except Exception as e:
@@ -660,9 +691,11 @@ class DataFetcher:
                         self._sanitise_for_log(e),
                         self._sanitise_for_log(proxy),
                     )
-                    self.report_proxy_failure(proxy, fatal=True)
+                    self.report_proxy_failure(proxy, fatal=False)
                     host_strategy.record_proxy_outcome(host, success=False)
                     retries += 1
+                finally:
+                    DataFetcher.release_proxy(proxy)
 
             return None
 

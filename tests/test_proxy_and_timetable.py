@@ -310,6 +310,65 @@ class TestFingerprintingAndNoTimetable(unittest.TestCase):
         # Should NOT be in harvested_course_ids so existing DB rows remain completely untouched
         self.assertNotIn("cid_9999", harvested_course_ids)
 
+    def test_process_course_empty_or_none_terms_skips_class_crawl(self):
+        """When course terms is None or [], class crawl must be skipped without network calls."""
+        for empty_terms in [None, [], ""]:
+            course = {
+                "code": "TEST8888",
+                "year": 2027,
+                "terms": empty_terms,
+                "subject": "TEST",
+            }
+            harvested_course_ids = set()
+            progress = MagicMock()
+            lock = threading.Lock()
+            existing_courses_for_year = {"TEST8888": "cid_8888"}
+
+            with patch.object(scraper, "_extract_and_queue_classes") as mock_extract:
+                scraper.process_course(
+                    course=course,
+                    year=2027,
+                    subject={"code": "TEST"},
+                    engine=MagicMock(),
+                    progress=progress,
+                    subject_task=1,
+                    lock=lock,
+                    existing_courses_for_year=existing_courses_for_year,
+                    harvested_course_ids=harvested_course_ids,
+                )
+                mock_extract.assert_not_called()
+                self.assertIn("cid_8888", harvested_course_ids)
+
+    def test_process_course_active_terms_crawls_classes(self):
+        """When course has active terms (e.g. BIOL1032, AERO1009), class crawl must be executed."""
+        course = {
+            "code": "AERO1009",
+            "year": 2027,
+            "terms": ["Semester 1"],
+            "subject": "AERO",
+        }
+        harvested_course_ids = set()
+        progress = MagicMock()
+        lock = threading.Lock()
+        existing_courses_for_year = {"AERO1009": "cid_aero"}
+
+        with patch.object(
+            scraper, "_extract_and_queue_classes", return_value=True
+        ) as mock_extract:
+            scraper.process_course(
+                course=course,
+                year=2027,
+                subject={"code": "AERO"},
+                engine=MagicMock(),
+                progress=progress,
+                subject_task=1,
+                lock=lock,
+                existing_courses_for_year=existing_courses_for_year,
+                harvested_course_ids=harvested_course_ids,
+            )
+            mock_extract.assert_called_once()
+            self.assertIn("cid_aero", harvested_course_ids)
+
 
 if __name__ == "__main__":
     unittest.main()

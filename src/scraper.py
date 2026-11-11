@@ -511,15 +511,15 @@ def process_course(
             course_cid = existing_cid
 
             if scrape_classes:
-                course_terms = course.get("terms")
-                if course_terms is not None and not course_terms:
+                if "terms" in course and not course.get("terms"):
                     logger.debug(
-                        f"Course {code_str} has empty terms for year {year}. Skipping class crawl."
+                        f"Course {code_str} has no active terms for year {year}. Skipping class crawl."
                     )
                     if harvested_course_ids is not None:
                         with lock:
                             harvested_course_ids.add(course_cid)
                 else:
+                    course_terms = course.get("terms")
                     success = _extract_and_queue_classes(
                         code_str,
                         year,
