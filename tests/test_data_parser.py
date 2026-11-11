@@ -77,14 +77,19 @@ Yes
         )
         self.assertEqual(res["title"], "Operating Systems")
 
+    @patch(
+        "data_parser.parse_course_class_list", return_value=[{"class_number": "1234"}]
+    )
     @patch("data_parser.data_fetcher.DataFetcher")
-    def test_get_course_class_list_with_year(self, mock_fetcher_cls):
+    def test_get_course_class_list_with_year(
+        self, mock_fetcher_cls, mock_parse_classes
+    ):
         mock_fetcher = MagicMock()
         mock_fetcher_cls.return_value = mock_fetcher
         mock_fetcher.get.return_value = {
             "h1": "Operating Systems",
             "data": "",
-            "html": "",
+            "html": "<div>dummy class table</div>",
         }
         mock_fetcher.last_response.status_code = 200
 

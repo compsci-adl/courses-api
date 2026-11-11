@@ -302,18 +302,70 @@ def bulk_replace_classes_for_year(
     year: int,
     classes_data: list[dict],
     meetings_data: list[dict] | None = None,
+    fetched_course_ids: set[str] | None = None,
 ):
-    """Since class availability is dynamic and ephemeral, replace the entire year's
+    """Update class availability for a year using per-course selective replacement.
 
-    classes and meetings in atomic operations rather than checking row by row.
+    Only courses that were *successfully* fetched (present in ``fetched_course_ids``)
+    have their old classes deleted and replaced with the new data.  Courses that could
+    not be reached this run (proxy timeout / WAF block) are left untouched in the DB so
+    their previous class data is preserved.
+
+    If ``fetched_course_ids`` is None (legacy call) the old year-wide delete+replace
+    behaviour is preserved.
+
     Deduplicates in memory on the unique constraint and chunks inserts using
     SQLite ON CONFLICT DO UPDATE.
     """
+    if not classes_data and not fetched_course_ids:
+        return
+
+    # Ensure unique index exists on SQLite for ON CONFLICT target
+    try:
+        session.connection().exec_driver_sql(
+            'CREATE UNIQUE INDEX IF NOT EXISTS "uq_course_classes_year_course_class_section_group" '
+            'ON "course_classes" ("year", "course_id", "class_nbr", "section", "group")'
+        )
+    except Exception:
+        pass
+
+    chunk_size = 2000
+
+    if fetched_course_ids is not None:
+        # --- Selective per-course replace ---
+        # Only wipe classes for courses we successfully fetched this run.
+        # Courses that errored / timed out keep their existing DB rows.
+        fetched_list = list(fetched_course_ids)
+        # Delete in chunks to avoid SQLite's variable limit
+        for i in range(0, len(fetched_list), chunk_size):
+            chunk_ids = fetched_list[i : i + chunk_size]
+            session.query(Meetings).filter(
+                Meetings.year == year,
+                Meetings.course_class_id.in_(
+                    session.query(CourseClass.id).filter(
+                        CourseClass.year == year,
+                        CourseClass.course_id.in_(chunk_ids),
+                    )
+                ),
+            ).delete(synchronize_session=False)
+            session.query(CourseClass).filter(
+                CourseClass.year == year,
+                CourseClass.course_id.in_(chunk_ids),
+            ).delete(synchronize_session=False)
+    else:
+        # Legacy year-wide replace (only used when fetched_course_ids is not provided)
+        session.query(Meetings).filter(Meetings.year == year).delete(
+            synchronize_session=False
+        )
+        session.query(CourseClass).filter(CourseClass.year == year).delete(
+            synchronize_session=False
+        )
+
     if not classes_data:
+        session.commit()
         return
 
     # In-memory deduplication on the unique key constraint
-    # Prevents collisions when the scraper extracts the same class/section/group twice
     deduped_classes = {}
     for item in classes_data:
         key = (
@@ -327,26 +379,7 @@ def bulk_replace_classes_for_year(
 
     clean_classes = list(deduped_classes.values())
 
-    # Delete existing meetings and classes for this year
-    session.query(Meetings).filter(Meetings.year == year).delete(
-        synchronize_session=False
-    )
-    session.query(CourseClass).filter(CourseClass.year == year).delete(
-        synchronize_session=False
-    )
-
-    # Ensure unique index exists on SQLite for ON CONFLICT target
-    try:
-        session.connection().exec_driver_sql(
-            'CREATE UNIQUE INDEX IF NOT EXISTS "uq_course_classes_year_course_class_section_group" '
-            'ON "course_classes" ("year", "course_id", "class_nbr", "section", "group")'
-        )
-    except Exception:
-        pass
-
-    # Batch insert using SQLite ON CONFLICT
-    # Chunking by 2,000 prevents exceeding SQLite's bound parameter limits
-    chunk_size = 2000
+    # Batch insert using SQLite ON CONFLICT DO UPDATE
     for i in range(0, len(clean_classes), chunk_size):
         chunk = clean_classes[i : i + chunk_size]
         stmt = sqlite_insert(CourseClass).values(chunk)

@@ -299,8 +299,14 @@ def _extract_and_queue_classes(
     collected_classes: list[dict] | None,
     collected_meetings: list[dict] | None,
     lock: Lock,
-):
-    """Harvest classes and meetings for a course and either append to batch lists or put to write_queue."""
+    fetched_course_ids: set[str] | None = None,
+) -> bool:
+    """Harvest classes and meetings for a course and either append to batch lists or put to write_queue.
+
+    Returns True if the class page was successfully fetched (got ≥1 class), False otherwise.
+    When fetched_course_ids is provided, the course_cid is added to it on success so the
+    final atomic replace only deletes classes for courses that were actually reached this run.
+    """
     class_list = data_parser.get_course_class_list(
         course_code, year=year, raw_html=raw_html
     )
@@ -310,6 +316,7 @@ def _extract_and_queue_classes(
             f"No classes found for course {course_code} (year {year}) after fetch. "
             "May be WAF-blocked or course has no scheduled classes."
         )
+        return False
 
     for individual_class in class_items:
         class_type = individual_class.get("component")
@@ -371,6 +378,12 @@ def _extract_and_queue_classes(
                     f"Error inserting meeting for class {class_nbr} of course {course_code}: {e}"
                 )
 
+    # Mark this course as successfully fetched so the final replace preserves it
+    if class_items and fetched_course_ids is not None:
+        with lock:
+            fetched_course_ids.add(course_cid)
+    return bool(class_items)
+
 
 def process_course(
     course,
@@ -386,6 +399,7 @@ def process_course(
     previous_courses: dict[str, dict] | None = None,
     collected_classes: list[dict] | None = None,
     collected_meetings: list[dict] | None = None,
+    fetched_course_ids: set[str] | None = None,
 ):
     """Process a single course and insert/upsert data into the database directly.
 
@@ -428,6 +442,7 @@ def process_course(
                     collected_classes=collected_classes,
                     collected_meetings=collected_meetings,
                     lock=lock,
+                    fetched_course_ids=fetched_course_ids,
                 )
             progress.update(subject_task, advance=1)
             return
@@ -682,6 +697,7 @@ def process_course(
                 collected_classes=collected_classes,
                 collected_meetings=collected_meetings,
                 lock=lock,
+                fetched_course_ids=fetched_course_ids,
             )
 
         progress.update(subject_task, advance=1)
@@ -705,6 +721,7 @@ def process_subject(
     collected_meetings: list[dict] | None = None,
     course_executor: ThreadPoolExecutor | None = None,
     course_workers: int = 24,
+    fetched_course_ids: set[str] | None = None,
 ):
     """Process a single subject and insert data into the database."""
     try:
@@ -770,6 +787,7 @@ def process_subject(
                     previous_courses,
                     collected_classes,
                     collected_meetings,
+                    fetched_course_ids,
                 )
                 futures.append(future)
 
@@ -805,6 +823,7 @@ def scrape_single_year(
     lock = Lock()
     collected_classes: list[dict] = []
     collected_meetings: list[dict] = []
+    fetched_course_ids: set[str] = set()
 
     # Preload existing course identifiers for this year and reusable previous years
     check_session = Session(bind=engine)
@@ -882,6 +901,9 @@ def scrape_single_year(
                             collected_meetings if should_scrape_classes else None,
                             course_executor=course_executor,
                             course_workers=course_workers,
+                            fetched_course_ids=fetched_course_ids
+                            if should_scrape_classes
+                            else None,
                         )
                         futures.append(future)
 
@@ -890,11 +912,11 @@ def scrape_single_year(
                         future.result()
 
     finally:
-        # Bulk atomic replace for active/harvested classes and meetings (persists even if interrupted)
-        if should_scrape_classes and collected_classes:
+        # Selective atomic replace for active/harvested classes and meetings (persists even if interrupted)
+        if should_scrape_classes and (collected_classes or fetched_course_ids):
             logger.info(
-                f"Atomic bulk replacing {len(collected_classes)} classes and "
-                f"{len(collected_meetings)} meetings for year {year}..."
+                f"Selective class replace: {len(collected_classes)} classes and "
+                f"{len(collected_meetings)} meetings for {len(fetched_course_ids)} courses in year {year}..."
             )
             db_session = Session(bind=engine)
             try:
@@ -903,6 +925,7 @@ def scrape_single_year(
                     year,
                     collected_classes,
                     collected_meetings,
+                    fetched_course_ids=fetched_course_ids,
                 )
             finally:
                 db_session.close()

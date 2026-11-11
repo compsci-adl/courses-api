@@ -17,17 +17,13 @@ class TestDataFetcher(unittest.TestCase):
         fetcher = DataFetcher("?test=1", use_proxy=True)
         proxy = {"http": "http://1.1.1.1:80", "https": "http://1.1.1.1:80"}
 
-        # 1st failure: should NOT be removed
-        fetcher.report_proxy_failure(proxy)
-        self.assertIn("1.1.1.1:80", DataFetcher._proxies)
-        self.assertEqual(DataFetcher._proxy_failures.get("1.1.1.1:80"), 1)
+        # Failures before MAX_PROXY_FAILURES: should NOT be removed
+        for i in range(1, DataFetcher.MAX_PROXY_FAILURES):
+            fetcher.report_proxy_failure(proxy)
+            self.assertIn("1.1.1.1:80", DataFetcher._proxies)
+            self.assertEqual(DataFetcher._proxy_failures.get("1.1.1.1:80"), i)
 
-        # 2nd failure: should NOT be removed
-        fetcher.report_proxy_failure(proxy)
-        self.assertIn("1.1.1.1:80", DataFetcher._proxies)
-        self.assertEqual(DataFetcher._proxy_failures.get("1.1.1.1:80"), 2)
-
-        # 3rd failure: threshold reached (MAX_PROXY_FAILURES=3), should be removed
+        # Threshold reached (MAX_PROXY_FAILURES), should be removed
         fetcher.report_proxy_failure(proxy)
         self.assertNotIn("1.1.1.1:80", DataFetcher._proxies)
 
@@ -45,7 +41,9 @@ class TestDataFetcher(unittest.TestCase):
         fetcher = DataFetcher("?test=1", use_proxy=True)
         proxy = {"http": "http://3.3.3.3:80", "https": "http://3.3.3.3:80"}
 
-        fetcher.report_proxy_failure(proxy, fatal=True)
+        # Resilient retention policy avoids pool exhaustion on CI by requiring MAX_PROXY_FAILURES
+        for _ in range(DataFetcher.MAX_PROXY_FAILURES):
+            fetcher.report_proxy_failure(proxy, fatal=True)
         self.assertNotIn("3.3.3.3:80", DataFetcher._proxies)
 
     @patch.object(DataFetcher, "load_proxies")
