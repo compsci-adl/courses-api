@@ -1,7 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import requests
-from requests.exceptions import RequestException, Timeout
+from curl_cffi import requests as cffi_requests
+from curl_cffi.requests.exceptions import RequestException
 from rich.progress import (
     BarColumn,
     Progress,
@@ -12,7 +12,9 @@ from rich.progress import (
 
 def fetch_proxies(url):
     """Fetch the list of proxies from the URL."""
-    response = requests.get(url)
+    import requests as std_requests
+
+    response = std_requests.get(url, timeout=15)
     if response.status_code == 200:
         # Split the response content by newline to get each proxy
         return response.text.splitlines()
@@ -24,33 +26,40 @@ def fetch_proxies(url):
 def test_proxy(
     proxy,
     test_url="https://adelaide.edu.au/study/courses/",
-    timeout=3,
-    retries=1,  # Number of retries
+    timeout=5,
+    retries=1,
 ):
-    """Test if the given proxy is working by making a request."""
+    """Test if the given proxy is working by making a request using Chrome TLS impersonation.
+
+    Uses curl_cffi so the WAF fingerprint check passes (same as the scraper itself).
+    """
     proxies = {
         "http": f"http://{proxy}",
         "https": f"http://{proxy}",
     }
-    for attempt in range(retries + 1):  # Retry logic
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    for attempt in range(retries + 1):
         try:
-            # Use realistic User-Agent to avoid WAF block
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
-            }
-            response = requests.get(
-                test_url, proxies=proxies, headers=headers, timeout=timeout
+            response = cffi_requests.get(
+                test_url,
+                proxies=proxies,
+                headers=headers,
+                timeout=timeout,
+                impersonate="chrome146",
             )
             if response.status_code == 200:
-                return proxy  # Return the working proxy
+                return proxy
             elif response.status_code == 403:
-                # WAF block, skip immediately
+                # WAF block even with impersonation — proxy IP is blacklisted
                 return None
-        except (RequestException, Timeout):
+        except (RequestException, Exception):
             if attempt < retries:
-                continue  # Retry on failure
-            else:
-                return None  # Skip the proxy if all retries fail
+                continue
+            return None
     return None
 
 
@@ -102,7 +111,7 @@ def main(target_working: int = 500):
                                 f.cancel()
                             break
                 except Exception:
-                    pass  # Handle or log specific proxy testing errors if needed
+                    pass
 
     # Save working proxies to file
     if working_proxies:

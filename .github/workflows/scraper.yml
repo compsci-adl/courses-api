@@ -52,6 +52,8 @@ jobs:
             -v ${{ github.workspace }}/src:/app/src \
             -v ${{ github.workspace }}/logs:/app/logs \
             -e PYTHONUNBUFFERED=1 \
+            -e CI=true \
+            -e GITHUB_ACTIONS=true \
             -e DEFAULT_LOGGING_LEVEL=${{ env.DEFAULT_LOGGING_LEVEL }} \
             -e COURSE_WORKERS=24 \
             -e SUBJECT_WORKERS=8 \
@@ -82,6 +84,12 @@ jobs:
           echo "Total courses in DB: $COURSE_COUNT"
           if [ "$COURSE_COUNT" -lt 10000 ]; then
             echo "Error: Course count ($COURSE_COUNT) is below expected 10,000 threshold."
+            exit 1
+          fi
+          CLASS_COUNT=$(python3 -c "import sqlite3; conn = sqlite3.connect('src/local.sqlite3'); print(conn.execute('SELECT count(*) FROM course_classes').fetchone()[0])" 2>/dev/null || echo "0")
+          echo "Total classes in DB: $CLASS_COUNT"
+          if [ "$CLASS_COUNT" -lt 30000 ]; then
+            echo "Error: Class count ($CLASS_COUNT) is below expected 30,000 threshold. WAF may have blocked class page fetches."
             exit 1
           fi
 

@@ -37,17 +37,27 @@ class DataFetcher:
     BASE_INFO_URL = "https://adelaide.edu.au"
     PROXY_FILE = "src/working_proxies.txt"
 
-    MAX_PROXY_FAILURES = 3
+    MAX_PROXY_FAILURES = 5
     _proxies = None
     _proxy_failures = {}
     _proxy_lock = threading.Lock()
     _funnelback_semaphore = threading.BoundedSemaphore(12)
     _direct_blocked = False
     _direct_blocked_until = 0.0
+    # Set permanently True on CI where the runner IP is always WAF-blocked
+    _ci_permanently_blocked: bool = bool(
+        os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS")
+    )
 
     @classmethod
     def is_direct_blocked(cls) -> bool:
-        """Check if direct connection is currently paused due to rate limiting or cooldown."""
+        """Check if direct connection is currently paused due to rate limiting or cooldown.
+
+        On CI/GitHub Actions the runner IP is always WAF-blocked, so we short-circuit
+        to True permanently to avoid wasting time (and proxy budget) on direct attempts.
+        """
+        if cls._ci_permanently_blocked:
+            return True
         if cls._direct_blocked:
             if (
                 cls._direct_blocked_until > 0
@@ -144,7 +154,12 @@ class DataFetcher:
         }
 
     def report_proxy_failure(self, proxy: dict, fatal: bool = False) -> None:
-        """Record a failure for a proxy. Remove it only if it exceeds MAX_PROXY_FAILURES or fatal is True."""
+        """Record a failure for a proxy. Remove it after MAX_PROXY_FAILURES cumulative failures.
+
+        ``fatal=True`` still increments the failure counter but no longer causes instant eviction —
+        this prevents the proxy pool from draining too quickly on CI where many proxies are marginal.
+        A proxy is only evicted once it has accumulated MAX_PROXY_FAILURES failures.
+        """
         if not proxy:
             return
         proxy_str = proxy.get("http", "").replace("http://", "")
@@ -153,7 +168,7 @@ class DataFetcher:
         with DataFetcher._proxy_lock:
             count = DataFetcher._proxy_failures.get(proxy_str, 0) + 1
             DataFetcher._proxy_failures[proxy_str] = count
-            if fatal or count >= self.MAX_PROXY_FAILURES:
+            if count >= self.MAX_PROXY_FAILURES:
                 if DataFetcher._proxies and proxy_str in DataFetcher._proxies:
                     try:
                         DataFetcher._proxies.remove(proxy_str)
@@ -337,10 +352,13 @@ class DataFetcher:
 
         # Smart Proxy Fallback with generous timeout and priority queue of working proxies
         retries = 0
+        is_ci = bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))
         proxy_timeout = min(max(self.timeout, 6.0), 12.0)
         with DataFetcher._proxy_lock:
             pool_size = len(DataFetcher._proxies or [])
-        max_retries = max(min(max_retries, pool_size), 15)
+        # On CI use more retries since direct connection is always blocked
+        ci_min = 25 if is_ci else 15
+        max_retries = max(min(max_retries, pool_size), ci_min)
 
         while retries < max_retries:
             # Re-attempt direct connection after 2 proxy failures only if not blocked by WAF

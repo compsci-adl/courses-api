@@ -315,56 +315,79 @@ def get_course_class_list(
         if year
         else f"/study/courses/{encoded_course_code}/"
     )
-    course_details = data_fetcher.DataFetcher(endpoint, use_class_url=True)
 
-    try:
-        data = course_details.get()
-        if (
-            course_details.last_response is None
-            or course_details.last_response.status_code != 200
-            or not data
-            or (
-                isinstance(data, dict)
-                and data.get("h1", "").lower() == "page not found"
-            )
-        ):
-            status = (
+    last_status = "NO_RESPONSE"
+    for attempt in range(4):
+        course_details = data_fetcher.DataFetcher(endpoint, use_class_url=True)
+        try:
+            data = course_details.get()
+            last_status = (
                 course_details.last_response.status_code
                 if course_details.last_response
                 else "NO_RESPONSE"
             )
-            if status != 404 and not (
-                isinstance(data, dict)
-                and data.get("h1", "").lower() == "page not found"
+            if (
+                course_details.last_response is None
+                or course_details.last_response.status_code != 200
+                or not data
+                or (
+                    isinstance(data, dict)
+                    and data.get("h1", "").lower() == "page not found"
+                )
             ):
-                text = (
-                    course_details.last_response.text
-                    if course_details.last_response
-                    else ""
+                if last_status == 404 or (
+                    isinstance(data, dict)
+                    and data.get("h1", "").lower() == "page not found"
+                ):
+                    # Course genuinely not available; no point retrying
+                    return {
+                        "code": code_str,
+                        "title": data.get("h1", "") if isinstance(data, dict) else "",
+                        "course_id": None,
+                        "classes": [],
+                    }
+                # Transient failure — retry
+                logger.debug(
+                    f"Class list fetch attempt {attempt + 1}/4 for {course_code} returned "
+                    f"HTTP {last_status}. Retrying..."
                 )
-                logger.error(
-                    f"Error fetching class list for {course_code}: Status {status} - {text[:200]}"
+                time.sleep(0.5 + attempt * 0.5)
+                continue
+
+            # Use raw HTML for BeautifulSoup parsing
+            text = data.get("html", "") or data.get("data", "")
+
+            # Parse the plain-body text for class list details
+            parsed_classes = parse_course_class_list(text)
+            if parsed_classes:
+                return {"classes": parsed_classes}
+
+            # Got a 200 but no classes parsed — could be a redirect/empty page; retry once
+            if attempt < 3:
+                logger.debug(
+                    f"Class list for {course_code} returned 200 but parsed 0 classes "
+                    f"(attempt {attempt + 1}/4). Retrying..."
                 )
-            # Return a minimal dict so callers don't KeyError when accessing title/course_id
-            title = ""
-            if isinstance(data, dict):
-                title = data.get("h1", "")
-            return {
-                "code": code_str,
-                "title": title,
-                "course_id": None,
-                "classes": [],
-            }
-        # Use raw HTML for BeautifulSoup parsing
-        text = data.get("html", "") or data.get("data", "")
+                time.sleep(0.5 + attempt * 0.5)
+                continue
 
-        # Parse the plain-body text for class list details
-        parsed_classes = parse_course_class_list(text)
-        return {"classes": parsed_classes}
+            return {"classes": parsed_classes}
 
-    except Exception as e:
-        print(f"An error occurred while fetching course class list: {e}")
-        return {}
+        except Exception as e:
+            logger.debug(
+                f"Attempt {attempt + 1}/4 for class list {course_code} failed: {e}"
+            )
+            time.sleep(0.5 + attempt * 0.5)
+
+    logger.warning(
+        f"Could not retrieve class list for {course_code} after 4 attempts (HTTP {last_status})."
+    )
+    return {
+        "code": code_str,
+        "title": "",
+        "course_id": None,
+        "classes": [],
+    }
 
 
 def parse_course_class_list(text: str) -> list[dict]:

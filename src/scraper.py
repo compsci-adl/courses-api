@@ -305,6 +305,11 @@ def _extract_and_queue_classes(
         course_code, year=year, raw_html=raw_html
     )
     class_items = class_list.get("classes", []) if isinstance(class_list, dict) else []
+    if not class_items and not raw_html:
+        logger.debug(
+            f"No classes found for course {course_code} (year {year}) after fetch. "
+            "May be WAF-blocked or course has no scheduled classes."
+        )
 
     for individual_class in class_items:
         class_type = individual_class.get("component")
@@ -928,13 +933,19 @@ def ensure_proxies_ready(min_proxies: int = 20):
                     valid_count = max(valid_count, len(lines))
             except Exception:
                 pass
-    if valid_count < min_proxies:
+
+    # On CI the runner IP is always blocked, so we need a larger proxy pool
+    is_ci = bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))
+    effective_min = max(min_proxies, 100 if is_ci else min_proxies)
+
+    if valid_count < effective_min:
         logger.info(
-            f"Found {valid_count} working proxies (< {min_proxies} required). "
+            f"Found {valid_count} working proxies (< {effective_min} required). "
             f"Testing and fetching fresh proxies..."
         )
         try:
-            fetch_proxies.main()
+            target = 600 if is_ci else 500
+            fetch_proxies.main(target_working=target)
             with data_fetcher.DataFetcher._proxy_lock:
                 data_fetcher.DataFetcher._proxies = None
                 data_fetcher.DataFetcher._proxy_failures.clear()
