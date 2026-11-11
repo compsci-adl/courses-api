@@ -1,13 +1,10 @@
+import os
+import tempfile
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 from requests.exceptions import RequestException, Timeout
-from rich.progress import (
-    BarColumn,
-    Progress,
-    TextColumn,
-    TimeRemainingColumn,
-)
 
 
 def fetch_proxies(url):
@@ -55,56 +52,90 @@ def test_proxy(
 
 
 def save_working_proxies(proxies, filename="src/working_proxies.txt"):
-    """Save working proxies to a text file."""
-    with open(filename, "w") as file:
-        for proxy in proxies:
-            file.write(f"{proxy}\n")
+    """Atomically save working proxies to a text file."""
+    dirname = os.path.dirname(filename) or "."
+    os.makedirs(dirname, exist_ok=True)
+    temp_fd, temp_path = tempfile.mkstemp(dir=dirname, prefix="proxies_", suffix=".tmp")
+    try:
+        with open(temp_fd, "w", encoding="utf-8") as file:
+            for proxy in proxies:
+                file.write(f"{proxy}\n")
+        os.replace(temp_path, filename)
+    except Exception:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        raise
 
 
-def main(target_working: int = 500):
+def discover_working_proxies(
+    target: int,
+    max_candidates: int | None = None,
+    stop_event: threading.Event | None = None,
+    exclude: set[str] | None = None,
+    show_progress: bool = False,
+) -> list[str]:
+    """Fetch candidate lists, deduplicate, filter excluded proxies, and concurrently test
+
+    until target working proxies are found or stop_event is set.
+    Does not write to files or mutate global state.
+    """
+    if stop_event and stop_event.is_set():
+        return []
+
     proxy_urls = [
         "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/refs/heads/master/http.txt",
         "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
         "https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt",
     ]
-    proxies = []
+    raw_proxies = []
     for url in proxy_urls:
+        if stop_event and stop_event.is_set():
+            return []
         try:
-            proxies.extend(fetch_proxies(url))
+            raw_proxies.extend(fetch_proxies(url))
         except Exception:
             pass
-    # Deduplicate proxies while preserving order
-    proxies = list(dict.fromkeys(proxies))
+
+    exclude_set = exclude or set()
+    deduped = []
+    seen = set()
+    for p in raw_proxies:
+        p_clean = p.strip()
+        if p_clean and p_clean not in seen and p_clean not in exclude_set:
+            seen.add(p_clean)
+            deduped.append(p_clean)
+
+    if max_candidates is not None and max_candidates > 0:
+        deduped = deduped[:max_candidates]
 
     working_proxies = []
+    executor = ThreadPoolExecutor(max_workers=100)
+    try:
+        future_to_proxy = {
+            executor.submit(test_proxy, proxy): proxy for proxy in deduped
+        }
+        for future in as_completed(future_to_proxy):
+            if stop_event and stop_event.is_set():
+                break
+            try:
+                result = future.result()
+                if result:
+                    working_proxies.append(result)
+                    if len(working_proxies) >= target:
+                        break
+            except Exception:
+                pass
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
 
-    # Rich Progress Bar
-    with Progress(
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TimeRemainingColumn(),
-    ) as progress:
-        task = progress.add_task("Testing Proxies...", total=len(proxies))
+    return working_proxies
 
-        # Use ThreadPoolExecutor for concurrency
-        with ThreadPoolExecutor(max_workers=100) as executor:
-            future_to_proxy = {
-                executor.submit(test_proxy, proxy): proxy for proxy in proxies
-            }
-            for future in as_completed(future_to_proxy):
-                progress.update(task, advance=1)
-                try:
-                    result = future.result()
-                    if result:
-                        working_proxies.append(result)
-                        if len(working_proxies) >= target_working:
-                            for f in future_to_proxy:
-                                f.cancel()
-                            break
-                except Exception:
-                    pass  # Handle or log specific proxy testing errors if needed
 
-    # Save working proxies to file
+def main(target_working: int = 500):
+    working_proxies = discover_working_proxies(
+        target=target_working,
+        show_progress=True,
+    )
     if working_proxies:
         save_working_proxies(working_proxies)
         print(

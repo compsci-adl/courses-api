@@ -1,3 +1,4 @@
+import hashlib
 import re
 import time
 from dataclasses import dataclass
@@ -8,6 +9,25 @@ from bs4 import BeautifulSoup
 
 import data_fetcher
 from log import logger
+
+
+def fingerprint_page_content(html: str) -> tuple[int, str]:
+    """Compute a resilient fingerprint of HTML content.
+
+    Returns (content_len, content_hash) ignoring volatile scripts, styles, comments, and whitespace.
+    """
+    if not html:
+        return (0, "")
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(["script", "style", "svg", "noscript"]):
+        tag.decompose()
+    for comment in soup.find_all(string=lambda t: isinstance(t, type(soup.comment))):
+        comment.extract()
+    text = soup.get_text(separator=" ", strip=True)
+    text = re.sub(r"\s+", " ", text)
+    content_len = len(text)
+    content_hash = hashlib.sha1(text.encode("utf-8")).hexdigest()[:16]
+    return (content_len, content_hash)
 
 
 class ScraperFetchError(Exception):
@@ -29,6 +49,9 @@ class FetchStatus(str, Enum):
     )
     BLOCKED_OR_ERROR = (
         "blocked_or_error"  # 403, 429, WAF captcha/challenge, timeout, connection reset
+    )
+    NO_TIMETABLE = (
+        "no_timetable"  # Stable page with active terms but no timetable published
     )
 
 
@@ -571,6 +594,7 @@ def get_course_class_list(
     # If course is offered in terms, verify expected page markers are present
     has_terms = bool(terms)
     has_markers = ("Class details" in raw_html_str) or ("Enrol by date" in raw_html_str)
+    fingerprint = fingerprint_page_content(raw_html_str)
     if has_terms and not has_markers:
         logger.warning(
             f"Course {code_str} has terms '{terms}' but HTML lacks class markers ('Class details' / 'Enrol by date')."
@@ -587,6 +611,7 @@ def get_course_class_list(
             "raw_html": raw_html_str,
             "proxy": used_proxy,
             "markers_found": False,
+            "fingerprint": fingerprint,
         }
 
     parsed_classes = parse_course_class_list(raw_html_str)
@@ -599,6 +624,7 @@ def get_course_class_list(
         "raw_html": raw_html_str,
         "proxy": used_proxy,
         "markers_found": has_markers,
+        "fingerprint": fingerprint,
     }
 
 

@@ -307,8 +307,15 @@ def _extract_and_queue_classes(
     collected_meetings: list[dict] | None,
     lock: Lock,
     terms: Any = None,
-) -> bool:
-    """Harvest classes and meetings for a course and either append to batch lists or put to write_queue."""
+    marker_missing_attempts: dict | None = None,
+) -> bool | str:
+    """Harvest classes and meetings for a course and either append to batch lists or put to write_queue.
+
+    Returns:
+        True: classes harvested successfully
+        False: transient failure (WAF/network/length)
+        "NO_TIMETABLE": page has stable content across different proxies but no timetable
+    """
     if terms is not None:
         class_list = data_parser.get_course_class_list(
             course_code, year=year, raw_html=raw_html, terms=terms
@@ -327,16 +334,54 @@ def _extract_and_queue_classes(
     markers_found = (
         class_list.get("markers_found") if isinstance(class_list, dict) else None
     )
+    fingerprint = (
+        class_list.get("fingerprint") if isinstance(class_list, dict) else None
+    )
 
     # Check class_list status
     if isinstance(class_list, dict) and class_list.get("status") == "error":
         err = class_list.get("error", "Unknown error")
+
+        # Check for deterministic missing timetable on active terms page
+        if (
+            "Missing class timetable markers" in str(err)
+            and fingerprint
+            and marker_missing_attempts is not None
+        ):
+            code_key = (year, str(course_code))
+            proxy_key = str(proxy_used or "direct")
+            required_confirmations = int(
+                os.environ.get("NO_TIMETABLE_CONFIRMATIONS", "2")
+            )
+
+            with lock:
+                past_attempts = marker_missing_attempts.setdefault(code_key, [])
+                past_attempts.append((fingerprint, proxy_key))
+
+                # Check if we have at least N attempts via different proxies with identical fingerprint
+                proxies_seen = {p for _, p in past_attempts}
+                fp_set = {fp for fp, _ in past_attempts}
+
+                if len(proxies_seen) >= required_confirmations and len(fp_set) == 1:
+                    logger.info(
+                        f"Course {course_code} has terms '{terms}' but page is stable and has no timetable "
+                        f"(confirmed on {len(proxies_seen)} proxies with identical fingerprint {fingerprint}). "
+                        "Not retrying; existing DB rows kept."
+                    )
+                    return "NO_TIMETABLE"
+
         logger.warning(
             f"Failed to fetch classes for {course_code} ({year}) due to: {err}. "
             f"[status={http_status}, html_len={html_len}, proxy={proxy_used}]. "
             "Skipping course replacement so existing DB records remain intact."
         )
         return False
+
+    # Successful fetch with markers: clear any prior marker-missing history
+    if marker_missing_attempts is not None:
+        code_key = (year, str(course_code))
+        with lock:
+            marker_missing_attempts.pop(code_key, None)
 
     class_items = class_list.get("classes", []) if isinstance(class_list, dict) else []
     total_meetings = sum(
@@ -426,6 +471,8 @@ def process_course(
     collected_meetings: list[dict] | None = None,
     failed_courses: list | None = None,
     harvested_course_ids: set[str] | None = None,
+    marker_missing_attempts: dict | None = None,
+    no_timetable_codes: set[str] | None = None,
 ):
     """Process a single course and insert/upsert data into the database directly.
 
@@ -481,7 +528,14 @@ def process_course(
                         collected_meetings=collected_meetings,
                         lock=lock,
                         terms=course_terms,
+                        marker_missing_attempts=marker_missing_attempts,
                     )
+                    if success == "NO_TIMETABLE":
+                        if no_timetable_codes is not None:
+                            with lock:
+                                no_timetable_codes.add(code_str)
+                        progress.update(subject_task, advance=1)
+                        return
                     if not success:
                         logger.warning(
                             f"Class harvest for existing course {code_str} failed. Queueing for retry."
@@ -776,7 +830,14 @@ def process_course(
                 collected_meetings=collected_meetings,
                 lock=lock,
                 terms=terms,
+                marker_missing_attempts=marker_missing_attempts,
             )
+            if success == "NO_TIMETABLE":
+                if no_timetable_codes is not None:
+                    with lock:
+                        no_timetable_codes.add(code_str)
+                progress.update(subject_task, advance=1)
+                return
             if not success:
                 logger.warning(
                     f"Class harvest for new course {code_str} failed. Queueing for retry."
@@ -814,6 +875,8 @@ def process_subject(
     harvested_course_ids: set[str] | None = None,
     permanently_failed_codes: list[str] | None = None,
     courses_attempted_codes: set[str] | None = None,
+    marker_missing_attempts: dict | None = None,
+    no_timetable_codes: set[str] | None = None,
 ):
     """Process a single subject and insert data into the database."""
     try:
@@ -905,6 +968,8 @@ def process_subject(
                     collected_meetings,
                     failed_courses,
                     harvested_course_ids,
+                    marker_missing_attempts,
+                    no_timetable_codes,
                 )
                 futures.append(future)
 
@@ -943,6 +1008,8 @@ def process_subject(
                         collected_meetings,
                         failed_courses,
                         harvested_course_ids,
+                        marker_missing_attempts,
+                        no_timetable_codes,
                     )
                     retry_futures.append(rfuture)
 
@@ -964,6 +1031,13 @@ def process_subject(
                 logger.error(
                     f"Subject '{name}' ({year}): {len(failed_courses)} courses could not be retrieved after retries: {failed_codes}"
                 )
+
+            logger.info(
+                f"Subject '{name}' ({year}) complete: processed {len(course_list)} courses."
+            )
+            print(
+                f"[INFO] Completed all courses for subject '{name}' ({year}) ({len(course_list)} courses processed)."
+            )
         finally:
             if managed_executor is not None:
                 managed_executor.shutdown(wait=True)
@@ -996,6 +1070,8 @@ def scrape_single_year(
     harvested_course_ids: set[str] = set()
     permanently_failed_codes: list[str] = []
     courses_attempted_codes: set[str] = set()
+    marker_missing_attempts: dict = {}
+    no_timetable_codes: set[str] = set()
 
     # Preload existing course identifiers for this year and reusable previous years
     check_session = Session(bind=engine)
@@ -1088,6 +1164,8 @@ def scrape_single_year(
                             else None,
                             permanently_failed_codes=permanently_failed_codes,
                             courses_attempted_codes=courses_attempted_codes,
+                            marker_missing_attempts=marker_missing_attempts,
+                            no_timetable_codes=no_timetable_codes,
                         )
                         futures.append(future)
 
@@ -1146,11 +1224,19 @@ def scrape_single_year(
                 for cid in existing_courses_with_classes
                 if cid not in harvested_course_ids
             ]
+            courses_harvested_with_classes = len(
+                {c["course_id"] for c in collected_classes}
+            )
+            courses_harvested_no_classes = (
+                len(harvested_course_ids) - courses_harvested_with_classes
+            )
             logger.info(
                 f"=== Academic Year {year} Class Harvesting Summary ===\n"
                 f"  Courses Attempted: {len(courses_attempted_codes)}\n"
-                f"  Courses Harvested OK: {len(harvested_course_ids)}\n"
-                f"  Courses Failed After Retries: {len(permanently_failed_codes)} -> {sorted(set(permanently_failed_codes))}\n"
+                f"  Courses Harvested With Classes: {courses_harvested_with_classes}\n"
+                f"  Courses Harvested Without Classes (No terms/markers): {courses_harvested_no_classes}\n"
+                f"  NO_TIMETABLE (Stable, retained existing rows): {len(no_timetable_codes)} -> {sorted(no_timetable_codes)}\n"
+                f"  Courses Failed After Retries (Transient): {len(permanently_failed_codes)} -> {sorted(set(permanently_failed_codes))}\n"
                 f"  Existing Courses With Classes Not Harvested: {len(courses_with_classes_unharvested)} (Retained in DB untouched)"
             )
             if courses_with_classes_unharvested:
@@ -1190,15 +1276,26 @@ def ensure_proxies_ready(min_proxies: int = 20):
     if valid_count < min_proxies:
         logger.info(
             f"Found {valid_count} working proxies (< {min_proxies} required). "
-            f"Testing and fetching fresh proxies..."
+            f"Testing and discovering minimum working proxies..."
         )
         try:
-            fetch_proxies.main()
-            with data_fetcher.DataFetcher._proxy_lock:
-                data_fetcher.DataFetcher._proxies = None
-                data_fetcher.DataFetcher._proxy_failures.clear()
+            discovered = fetch_proxies.discover_working_proxies(target=min_proxies)
+            if discovered:
+                fetch_proxies.save_working_proxies(discovered)
+                with data_fetcher.DataFetcher._proxy_lock:
+                    if data_fetcher.DataFetcher._proxies is None:
+                        data_fetcher.DataFetcher._proxies = []
+                    existing_set = set(data_fetcher.DataFetcher._proxies)
+                    for p in discovered:
+                        if p not in existing_set:
+                            data_fetcher.DataFetcher._proxies.append(p)
+                            existing_set.add(p)
         except Exception as e:
             logger.warning(f"Proxy discovery failed: {e}")
+
+    # Start background refresher to grow the pool to refill target while scraping begins
+    data_fetcher.DataFetcher.start_background_refresher()
+    data_fetcher.DataFetcher.trigger_refill_if_low()
 
 
 async def create_scraper_client() -> httpx.AsyncClient:
@@ -1335,6 +1432,7 @@ async def run_pipeline(
             "Scraper received interrupt signal. Initiating clean DB shutdown..."
         )
     finally:
+        data_fetcher.DataFetcher.stop_background_refresher()
         logger.info("Draining write queue and closing database...")
         write_queue.put(None)
         writer_thread.join(timeout=30)

@@ -47,7 +47,7 @@ jobs:
             -e PYTHONUNBUFFERED=1 \
             -e GITHUB_ACTIONS=true \
             -e DEFAULT_LOGGING_LEVEL=${{ env.DEFAULT_LOGGING_LEVEL }} \
-            -e COURSE_WORKERS=12 \
+            -e COURSE_WORKERS=16 \
             -e SUBJECT_WORKERS=4 \
             courses-api-scraper:latest
 

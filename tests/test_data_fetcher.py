@@ -63,16 +63,14 @@ class TestDataFetcher(unittest.TestCase):
         )
         mock_load.assert_called()
 
-    @patch("data_fetcher.fetch_proxies.main")
-    def test_proxy_replenishment_trigger(self, mock_fetch_main):
+    @patch.object(DataFetcher, "trigger_refill_if_low")
+    def test_proxy_replenishment_trigger(self, mock_trigger):
         DataFetcher._proxies = [f"1.1.1.{i}:80" for i in range(20)]
         fetcher = DataFetcher("?test=1", use_proxy=True)
 
-        with patch.object(fetcher, "load_proxies") as mock_load:
-            mock_load.return_value = [f"2.2.2.{i}:80" for i in range(50)]
-            fetcher.get_random_proxy()
-            mock_fetch_main.assert_called_once()
-            self.assertEqual(len(DataFetcher._proxies), 50)
+        fetcher.get_random_proxy()
+        mock_trigger.assert_called_once()
+        self.assertEqual(len(DataFetcher._proxies), 20)
 
     @patch.object(DataFetcher, "_execute_http_get")
     def test_timeout_and_retry_ceiling(self, mock_http_get):

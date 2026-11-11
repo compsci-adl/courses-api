@@ -47,6 +47,14 @@ class DataFetcher:
     _direct_blocked_until = 0.0
     _direct_blocked_permanently = False
 
+    # Non-blocking background proxy refresh attributes
+    _refill_thread = None
+    _refill_wake_event = threading.Event()
+    _refill_stop_event = threading.Event()
+    _refill_lock = threading.Lock()  # Single-flight refill guard
+    _last_refill_start_time = 0.0
+    _refill_started = False
+
     @classmethod
     def _should_attempt_direct(cls) -> bool:
         """Check if direct connection should be attempted."""
@@ -167,6 +175,136 @@ class DataFetcher:
         logger.debug("No working proxies file found among candidates.")
         return []
 
+    @classmethod
+    def start_background_refresher(cls) -> None:
+        """Start the single background daemon thread for non-blocking proxy refills."""
+        with cls._proxy_lock:
+            if cls._refill_started:
+                return
+            cls._refill_stop_event.clear()
+            cls._refill_wake_event.clear()
+            thread = threading.Thread(
+                target=cls._background_refill_worker,
+                name="ProxyPoolRefresher",
+                daemon=True,
+            )
+            thread.start()
+            cls._refill_thread = thread
+            cls._refill_started = True
+            logger.debug("Background proxy refresher thread started.")
+
+    @classmethod
+    def stop_background_refresher(cls) -> None:
+        """Signal the background refresher thread to stop."""
+        cls._refill_stop_event.set()
+        cls._refill_wake_event.set()
+        cls._refill_started = False
+
+    @classmethod
+    def trigger_refill_if_low(cls) -> None:
+        """Check pool size and trigger the background refresher if below watermark."""
+        if not cls._should_use_proxies():
+            return
+        low_watermark = int(os.environ.get("PROXY_LOW_WATERMARK", "100"))
+        with cls._proxy_lock:
+            pool_size = len(cls._proxies) if cls._proxies is not None else 0
+        if pool_size < low_watermark:
+            cls.start_background_refresher()
+            cls._refill_wake_event.set()
+
+    @classmethod
+    def _should_use_proxies(cls) -> bool:
+        return os.environ.get("SCRAPER_USE_PROXIES", "true").lower() in (
+            "true",
+            "1",
+            "yes",
+        )
+
+    @classmethod
+    def _background_refill_worker(cls) -> None:
+        """Worker loop for background proxy discovery."""
+        low_watermark = int(os.environ.get("PROXY_LOW_WATERMARK", "100"))
+        refill_target = int(os.environ.get("PROXY_REFILL_TARGET", "150"))
+
+        while not cls._refill_stop_event.is_set():
+            # Wait until woken up or check periodically
+            cls._refill_wake_event.wait(timeout=10.0)
+            cls._refill_wake_event.clear()
+
+            if cls._refill_stop_event.is_set():
+                break
+
+            with cls._proxy_lock:
+                current_count = len(cls._proxies) if cls._proxies is not None else 0
+
+            if current_count >= low_watermark:
+                continue
+
+            # Hard cooldown: minimum 30s between refill starts
+            now = time.time()
+            if now - cls._last_refill_start_time < 30.0:
+                time.sleep(1.0)
+                continue
+
+            # Single-flight guard
+            if not cls._refill_lock.acquire(blocking=False):
+                continue
+
+            try:
+                cls._last_refill_start_time = time.time()
+                needed = max(refill_target - current_count, 20)
+                logger.warning(
+                    f"Proxy pool low ({current_count} remaining). Refill started in background."
+                )
+
+                with cls._proxy_lock:
+                    exclude = set(cls._proxies or []) | set(
+                        k
+                        for k, v in cls._proxy_failures.items()
+                        if v >= cls.MAX_PROXY_FAILURES
+                    )
+
+                start_refill = time.time()
+                discovered = fetch_proxies.discover_working_proxies(
+                    target=needed,
+                    stop_event=cls._refill_stop_event,
+                    exclude=exclude,
+                )
+                duration = time.time() - start_refill
+
+                if not discovered:
+                    logger.warning(
+                        "Background proxy refill found 0 new proxies. Backing off 60s."
+                    )
+                    # Backoff so we don't spin endlessly on exhausted public lists
+                    cls._refill_stop_event.wait(timeout=60.0)
+                    continue
+
+                with cls._proxy_lock:
+                    if cls._proxies is None:
+                        cls._proxies = []
+                    existing_set = set(cls._proxies)
+                    added = 0
+                    for p in discovered:
+                        if p not in existing_set:
+                            cls._proxies.append(p)
+                            existing_set.add(p)
+                            added += 1
+                    total_pool = len(cls._proxies)
+                    proxies_to_save = list(cls._proxies)
+
+                fetch_proxies.save_working_proxies(
+                    proxies_to_save, filename=cls.PROXY_FILE
+                )
+                logger.info(
+                    f"Background proxy refill completed: added {added} proxies in {duration:.1f}s. "
+                    f"Pool now has {total_pool} proxies."
+                )
+            except Exception as e:
+                logger.error(f"Error in background proxy refill: {e}")
+            finally:
+                cls._refill_lock.release()
+
     def load_proxies(self) -> list:
         """Load proxies from file, checking candidate paths or environment."""
         return self._load_proxies()
@@ -176,23 +314,12 @@ class DataFetcher:
         if not self.use_proxy:
             return None
 
+        self.trigger_refill_if_low()
+
         with DataFetcher._proxy_lock:
             if not DataFetcher._proxies:
                 DataFetcher._proxies = self.load_proxies()
                 DataFetcher._proxy_failures.clear()
-
-            if DataFetcher._proxies is not None and 0 < len(DataFetcher._proxies) < 35:
-                logger.warning(
-                    f"Proxy pool critical ({len(DataFetcher._proxies)} remaining). Fetching fresh proxies..."
-                )
-                try:
-                    fetch_proxies.main()
-                    fresh_proxies = self.load_proxies()
-                    if fresh_proxies:
-                        DataFetcher._proxies = fresh_proxies
-                        DataFetcher._proxy_failures.clear()
-                except Exception as e:
-                    logger.error(f"Mid-run proxy replenishment failed: {e}")
 
             if not DataFetcher._proxies:
                 logger.warning("No proxies available. Proceeding without a proxy.")
@@ -219,6 +346,7 @@ class DataFetcher:
         proxy_str = proxy.get("http", "").replace("http://", "")
         if not proxy_str:
             return
+        should_trigger = False
         with DataFetcher._proxy_lock:
             count = DataFetcher._proxy_failures.get(proxy_str, 0) + 1
             DataFetcher._proxy_failures[proxy_str] = count
@@ -229,12 +357,16 @@ class DataFetcher:
                         logger.info(
                             f"Removed bad proxy: {proxy_str} (failures: {count}). Remaining: {len(DataFetcher._proxies)}"
                         )
+                        should_trigger = True
                     except ValueError:
                         pass
             else:
                 logger.debug(
                     f"Proxy {proxy_str} failure count: {count}/{self.MAX_PROXY_FAILURES}"
                 )
+
+        if should_trigger:
+            self.trigger_refill_if_low()
 
     def report_proxy_success(self, proxy: dict) -> None:
         """Reset failure count and promote working proxy to the top of the pool."""
