@@ -6,6 +6,12 @@ on:
   schedule:
     - cron: '30 0 * * *'
   workflow_dispatch:
+    inputs:
+      probe_hosts:
+        description: 'Run direct host probe and exit without scraping'
+        required: false
+        type: boolean
+        default: false
 
 env:
   AWS_REGION: ap-southeast-2
@@ -37,7 +43,15 @@ jobs:
       - name: Build Docker image
         run: docker build -f scraper.Dockerfile -t courses-api-scraper:latest .
 
+      - name: Probe direct host connectivity (optional)
+        if: ${{ inputs.probe_hosts == true }}
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}/scripts:/app/scripts \
+            courses-api-scraper:latest python scripts/probe_hosts.py -n 10
+
       - name: Run scraper
+        if: ${{ inputs.probe_hosts != true }}
         timeout-minutes: 180
         run: |
           mkdir -p logs

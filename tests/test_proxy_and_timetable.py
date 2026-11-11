@@ -20,6 +20,9 @@ class TestBackgroundRefresher(unittest.TestCase):
         DataFetcher._proxies = [f"1.1.1.{i}:80" for i in range(120)]
         DataFetcher._proxy_failures.clear()
         DataFetcher._last_refill_start_time = 0.0
+        # Wait briefly for previous thread to terminate if any
+        if DataFetcher._refill_thread and DataFetcher._refill_thread.is_alive():
+            DataFetcher._refill_thread.join(timeout=1.0)
 
     def tearDown(self):
         DataFetcher.stop_background_refresher()

@@ -1381,7 +1381,10 @@ class TestFastAPIRouting(unittest.TestCase):
         mock_fetcher.get.return_value = {}
         mock_fetcher.last_response = MagicMock(status_code=403)
 
-        with patch("data_fetcher.DataFetcher", return_value=mock_fetcher):
+        with (
+            patch("data_fetcher.DataFetcher", return_value=mock_fetcher),
+            patch("time.sleep"),
+        ):
             res = data_parser.get_course_codes("Accounting", 2027)
             self.assertIsInstance(res, data_parser.ParseResult)
             self.assertEqual(res.status, data_parser.FetchStatus.BLOCKED_OR_ERROR)

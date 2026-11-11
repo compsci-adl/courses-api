@@ -1,4 +1,6 @@
 import hashlib
+import os
+import random
 import re
 import time
 from dataclasses import dataclass
@@ -202,15 +204,26 @@ def get_course_codes(subject: str, year: int, timeout: float = 12.0) -> ParseRes
         f"&collection=uosa%7Esp-aem-prod&f.Study+type%7CstudyType=Course"
     )
 
+    max_attempts = int(os.environ.get("LISTING_MAX_ATTEMPTS", "12"))
     last_error = None
     courses = None
-    for attempt in range(3):
+
+    for attempt in range(1, max_attempts + 1):
+        t0 = time.time()
         courses = data_fetcher.DataFetcher(
             endpoint,
-            timeout=timeout + attempt * 2.0,
+            timeout=timeout,
         )
         try:
             data = courses.get()
+            elapsed = time.time() - t0
+            status = getattr(courses.last_response, "status_code", "ERR")
+            path_used = getattr(courses, "last_used_proxy", "unknown")
+            body_bytes = len(getattr(courses.last_response, "content", b"") or b"")
+            logger.debug(
+                f"Listing {subject} page=1: path={path_used}, attempt={attempt}, status={status}, bytes={body_bytes}, elapsed={elapsed:.2f}s"
+            )
+
             if (
                 courses.last_response is not None
                 and courses.last_response.status_code == 200
@@ -255,11 +268,24 @@ def get_course_codes(subject: str, year: int, timeout: float = 12.0) -> ParseRes
                 last_error = f"WAF block (HTTP {getattr(courses.last_response, 'status_code', 'unknown')})"
         except Exception as e:
             last_error = str(e)
-            logger.debug(
-                f"Attempt {attempt + 1} for course codes {subject} failed: {e}"
-            )
+            logger.debug(f"Attempt {attempt} for course codes {subject} failed: {e}")
 
-        time.sleep(0.5 + attempt * 0.5)
+        # Exponential backoff with jitter (base 1.5s, factor 1.7, cap 30s) if more attempts remain
+        if attempt < max_attempts:
+            backoff = min(1.5 * (1.7 ** (attempt - 1)), 30.0) + random.uniform(0.1, 0.5)
+            # Check Retry-After if 429
+            if (
+                courses
+                and courses.last_response
+                and courses.last_response.status_code == 429
+            ):
+                retry_hdr = courses.last_response.headers.get("Retry-After")
+                if retry_hdr:
+                    try:
+                        backoff = max(backoff, float(retry_hdr))
+                    except (ValueError, TypeError):
+                        pass
+            time.sleep(backoff)
 
     status = (
         courses.last_response.status_code
@@ -267,7 +293,7 @@ def get_course_codes(subject: str, year: int, timeout: float = 12.0) -> ParseRes
         else "NO_RESPONSE"
     )
     logger.warning(
-        f"Error fetching course codes for {subject} after 3 attempts: HTTP {status}"
+        f"Error fetching course codes for {subject} after {max_attempts} attempts: HTTP {status}"
     )
     return ParseResult(
         status=FetchStatus.BLOCKED_OR_ERROR,

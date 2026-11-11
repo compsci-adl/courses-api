@@ -44,6 +44,7 @@ from db_service import (
     get_previous_years_course_data,
     reset_legacy_database,
 )
+from host_strategy import host_strategy
 from log import logger
 from models import (
     Assessment,
@@ -1244,6 +1245,29 @@ def scrape_single_year(
                     f"Existing courses with classes that were NOT harvested this run: {courses_with_classes_unharvested[:20]}"
                     + (" ..." if len(courses_with_classes_unharvested) > 20 else "")
                 )
+
+        # Host Connection Strategy and Listing Audit Summary
+        host_metrics = host_strategy.get_all_metrics()
+        if host_metrics:
+            summary_lines = ["=== Host Connection Strategy & Listing Audit Summary ==="]
+            for h_name, m in host_metrics.items():
+                total_direct = m.direct_attempts
+                direct_sr = (
+                    (m.direct_successes / total_direct * 100)
+                    if total_direct > 0
+                    else 0.0
+                )
+                total_proxy = m.proxy_attempts
+                proxy_sr = (
+                    (m.proxy_successes / total_proxy * 100) if total_proxy > 0 else 0.0
+                )
+                summary_lines.append(
+                    f"  Host: {h_name}\n"
+                    f"    Direct: {m.direct_successes}/{total_direct} ({direct_sr:.1f}% success), {m.direct_failures} failures\n"
+                    f"    Proxy:  {m.proxy_successes}/{total_proxy} ({proxy_sr:.1f}% success), {m.proxy_failures} failures\n"
+                    f"    Breaker Opens: {m.breaker_open_count}, Open Duration: {m.time_spent_breaker_open:.1f}s"
+                )
+            logger.info("\n".join(summary_lines))
 
     logger.info(f"{year} scraping completed directly to SQLite database.")
 

@@ -12,6 +12,7 @@ from curl_cffi import requests
 from curl_cffi.requests import AsyncSession
 
 import fetch_proxies
+from host_strategy import Strategy, host_strategy
 from log import logger
 
 _tls = threading.local()
@@ -480,7 +481,7 @@ class DataFetcher:
         return sess.get(url, headers=headers, timeout=timeout)
 
     def get(self, max_retries: int = 3) -> dict:
-        """Fetch data from the API, trying direct connection first with smart proxy fallback."""
+        """Fetch data from the API, selecting direct vs proxy based on per-host strategy and circuit breaker."""
         logger.debug("Fetching %s...", self._sanitise_for_log(self.endpoint))
         if self.data is not None:
             return self.data
@@ -490,143 +491,221 @@ class DataFetcher:
             return {}
 
         headers = self._get_headers()
-
-        # Direct Connection First
+        host = host_strategy.get_host(self.url)
+        strategy = host_strategy.get_strategy(host)
         is_ci = bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))
-        base_timeout = (3.0, 5.0) if is_ci else (3.0, max(self.timeout, 5.0))
 
-        if not DataFetcher.is_direct_blocked():
-            sem_ctx = (
-                DataFetcher._funnelback_semaphore
-                if not self.use_class_url
-                else threading.Lock()
-            )
-            with sem_ctx:
-                try:
-                    logger.debug(
-                        "Attempting direct connection for %s...",
-                        self._sanitise_for_log(self.endpoint),
-                    )
-                    direct_resp = self._execute_http_get(
-                        self.url, headers=headers, timeout=base_timeout
-                    )
-                    self.last_response = direct_resp
-                    self.last_used_proxy = "direct"
-                    if direct_resp.status_code == 200:
-                        parsed = self._process_response(direct_resp)
-                        if parsed is not None:
-                            return parsed
-                    elif direct_resp.status_code == 404:
-                        logger.warning("HTTP 404 - Not Found: %s", self.url)
-                        return {}
-                    elif direct_resp.status_code in (403, 429):
-                        DataFetcher._record_direct_failure(direct_resp.status_code)
-                except Exception as e:
-                    logger.debug(
-                        "Direct connection attempt failed (%s). Falling back to proxies.",
-                        self._sanitise_for_log(e),
-                    )
+        # Timeouts: connect 5s, read 20s for direct search/listing; normal timeouts otherwise
+        if not self.use_class_url:
+            direct_timeout = (5.0, 20.0)
+        else:
+            direct_timeout = (3.0, 5.0) if is_ci else (3.0, max(self.timeout, 5.0))
 
-        # If proxy is disabled, return without proxy fallback
-        if not self.use_proxy:
-            return {}
-
-        # Smart Proxy Fallback with fail-fast timeout and capped retries
-        retries = 0
         proxy_timeout = (3.0, 5.0)
-        max_retries = min(max_retries, 3)
+        capped_retries = min(max_retries, 3)
 
-        while retries < max_retries:
-            # Re-attempt direct connection after 2 proxy failures only if not blocked by WAF
-            if retries == 2 and not DataFetcher.is_direct_blocked():
-                try:
-                    direct_resp = self._execute_http_get(
-                        self.url, headers=headers, timeout=base_timeout
-                    )
-                    self.last_response = direct_resp
-                    self.last_used_proxy = "direct"
-                    if direct_resp.status_code == 200:
-                        parsed = self._process_response(direct_resp)
-                        if parsed is not None:
-                            return parsed
-                except Exception:
-                    pass
+        def _try_direct_request() -> dict | None:
+            """Execute a single direct attempt if circuit breaker allows it."""
+            breaker = host_strategy.get_breaker(host)
+            if not breaker.is_direct_allowed():
+                return None
 
-            proxy = self.get_random_proxy()
-            if not proxy:
-                retries += 1
-                time.sleep(0.3)
-                continue
-
+            sem = None
             try:
-                logger.debug("Using proxy: %s", self._sanitise_for_log(proxy))
-                response = self._execute_http_get(
-                    self.url, headers=headers, timeout=proxy_timeout, proxy=proxy
-                )
-                self.last_response = response
-                self.last_used_proxy = (
-                    proxy.get("http") if isinstance(proxy, dict) else str(proxy)
-                )
-
-                if response.status_code == 429:
-                    logger.warning("HTTP 429 - Too Many Requests via proxy.")
-                    self.report_proxy_failure(proxy, fatal=True)
-                    retries += 1
-                    continue
-
-                if response.status_code == 404:
-                    self.report_proxy_success(proxy)
-                    logger.warning("HTTP 404 - Not Found: %s", self.url)
-                    return {}
-
-                if response.status_code == 403:
-                    logger.warning("HTTP 403 - Forbidden for proxy: %s", proxy)
-                    self.report_proxy_failure(proxy, fatal=True)
-                    retries += 1
-                    continue
-
-                if response.status_code != 200:
-                    logger.error("HTTP %s via proxy", response.status_code)
-                    self.report_proxy_failure(proxy, fatal=True)
-                    retries += 1
-                    continue
-
-                # Parse proxy response to ensure it actually returned valid content
-                parsed = self._process_response(response)
-                if parsed is not None:
-                    self.report_proxy_success(proxy)
-                    return parsed
-                else:
-                    self.report_proxy_failure(proxy, fatal=True)
-                retries += 1
-
-            except (
-                requests.exceptions.Timeout,
-                requests.exceptions.ProxyError,
-                requests.exceptions.RequestException,
-            ) as e:
+                sem = host_strategy.acquire_direct_slot(host)
                 logger.debug(
-                    "Proxy error/timeout (%s): %s",
-                    self._sanitise_for_log(e),
-                    self._sanitise_for_log(proxy),
+                    "Attempting direct connection for %s...",
+                    self._sanitise_for_log(self.endpoint),
                 )
-                self.report_proxy_failure(proxy, fatal=True)
-                retries += 1
+                direct_resp = self._execute_http_get(
+                    self.url, headers=headers, timeout=direct_timeout
+                )
+                self.last_response = direct_resp
+                self.last_used_proxy = "direct"
+
+                status_code = direct_resp.status_code
+                if status_code == 200:
+                    parsed = self._process_response(direct_resp)
+                    if parsed is not None:
+                        host_strategy.record_direct_outcome(host, success=True)
+                        return parsed
+                    else:
+                        logger.debug(
+                            "Direct response unparseable/invalid for %s", self.endpoint
+                        )
+                        host_strategy.record_direct_outcome(
+                            host, success=False, status_code=200
+                        )
+                        return None
+                elif status_code == 404:
+                    logger.warning("HTTP 404 - Not Found: %s", self.url)
+                    host_strategy.record_direct_outcome(host, success=True)
+                    return {}
+                elif status_code == 429:
+                    retry_after_hdr = direct_resp.headers.get("Retry-After")
+                    retry_after_val = None
+                    if retry_after_hdr:
+                        try:
+                            retry_after_val = float(retry_after_hdr)
+                        except (ValueError, TypeError):
+                            pass
+                    DataFetcher._record_direct_failure(429)
+                    host_strategy.record_direct_outcome(
+                        host,
+                        success=False,
+                        status_code=429,
+                        retry_after=retry_after_val,
+                    )
+                    return None
+                elif status_code == 403:
+                    DataFetcher._record_direct_failure(403)
+                    host_strategy.record_direct_outcome(
+                        host, success=False, status_code=403
+                    )
+                    return None
+                else:
+                    host_strategy.record_direct_outcome(
+                        host, success=False, status_code=status_code
+                    )
+                    return None
             except Exception as e:
                 logger.debug(
-                    "Unexpected error on proxy (%s): %s",
+                    "Direct connection attempt failed (%s): %s",
                     self._sanitise_for_log(e),
-                    self._sanitise_for_log(proxy),
+                    self.endpoint,
                 )
-                self.report_proxy_failure(proxy, fatal=True)
-                retries += 1
+                host_strategy.record_direct_outcome(host, success=False)
+                return None
+            finally:
+                if sem:
+                    host_strategy.release_direct_slot(host)
 
-        logger.error(
-            "Failed to fetch data from %s after %s attempts.",
-            self.url,
-            max_retries,
-        )
-        return {}
+        def _try_proxy_loop(attempts_limit: int) -> dict | None:
+            """Execute proxy attempts up to attempts_limit."""
+            if not self.use_proxy:
+                return None
+
+            retries = 0
+            while retries < attempts_limit:
+                proxy = self.get_random_proxy()
+                if not proxy:
+                    retries += 1
+                    time.sleep(0.3)
+                    continue
+
+                try:
+                    logger.debug("Using proxy: %s", self._sanitise_for_log(proxy))
+                    response = self._execute_http_get(
+                        self.url, headers=headers, timeout=proxy_timeout, proxy=proxy
+                    )
+                    self.last_response = response
+                    self.last_used_proxy = (
+                        proxy.get("http") if isinstance(proxy, dict) else str(proxy)
+                    )
+
+                    if response.status_code == 429:
+                        logger.warning("HTTP 429 - Too Many Requests via proxy.")
+                        self.report_proxy_failure(proxy, fatal=True)
+                        host_strategy.record_proxy_outcome(host, success=False)
+                        retries += 1
+                        continue
+
+                    if response.status_code == 404:
+                        self.report_proxy_success(proxy)
+                        host_strategy.record_proxy_outcome(host, success=True)
+                        logger.warning("HTTP 404 - Not Found: %s", self.url)
+                        return {}
+
+                    if response.status_code == 403:
+                        logger.warning("HTTP 403 - Forbidden for proxy: %s", proxy)
+                        self.report_proxy_failure(proxy, fatal=True)
+                        host_strategy.record_proxy_outcome(host, success=False)
+                        retries += 1
+                        continue
+
+                    if response.status_code != 200:
+                        logger.error("HTTP %s via proxy", response.status_code)
+                        self.report_proxy_failure(proxy, fatal=True)
+                        host_strategy.record_proxy_outcome(host, success=False)
+                        retries += 1
+                        continue
+
+                    # Parse proxy response to ensure it actually returned valid content
+                    parsed = self._process_response(response)
+                    if parsed is not None:
+                        self.report_proxy_success(proxy)
+                        host_strategy.record_proxy_outcome(host, success=True)
+                        return parsed
+                    else:
+                        self.report_proxy_failure(proxy, fatal=True)
+                        host_strategy.record_proxy_outcome(host, success=False)
+                    retries += 1
+
+                except (
+                    requests.exceptions.Timeout,
+                    requests.exceptions.ProxyError,
+                    requests.exceptions.RequestException,
+                ) as e:
+                    logger.debug(
+                        "Proxy error/timeout (%s): %s",
+                        self._sanitise_for_log(e),
+                        self._sanitise_for_log(proxy),
+                    )
+                    self.report_proxy_failure(proxy, fatal=True)
+                    host_strategy.record_proxy_outcome(host, success=False)
+                    retries += 1
+                except Exception as e:
+                    logger.debug(
+                        "Unexpected error on proxy (%s): %s",
+                        self._sanitise_for_log(e),
+                        self._sanitise_for_log(proxy),
+                    )
+                    self.report_proxy_failure(proxy, fatal=True)
+                    host_strategy.record_proxy_outcome(host, success=False)
+                    retries += 1
+
+            return None
+
+        # Execute connection strategy
+        if strategy == Strategy.DIRECT_ONLY:
+            res = _try_direct_request()
+            return res if res is not None else {}
+
+        elif strategy == Strategy.PROXY_ONLY:
+            res = _try_proxy_loop(capped_retries)
+            return res if res is not None else {}
+
+        elif strategy == Strategy.DIRECT_FIRST:
+            # Attempt 1: Direct
+            res = _try_direct_request()
+            if res is not None:
+                return res
+
+            # Attempt 2: Direct after short backoff to tolerate transient network blip
+            time.sleep(0.3)
+            res = _try_direct_request()
+            if res is not None:
+                return res
+
+            # Fall back to proxies
+            res = _try_proxy_loop(capped_retries)
+            if res is not None:
+                return res
+
+            return {}
+
+        else:  # Strategy.PROXY_FIRST (default for adelaide.edu.au course pages)
+            # Legacy behaviour: try direct first ONLY IF non-CI and direct is not blocked
+            if not is_ci and not DataFetcher.is_direct_blocked():
+                res = _try_direct_request()
+                if res is not None:
+                    return res
+
+            res = _try_proxy_loop(capped_retries)
+            if res is not None:
+                return res
+
+            return {}
 
     async def async_get(
         self, session: AsyncSession | None = None, max_retries: int = 3
