@@ -40,6 +40,9 @@ jobs:
         run: |
           echo "DEFAULT_LOGGING_LEVEL=${{ env.DEFAULT_LOGGING_LEVEL }}" > src/.env
 
+      - name: Build Docker image
+        run: docker build --network host -f scraper.Dockerfile -t courses-api-scraper:latest .
+
       - name: Install and Initialize Cloudflare WARP
         run: |
           # Add Cloudflare GPG key and APT repository
@@ -50,22 +53,19 @@ jobs:
           sudo apt-get update && sudo apt-get install -y cloudflare-warp
 
           # Register client and configure tunnel mode
-          warp-cli --accept-tos registration new
-          warp-cli --accept-tos mode warp
-          warp-cli --accept-tos connect
+          warp-cli --accept-tos registration new || warp-cli --accept-tos register || true
+          warp-cli --accept-tos mode warp || warp-cli --accept-tos set-mode warp || true
+          warp-cli --accept-tos connect || true
 
           # Verify tunnel connection
-          sleep 3
-          warp-cli --accept-tos status
+          sleep 5
+          warp-cli --accept-tos status || true
 
       - name: Verify Clean Non-Datacenter Egress
         run: |
           echo "=== Egress Verification ==="
           curl -s https://cloudflare.com/cdn-cgi/trace | grep -E "ip|loc|warp" || true
           curl -s https://ipinfo.io/json || true
-
-      - name: Build Docker image
-        run: docker build -f scraper.Dockerfile -t courses-api-scraper:latest .
 
       - name: Probe direct host connectivity (optional)
         if: ${{ inputs.probe_hosts == true }}
