@@ -107,10 +107,10 @@ jobs:
       - name: Validate Database Size and Integrity
         run: |
           DB_SIZE=$(stat -c%s "src/local.sqlite3" 2>/dev/null || stat -f%z "src/local.sqlite3")
-          LIMIT=$((30 * 1024 * 1024))
+          LIMIT=$((50 * 1024 * 1024))
           echo "Database size: $DB_SIZE bytes (Required limit: $LIMIT bytes)"
           if [ "$DB_SIZE" -lt "$LIMIT" ]; then
-            echo "Error: Database file size is less than 30MB. Scraping might have failed or been blocked."
+            echo "Error: Database file size is less than 50MB. Scraping might have failed or been blocked."
             exit 1
           fi
           COURSE_COUNT=$(python3 -c "import sqlite3; conn = sqlite3.connect('src/local.sqlite3'); print(conn.execute('SELECT count(*) FROM courses').fetchone()[0])" 2>/dev/null || echo "0")
