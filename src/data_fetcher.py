@@ -21,7 +21,7 @@ _tls = threading.local()
 def _get_tls_session() -> requests.Session:
     """Get or create a thread-local persistent Session for connection pooling."""
     if not hasattr(_tls, "session") or _tls.session is None:
-        _tls.session = requests.Session(impersonate="chrome146")
+        _tls.session = requests.Session(impersonate="chrome124")
     return _tls.session
 
 
@@ -154,7 +154,7 @@ class DataFetcher:
         self.use_class_url = use_class_url
         self.timeout = timeout
         if full_url:
-            self.url = full_url
+            self.url = full_url.replace("|", "%7C")
         elif self.use_class_url:
             clean_endpoint = str(self.endpoint).strip()
             if clean_endpoint.startswith("/"):
@@ -168,9 +168,9 @@ class DataFetcher:
                     if self.year
                     else f"/study/courses/{slug}/"
                 )
-            self.url = self.BASE_INFO_URL.rstrip("/") + path
+            self.url = (self.BASE_INFO_URL.rstrip("/") + path).replace("|", "%7C")
         else:
-            self.url = self.BASE_URL + self.endpoint
+            self.url = (self.BASE_URL + self.endpoint).replace("|", "%7C")
         self.data = None
         self.last_response = None
         self.last_used_proxy = None
@@ -484,15 +484,22 @@ class DataFetcher:
 
     def _get_headers(self) -> dict:
         """Flexible headers depending on target endpoint (html page vs json api)."""
-        if self.use_class_url:
+        is_search_api = (
+            not self.use_class_url or "squiz.cloud" in self.url or "search" in self.url
+        )
+
+        if not is_search_api:
             return {
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                ),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
                 "Accept-Language": "en-US,en;q=0.9",
-                "Referer": "https://www.adelaide.edu.au/",
-                "Cache-Control": "no-cache",
-                "Pragma": "no-cache",
-                "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="146", "Google Chrome";v="146"',
+                "Accept-Encoding": "gzip, deflate, br",
+                "Referer": "https://adelaide.edu.au/",
+                "Origin": "https://adelaide.edu.au",
+                "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
                 "Sec-Ch-Ua-Mobile": "?0",
                 "Sec-Ch-Ua-Platform": '"macOS"',
                 "Sec-Fetch-Dest": "document",
@@ -503,15 +510,17 @@ class DataFetcher:
             }
         else:
             return {
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                ),
                 "Accept": "application/json, text/javascript, */*; q=0.01",
                 "Accept-Language": "en-US,en;q=0.9",
-                "Referer": "https://www.adelaide.edu.au/",
-                "Origin": "https://www.adelaide.edu.au",
-                "Cache-Control": "no-cache",
-                "Pragma": "no-cache",
+                "Accept-Encoding": "gzip, deflate, br",
+                "Referer": "https://adelaide.edu.au/search/",
+                "Origin": "https://adelaide.edu.au",
                 "X-Requested-With": "XMLHttpRequest",
-                "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="146", "Google Chrome";v="146"',
+                "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
                 "Sec-Ch-Ua-Mobile": "?0",
                 "Sec-Ch-Ua-Platform": '"macOS"',
                 "Sec-Fetch-Dest": "empty",
@@ -536,13 +545,13 @@ class DataFetcher:
                     proxies=proxy,
                     headers=headers,
                     timeout=timeout,
-                    impersonate="chrome146",
+                    impersonate="chrome124",
                 )
             return requests.get(
                 url,
                 headers=headers,
                 timeout=timeout,
-                impersonate="chrome146",
+                impersonate="chrome124",
             )
         sess = _get_tls_session()
         if proxy:
@@ -588,8 +597,9 @@ class DataFetcher:
                             else {}
                         )
                     if resp.status_code in (403, 429):
+                        snippet = resp.text[:200].replace("\n", " ").strip()
                         logger.warning(
-                            f"WARP SOCKS5 returned HTTP {resp.status_code} on {self.url}. "
+                            f"WARP SOCKS5 returned HTTP {resp.status_code} on {self.url} (Body: {snippet}). "
                             f"Retrying ({attempt + 1}/{max_retries})..."
                         )
                         time.sleep(1.0 + attempt * 0.5)
@@ -890,7 +900,7 @@ class DataFetcher:
                             proxies=warp_proxies,
                         )
                     else:
-                        async with AsyncSession(impersonate="chrome146") as local_sess:
+                        async with AsyncSession(impersonate="chrome124") as local_sess:
                             resp = await local_sess.get(
                                 self.url,
                                 headers=headers,

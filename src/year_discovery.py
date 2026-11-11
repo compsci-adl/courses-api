@@ -38,8 +38,8 @@ class YearDiscoveryService:
         """
         search_url = (
             "https://uosa-search.funnelback.squiz.cloud/s/search.html"
-            "?f.Tabs|type=Degrees+%26+Courses&form=json&num_ranks=1&profile=site-search"
-            "&query=&collection=uosa~sp-aem-prod&f.Study+type|studyType=Course&start_rank=1"
+            "?f.Tabs%7Ctype=Degrees+%26+Courses&form=json&num_ranks=1&profile=site-search"
+            "&query=&collection=uosa~sp-aem-prod&f.Study+type%7CstudyType=Course&start_rank=1"
         )
         should_close = False
         if client is None:

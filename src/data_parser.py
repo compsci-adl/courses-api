@@ -120,8 +120,8 @@ def get_subjects(year: int, timeout: float = 3.0) -> dict[str, list[dict[str, st
     Tries year-filtered query first, then generic study-area facet query, with proxy retries.
     """
     query_endpoints = [
-        f"?f.Tabs|type=Degrees+%26+Courses&form=json&num_ranks=10&profile=site-search&query=&f.Year|year={year}&collection=uosa~sp-aem-prod&f.Study+type|studyType=Course&start_rank=1",
-        "?f.Tabs|type=Degrees+%26+Courses&form=json&num_ranks=10&profile=site-search&query=&collection=uosa~sp-aem-prod&f.Study+type|studyType=Course&start_rank=1",
+        f"?f.Tabs%7Ctype=Degrees+%26+Courses&form=json&num_ranks=10&profile=site-search&query=&f.Year%7Cyear={year}&collection=uosa~sp-aem-prod&f.Study+type%7CstudyType=Course&start_rank=1",
+        "?f.Tabs%7Ctype=Degrees+%26+Courses&form=json&num_ranks=10&profile=site-search&query=&collection=uosa~sp-aem-prod&f.Study+type%7CstudyType=Course&start_rank=1",
     ]
 
     fetcher = None
