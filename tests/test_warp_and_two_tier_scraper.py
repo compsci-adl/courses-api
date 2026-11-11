@@ -43,7 +43,16 @@ class TestWarpAndTwoTierScraper(unittest.TestCase):
                     self.assertIsNotNone(res)
                     self.assertEqual(res.get("h1"), "COMP 1102")
                     mock_get.assert_called_once()
-                    # Must NOT use or rotate through proxies when WARP is active
+                    args, kwargs = mock_get.call_args
+                    # When WARP is active, requests route via SOCKS5 proxy
+                    self.assertEqual(
+                        kwargs.get("proxy"),
+                        {
+                            "http": "socks5h://127.0.0.1:40000",
+                            "https": "socks5h://127.0.0.1:40000",
+                        },
+                    )
+                    # Must NOT use or rotate through public proxies when WARP is active
                     mock_proxy.assert_not_called()
 
     @patch("data_parser.get_course_details")

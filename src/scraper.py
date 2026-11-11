@@ -1268,15 +1268,22 @@ def scrape_single_year(
 
 def ensure_proxies_ready(min_proxies: int = 20):
     """Ensure that a valid working_proxies file exists if proxy usage is explicitly enabled."""
+    if (
+        os.getenv("USE_WARP", "").lower() in ("true", "1", "yes")
+        or data_fetcher.DataFetcher._is_warp_active()
+    ):
+        logger.info(
+            "Cloudflare WARP proxy mode active (127.0.0.1:40000). Bypassing public proxy fetching."
+        )
+        return
+
     scraper_use_proxies = os.environ.get("SCRAPER_USE_PROXIES", "false").lower() in (
         "true",
         "1",
         "yes",
     )
-    if not scraper_use_proxies or data_fetcher.DataFetcher._is_warp_active():
-        logger.debug(
-            "Bypassing proxy pool preparation (using Cloudflare WARP or direct egress)."
-        )
+    if not scraper_use_proxies:
+        logger.debug("Bypassing proxy pool preparation (proxy usage disabled).")
         return
 
     candidate_files = [

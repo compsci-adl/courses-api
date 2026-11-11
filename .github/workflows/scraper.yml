@@ -43,7 +43,7 @@ jobs:
       - name: Build Docker image
         run: docker build --network host -f scraper.Dockerfile -t courses-api-scraper:latest .
 
-      - name: Install and Initialize Cloudflare WARP
+      - name: Install and Initialize Cloudflare WARP (Proxy Mode)
         run: |
           # Add Cloudflare GPG key and APT repository
           curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
@@ -52,20 +52,20 @@ jobs:
           # Install warp-cli
           sudo apt-get update && sudo apt-get install -y cloudflare-warp
 
-          # Register client and configure tunnel mode
+          # Register client and configure SOCKS5 local proxy mode
           warp-cli --accept-tos registration new || warp-cli --accept-tos register || true
-          warp-cli --accept-tos mode warp || warp-cli --accept-tos set-mode warp || true
+          warp-cli --accept-tos mode proxy || warp-cli --accept-tos set-mode proxy || true
+          warp-cli --accept-tos proxy port 40000 || warp-cli --accept-tos set-proxy-port 40000 || true
           warp-cli --accept-tos connect || true
 
-          # Verify tunnel connection
-          sleep 5
+          # Allow daemon to establish tunnel
+          sleep 4
           warp-cli --accept-tos status || true
 
-      - name: Verify Clean Non-Datacenter Egress
+      - name: Verify WARP SOCKS5 Proxy Egress
         run: |
-          echo "=== Egress Verification ==="
-          curl -s https://cloudflare.com/cdn-cgi/trace | grep -E "ip|loc|warp" || true
-          curl -s https://ipinfo.io/json || true
+          echo "Testing WARP SOCKS5 egress on 127.0.0.1:40000..."
+          curl -fsS --socks5-hostname 127.0.0.1:40000 https://cloudflare.com/cdn-cgi/trace | grep -E "ip|loc|warp" || true
 
       - name: Probe direct host connectivity (optional)
         if: ${{ inputs.probe_hosts == true }}
@@ -87,6 +87,7 @@ jobs:
             -e PYTHONUNBUFFERED=1 \
             -e GITHUB_ACTIONS=true \
             -e USE_WARP=true \
+            -e WARP_SOCKS_PORT=40000 \
             -e DEFAULT_LOGGING_LEVEL=${{ env.DEFAULT_LOGGING_LEVEL }} \
             -e COURSE_WORKERS=24 \
             -e SUBJECT_WORKERS=6 \

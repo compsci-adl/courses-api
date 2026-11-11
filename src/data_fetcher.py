@@ -40,6 +40,11 @@ class DataFetcher:
     PROXY_FILE = "src/working_proxies.txt"
 
     _WARP_ACTIVE = os.getenv("USE_WARP", "").lower() in ("true", "1", "yes")
+    _WARP_PORT = os.getenv("WARP_SOCKS_PORT", "40000")
+    _WARP_PROXIES = {
+        "http": f"socks5h://127.0.0.1:{_WARP_PORT}",
+        "https": f"socks5h://127.0.0.1:{_WARP_PORT}",
+    }
 
     DEFAULT_TIMEOUT = 3.0
     MAX_RETRIES = 3
@@ -124,6 +129,14 @@ class DataFetcher:
             "1",
             "yes",
         )
+
+    @classmethod
+    def _get_warp_proxies(cls) -> dict:
+        port = os.getenv("WARP_SOCKS_PORT", cls._WARP_PORT)
+        return {
+            "http": f"socks5h://127.0.0.1:{port}",
+            "https": f"socks5h://127.0.0.1:{port}",
+        }
 
     def __init__(
         self,
@@ -548,8 +561,47 @@ class DataFetcher:
 
         headers = self._get_headers()
 
-        # If WARP is active or proxy usage is disabled, route directly through the system tunnel
-        if self._is_warp_active() or not self.use_proxy:
+        # Route through Cloudflare WARP SOCKS5 proxy if active
+        if self._is_warp_active():
+            warp_proxies = self._get_warp_proxies()
+            for attempt in range(max_retries):
+                try:
+                    resp = self._execute_http_get(
+                        self.url,
+                        headers=headers,
+                        timeout=(3.0, self.timeout),
+                        proxy=warp_proxies,
+                    )
+                    self.last_response = resp
+                    self.last_used_proxy = "warp-socks5"
+                    if resp.status_code == 200:
+                        parsed = self._process_response(resp)
+                        return (
+                            parsed
+                            if parsed is not None
+                            else {"html": resp.text, "status_code": 200}
+                        )
+                    if resp.status_code == 404:
+                        return (
+                            {"html": "", "status_code": 404, "classes": []}
+                            if self.use_class_url
+                            else {}
+                        )
+                    if resp.status_code in (403, 429):
+                        logger.warning(
+                            f"WARP SOCKS5 returned HTTP {resp.status_code} on {self.url}. "
+                            f"Retrying ({attempt + 1}/{max_retries})..."
+                        )
+                        time.sleep(1.0 + attempt * 0.5)
+                except Exception as e:
+                    logger.debug(
+                        f"WARP SOCKS5 request error on {self.url} (attempt {attempt + 1}/{max_retries}): {e}"
+                    )
+                    time.sleep(0.5)
+            return None if self.use_class_url else {}
+
+        # If proxy usage is disabled, route direct
+        if not self.use_proxy:
             for attempt in range(max_retries):
                 try:
                     resp = self._execute_http_get(
@@ -558,9 +610,7 @@ class DataFetcher:
                         timeout=(3.0, self.timeout),
                     )
                     self.last_response = resp
-                    self.last_used_proxy = (
-                        "warp" if self._is_warp_active() else "direct"
-                    )
+                    self.last_used_proxy = "direct"
                     if resp.status_code == 200:
                         parsed = self._process_response(resp)
                         return (
@@ -827,6 +877,37 @@ class DataFetcher:
         headers = self._get_headers()
         is_ci = bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))
         base_timeout = (3.0, 5.0) if is_ci else (3.0, max(self.timeout, 5.0))
+
+        if self._is_warp_active():
+            warp_proxies = self._get_warp_proxies()
+            for _ in range(min(max_retries, 3)):
+                try:
+                    if session is not None:
+                        resp = await session.get(
+                            self.url,
+                            headers=headers,
+                            timeout=base_timeout,
+                            proxies=warp_proxies,
+                        )
+                    else:
+                        async with AsyncSession(impersonate="chrome146") as local_sess:
+                            resp = await local_sess.get(
+                                self.url,
+                                headers=headers,
+                                timeout=base_timeout,
+                                proxies=warp_proxies,
+                            )
+                    self.last_response = resp
+                    self.last_used_proxy = "warp-socks5"
+                    if resp.status_code == 200:
+                        parsed = self._process_response(resp)
+                        if parsed is not None:
+                            return parsed
+                    elif resp.status_code == 404:
+                        return {}
+                except Exception as e:
+                    logger.debug(f"WARP SOCKS5 async connection attempt failed: {e}")
+            return {}
 
         if not DataFetcher.is_direct_blocked():
             try:
