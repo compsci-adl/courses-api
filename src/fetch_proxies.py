@@ -1,4 +1,5 @@
 import os
+import random
 import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -21,7 +22,7 @@ def fetch_proxies(url):
 def test_proxy(
     proxy,
     test_url="https://adelaide.edu.au/study/courses/",
-    timeout=2.0,
+    timeout=2.5,
     retries=0,  # Fast single-shot candidate check without retrying dead proxies
 ):
     """Test if the given proxy is working by making a request."""
@@ -82,6 +83,9 @@ def discover_working_proxies(
     if stop_event and stop_event.is_set():
         return []
 
+    if os.getenv("PROXY_URL"):
+        return []
+
     proxy_urls = [
         "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/refs/heads/master/http.txt",
         "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
@@ -105,15 +109,20 @@ def discover_working_proxies(
             seen.add(p_clean)
             deduped.append(p_clean)
 
+    # Shuffle candidates to sample randomly across providers rather than getting stuck in dead IP blocks
+    random.shuffle(deduped)
+
     if max_candidates is not None and max_candidates > 0:
         deduped = deduped[:max_candidates]
 
     working_proxies = []
-    test_workers = int(os.environ.get("PROXY_TEST_WORKERS", "40"))
+    test_workers = int(os.environ.get("PROXY_TEST_WORKERS", "100"))
     executor = ThreadPoolExecutor(max_workers=test_workers)
     try:
+        max_to_submit = min(len(deduped), max(target * 15, 500))
         future_to_proxy = {
-            executor.submit(test_proxy, proxy): proxy for proxy in deduped
+            executor.submit(test_proxy, proxy): proxy
+            for proxy in deduped[:max_to_submit]
         }
         for future in as_completed(future_to_proxy):
             if stop_event and stop_event.is_set():
@@ -133,6 +142,10 @@ def discover_working_proxies(
 
 
 def main(target_working: int = 500):
+    if os.getenv("PROXY_URL"):
+        print("PROXY_URL configured; skipping public proxy fetching.")
+        return
+
     working_proxies = discover_working_proxies(
         target=target_working,
         show_progress=True,

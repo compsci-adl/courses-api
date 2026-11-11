@@ -194,8 +194,63 @@ def _is_waf_blocked(response_obj, data_dict: dict | None = None) -> bool:
     return False
 
 
+def parse_funnelback_course_result(item: dict) -> dict:
+    """Parse structured course metadata directly from a Funnelback search result item."""
+    meta = dict(item.get("listMetadata", {}))
+    meta.update(item.get("metaData", {}))
+    raw_meta = item.get("metaData", meta)
+
+    raw_code = meta.get("courseCode") or meta.get("code") or item.get("title", "")
+    if isinstance(raw_code, (list, tuple)) and raw_code:
+        raw_code = raw_code[0]
+    code = str(raw_code).strip()
+
+    title = item.get("title") or meta.get("title", "")
+    if isinstance(title, (list, tuple)) and title:
+        title = title[0]
+    title = str(title).strip()
+
+    raw_terms = meta.get("terms") or meta.get("term", "")
+    if isinstance(raw_terms, list):
+        terms = [t.strip() for t in raw_terms if t and str(t).strip()]
+    elif isinstance(raw_terms, str) and raw_terms.strip():
+        terms = [t.strip() for t in raw_terms.split(",") if t.strip()]
+    else:
+        terms = []
+
+    raw_campus = meta.get("campus", "")
+    if isinstance(raw_campus, list):
+        campus = [c.strip() for c in raw_campus if c and str(c).strip()]
+    elif isinstance(raw_campus, str) and raw_campus.strip():
+        campus = [c.strip() for c in raw_campus.split(",") if c.strip()]
+    else:
+        campus = []
+
+    return {
+        "code": code,
+        "title": title,
+        "units": meta.get("units") or meta.get("unit"),
+        "terms": terms,
+        "campus": campus,
+        "level_of_study": meta.get("career") or meta.get("levelOfStudy", "N/A"),
+        "course_coordinator": meta.get("courseCoordinator", "N/A"),
+        "course_overview": meta.get("courseOverview") or item.get("summary", "N/A"),
+        "prerequisites": meta.get("prerequisites", "N/A"),
+        "corequisites": meta.get("corequisites", "N/A"),
+        "antirequisites": meta.get("antirequisites", "N/A"),
+        "raw_meta": raw_meta,
+    }
+
+
+def get_subject_courses_with_metadata(
+    subject: str, year: int, timeout: float = 12.0
+) -> ParseResult:
+    """Retrieve full course catalog and metadata directly from Funnelback search JSON."""
+    return get_course_codes(subject, year, timeout=timeout)
+
+
 def get_course_codes(subject: str, year: int, timeout: float = 12.0) -> ParseResult:
-    """Return a ParseResult with course codes for a given subject code and year."""
+    """Return a ParseResult with course codes and metadata for a given subject code and year."""
     # Ensure spaces and & are safely encoded for query string
     safe_subject = str(subject).replace(" ", "%20").replace("&", "%26")
     endpoint = (
@@ -204,7 +259,7 @@ def get_course_codes(subject: str, year: int, timeout: float = 12.0) -> ParseRes
         f"&collection=uosa%7Esp-aem-prod&f.Study+type%7CstudyType=Course"
     )
 
-    max_attempts = int(os.environ.get("LISTING_MAX_ATTEMPTS", "12"))
+    max_attempts = int(os.environ.get("LISTING_MAX_ATTEMPTS", "4"))
     last_error = None
     courses = None
 
@@ -239,12 +294,14 @@ def get_course_codes(subject: str, year: int, timeout: float = 12.0) -> ParseRes
                     )
 
                 course_codes = [
-                    {
-                        "code": course.get("listMetadata", {}).get("courseCode"),
-                        "terms": course.get("listMetadata", {}).get("term"),
-                    }
+                    parse_funnelback_course_result(course)
                     for course in results
-                    if course.get("listMetadata", {}).get("courseCode")
+                    if (
+                        course.get("listMetadata", {}).get("courseCode")
+                        or course.get("metaData", {}).get("courseCode")
+                        or course.get("code")
+                        or course.get("title")
+                    )
                 ]
                 logger.debug(
                     f"Course codes extracted successfully for {subject}: {len(course_codes)}"

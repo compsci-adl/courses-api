@@ -151,6 +151,10 @@ class TestDataFetcherStrategyExecution(unittest.TestCase):
         host_strategy._breakers.clear()
         host_strategy._metrics.clear()
         DataFetcher._proxies = ["1.1.1.1:80", "2.2.2.2:80"]
+        DataFetcher._direct_blocked = False
+        DataFetcher._direct_blocked_permanently = False
+        DataFetcher._direct_blocked_until = 0.0
+        DataFetcher._active_proxies.clear()
 
     @patch.object(DataFetcher, "_execute_http_get")
     def test_direct_first_success_touches_no_proxies(self, mock_http_get):

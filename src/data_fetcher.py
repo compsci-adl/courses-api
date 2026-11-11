@@ -39,6 +39,8 @@ class DataFetcher:
     BASE_INFO_URL = "https://adelaide.edu.au"
     PROXY_FILE = "src/working_proxies.txt"
 
+    DEFAULT_TIMEOUT = 5.0
+    MAX_RETRIES = 3
     MAX_PROXY_FAILURES = 3
     _proxies = None
     _proxy_failures = {}
@@ -119,7 +121,7 @@ class DataFetcher:
         use_class_url: bool = False,
         full_url: str = None,
         use_proxy: bool = True,
-        timeout: float = 3.0,
+        timeout: float = DEFAULT_TIMEOUT,
     ) -> None:
         self.endpoint = endpoint
         self.use_class_url = use_class_url
@@ -316,9 +318,28 @@ class DataFetcher:
         if not self.use_proxy:
             return None
 
+        proxy_url = os.getenv("PROXY_URL")
+        if proxy_url:
+            clean_url = (
+                proxy_url
+                if proxy_url.startswith(("http://", "https://"))
+                else f"http://{proxy_url}"
+            )
+            return {"http": clean_url, "https": clean_url}
+
         self.trigger_refill_if_low()
 
         with DataFetcher._proxy_lock:
+            if DataFetcher._proxies is not None and len(DataFetcher._proxies) < 35:
+                logger.warning(
+                    f"Proxy pool critical ({len(DataFetcher._proxies)} remaining). Replenishing fresh proxies..."
+                )
+                try:
+                    fetch_proxies.main()
+                    DataFetcher._proxies = DataFetcher._load_proxies()
+                except Exception as e:
+                    logger.error(f"Mid-run proxy replenishment failed: {e}")
+
             if not DataFetcher._proxies:
                 DataFetcher._proxies = self.load_proxies()
                 DataFetcher._proxy_failures.clear()
