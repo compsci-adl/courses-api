@@ -39,7 +39,9 @@ class DataFetcher:
     BASE_INFO_URL = "https://adelaide.edu.au"
     PROXY_FILE = "src/working_proxies.txt"
 
-    DEFAULT_TIMEOUT = 5.0
+    _WARP_ACTIVE = os.getenv("USE_WARP", "").lower() in ("true", "1", "yes")
+
+    DEFAULT_TIMEOUT = 3.0
     MAX_RETRIES = 3
     MAX_PROXY_FAILURES = 3
     _proxies = None
@@ -115,27 +117,47 @@ class DataFetcher:
             s = s[:200] + "...(truncated)"
         return s
 
+    @classmethod
+    def _is_warp_active(cls) -> bool:
+        return cls._WARP_ACTIVE or os.getenv("USE_WARP", "").lower() in (
+            "true",
+            "1",
+            "yes",
+        )
+
     def __init__(
         self,
-        endpoint: str,
+        endpoint: str = "",
+        year: int | None = None,
+        full_url: str | None = None,
         use_class_url: bool = False,
-        full_url: str = None,
-        use_proxy: bool = True,
         timeout: float = DEFAULT_TIMEOUT,
+        course_code: str | None = None,
+        use_proxy: bool = True,
     ) -> None:
-        self.endpoint = endpoint
+        self.course_code = course_code or endpoint or ""
+        self.endpoint = endpoint or course_code or ""
+        self.year = year
         self.use_class_url = use_class_url
         self.timeout = timeout
         if full_url:
             self.url = full_url
         elif self.use_class_url:
-            # Build a full URL for course page content. Ensure endpoint is a path.
-            path = (
-                self.endpoint if self.endpoint.startswith("/") else f"/{self.endpoint}"
-            )
+            clean_endpoint = str(self.endpoint).strip()
+            if clean_endpoint.startswith("/"):
+                path = clean_endpoint
+            else:
+                slug = re.sub(
+                    r"([a-zA-Z]+)\s*([0-9]+)", r"\1-\2", clean_endpoint
+                ).lower()
+                path = (
+                    f"/study/courses/{self.year}/{slug}/"
+                    if self.year
+                    else f"/study/courses/{slug}/"
+                )
             self.url = self.BASE_INFO_URL.rstrip("/") + path
         else:
-            self.url = self.BASE_URL + endpoint
+            self.url = self.BASE_URL + self.endpoint
         self.data = None
         self.last_response = None
         self.last_used_proxy = None
@@ -146,10 +168,11 @@ class DataFetcher:
         )
         self.use_proxy = use_proxy and scraper_use_proxies
 
-        # Load proxies globally if not already loaded
-        with DataFetcher._proxy_lock:
-            if DataFetcher._proxies is None:
-                DataFetcher._proxies = self.load_proxies()
+        # Load proxies globally if not already loaded and not using WARP
+        if not self._is_warp_active():
+            with DataFetcher._proxy_lock:
+                if DataFetcher._proxies is None:
+                    DataFetcher._proxies = self.load_proxies()
 
     @classmethod
     def get_working_proxy(cls) -> dict | None:
@@ -330,16 +353,6 @@ class DataFetcher:
         self.trigger_refill_if_low()
 
         with DataFetcher._proxy_lock:
-            if DataFetcher._proxies is not None and len(DataFetcher._proxies) < 35:
-                logger.warning(
-                    f"Proxy pool critical ({len(DataFetcher._proxies)} remaining). Replenishing fresh proxies..."
-                )
-                try:
-                    fetch_proxies.main()
-                    DataFetcher._proxies = DataFetcher._load_proxies()
-                except Exception as e:
-                    logger.error(f"Mid-run proxy replenishment failed: {e}")
-
             if not DataFetcher._proxies:
                 DataFetcher._proxies = self.load_proxies()
                 DataFetcher._proxy_failures.clear()
@@ -523,7 +536,7 @@ class DataFetcher:
             return sess.get(url, proxies=proxy, headers=headers, timeout=timeout)
         return sess.get(url, headers=headers, timeout=timeout)
 
-    def get(self, max_retries: int = 3) -> dict:
+    def get(self, max_retries: int = 3) -> dict | None:
         """Fetch data from the API, selecting direct vs proxy based on per-host strategy and circuit breaker."""
         logger.debug("Fetching %s...", self._sanitise_for_log(self.endpoint))
         if self.data is not None:
@@ -534,6 +547,47 @@ class DataFetcher:
             return {}
 
         headers = self._get_headers()
+
+        # If WARP is active or proxy usage is disabled, route directly through the system tunnel
+        if self._is_warp_active() or not self.use_proxy:
+            for attempt in range(max_retries):
+                try:
+                    resp = self._execute_http_get(
+                        self.url,
+                        headers=headers,
+                        timeout=(3.0, self.timeout),
+                    )
+                    self.last_response = resp
+                    self.last_used_proxy = (
+                        "warp" if self._is_warp_active() else "direct"
+                    )
+                    if resp.status_code == 200:
+                        parsed = self._process_response(resp)
+                        return (
+                            parsed
+                            if parsed is not None
+                            else {"html": resp.text, "status_code": 200}
+                        )
+                    if resp.status_code == 404:
+                        return (
+                            {"html": "", "status_code": 404, "classes": []}
+                            if self.use_class_url
+                            else {}
+                        )
+                    if resp.status_code in (403, 429):
+                        DataFetcher._record_direct_failure(resp.status_code)
+                        logger.warning(
+                            f"Direct connection challenged (HTTP {resp.status_code}) on {self.url}. "
+                            f"Retrying ({attempt + 1}/{max_retries})..."
+                        )
+                        time.sleep(1.0 + attempt * 0.5)
+                except Exception as e:
+                    logger.debug(
+                        f"Direct request error on {self.url} (attempt {attempt + 1}/{max_retries}): {e}"
+                    )
+                    time.sleep(0.5)
+            return None if self.use_class_url else {}
+
         host = host_strategy.get_host(self.url)
         strategy = host_strategy.get_strategy(host)
         is_ci = bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))

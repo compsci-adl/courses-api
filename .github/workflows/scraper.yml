@@ -40,6 +40,30 @@ jobs:
         run: |
           echo "DEFAULT_LOGGING_LEVEL=${{ env.DEFAULT_LOGGING_LEVEL }}" > src/.env
 
+      - name: Install and Initialize Cloudflare WARP
+        run: |
+          # Add Cloudflare GPG key and APT repository
+          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
+
+          # Install warp-cli
+          sudo apt-get update && sudo apt-get install -y cloudflare-warp
+
+          # Register client and configure tunnel mode
+          warp-cli --accept-tos registration new
+          warp-cli --accept-tos mode warp
+          warp-cli --accept-tos connect
+
+          # Verify tunnel connection
+          sleep 3
+          warp-cli --accept-tos status
+
+      - name: Verify Clean Non-Datacenter Egress
+        run: |
+          echo "=== Egress Verification ==="
+          curl -s https://cloudflare.com/cdn-cgi/trace | grep -E "ip|loc|warp" || true
+          curl -s https://ipinfo.io/json || true
+
       - name: Build Docker image
         run: docker build -f scraper.Dockerfile -t courses-api-scraper:latest .
 
@@ -47,6 +71,7 @@ jobs:
         if: ${{ inputs.probe_hosts == true }}
         run: |
           docker run --rm \
+            --network host \
             -v ${{ github.workspace }}/scripts:/app/scripts \
             courses-api-scraper:latest python scripts/probe_hosts.py -n 10
 
@@ -56,14 +81,15 @@ jobs:
         run: |
           mkdir -p logs
           docker run --rm \
+            --network host \
             -v ${{ github.workspace }}/src:/app/src \
             -v ${{ github.workspace }}/logs:/app/logs \
             -e PYTHONUNBUFFERED=1 \
             -e GITHUB_ACTIONS=true \
+            -e USE_WARP=true \
             -e DEFAULT_LOGGING_LEVEL=${{ env.DEFAULT_LOGGING_LEVEL }} \
-            -e COURSE_WORKERS=6 \
-            -e SUBJECT_WORKERS=2 \
-            -e PROXY_URL=${{ secrets.PROXY_URL }} \
+            -e COURSE_WORKERS=24 \
+            -e SUBJECT_WORKERS=6 \
             courses-api-scraper:latest
 
       - name: Upload scraper log artifact

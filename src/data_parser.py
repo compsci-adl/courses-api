@@ -674,6 +674,24 @@ def get_course_class_list(
             "proxy": used_proxy,
         }
 
+    # Check if the page legitimately confirms no classes
+    soup = BeautifulSoup(raw_html_str, "html.parser")
+    page_text = soup.get_text().lower()
+    if (
+        "no classes" in page_text
+        or "not offered" in page_text
+        or "class details are not currently available" in page_text
+    ):
+        return {
+            "status": "success",
+            "success": True,
+            "code": code_str,
+            "classes": [],
+            "http_status": fetcher_status,
+            "raw_html": raw_html_str,
+            "proxy": used_proxy,
+        }
+
     # If course is offered in terms, verify expected page markers are present
     has_terms = bool(terms)
     has_markers = ("Class details" in raw_html_str) or ("Enrol by date" in raw_html_str)

@@ -500,8 +500,8 @@ def process_course(
                 code_str
             ) or existing_courses_for_year.get(norm_code)
 
-        has_active_terms = bool(course.get("terms"))
-        should_fetch_classes = scrape_classes and has_active_terms
+        has_no_active_terms = "terms" in course and not course.get("terms")
+        should_fetch_classes = scrape_classes and not has_no_active_terms
 
         if existing_cid:
             logger.debug(
@@ -541,7 +541,7 @@ def process_course(
                     with lock:
                         harvested_course_ids.add(course_cid)
             else:
-                if not has_active_terms:
+                if has_no_active_terms:
                     logger.debug(
                         f"Course {code_str} has no active terms for year {year}. Skipping class crawl."
                     )
@@ -1117,8 +1117,8 @@ def scrape_single_year(
     )
 
     is_ci = os.getenv("GITHUB_ACTIONS") == "true" or os.getenv("CI") == "true"
-    default_course_workers = 6 if is_ci else 32
-    default_subject_workers = 2 if is_ci else 8
+    default_course_workers = 24 if is_ci else 32
+    default_subject_workers = 6 if is_ci else 8
 
     subject_workers = int(
         os.environ.get("SUBJECT_WORKERS", str(default_subject_workers))
@@ -1190,29 +1190,20 @@ def scrape_single_year(
     finally:
         # Atomic replace for active/harvested classes and meetings (persists even if interrupted)
         if should_scrape_classes and collected_classes:
-            if existing_class_count > 0 and len(collected_classes) < (
-                existing_class_count * 0.90
-            ):
-                logger.error(
-                    f"[CIRCUIT BREAKER] Harvested only {len(collected_classes)} classes, but "
-                    f"database contains {existing_class_count}. Aborting bulk table replacement "
-                    f"to prevent data loss. Streamed upserts remain active."
+            logger.info(
+                f"Atomic bulk replacing {len(collected_classes)} classes for year {year}..."
+            )
+            db_session = Session(bind=engine)
+            try:
+                bulk_replace_classes_for_year(
+                    db_session,
+                    year,
+                    collected_classes,
+                    collected_meetings,
+                    course_ids=harvested_course_ids,
                 )
-            else:
-                logger.info(
-                    f"Replacing {len(collected_classes)} classes for year {year}..."
-                )
-                db_session = Session(bind=engine)
-                try:
-                    bulk_replace_classes_for_year(
-                        db_session,
-                        year,
-                        collected_classes,
-                        collected_meetings,
-                        course_ids=harvested_course_ids,
-                    )
-                finally:
-                    db_session.close()
+            finally:
+                db_session.close()
         else:
             if not should_scrape_classes:
                 logger.info(
@@ -1276,14 +1267,16 @@ def scrape_single_year(
 
 
 def ensure_proxies_ready(min_proxies: int = 20):
-    """Ensure that a valid working_proxies file exists with at least min_proxies."""
-    scraper_use_proxies = os.environ.get("SCRAPER_USE_PROXIES", "true").lower() in (
+    """Ensure that a valid working_proxies file exists if proxy usage is explicitly enabled."""
+    scraper_use_proxies = os.environ.get("SCRAPER_USE_PROXIES", "false").lower() in (
         "true",
         "1",
         "yes",
     )
-    if not scraper_use_proxies:
-        logger.info("SCRAPER_USE_PROXIES is false. Bypassing proxy pool preparation.")
+    if not scraper_use_proxies or data_fetcher.DataFetcher._is_warp_active():
+        logger.debug(
+            "Bypassing proxy pool preparation (using Cloudflare WARP or direct egress)."
+        )
         return
 
     candidate_files = [
