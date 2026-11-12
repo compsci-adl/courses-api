@@ -34,6 +34,7 @@ from db_service import (
     ensure_healthy_database,
     ensure_schema_up_to_date,
     finalize_sqlite_for_s3,
+    get_courses_with_syllabus_for_year,
     get_existing_class_count_for_year,
     get_existing_course_hashes,
     get_existing_course_ids_for_year,
@@ -410,10 +411,11 @@ def process_course(
     collected_classes: list[dict] | None = None,
     collected_meetings: list[dict] | None = None,
     fetched_course_ids: set[str] | None = None,
+    courses_with_syllabus: set[str] | None = None,
 ):
     """Process a single course and insert/upsert data into the database directly.
 
-    1. If the course already exists in DB for this year, skip outline scraping.
+    1. If the course already exists in DB for this year, skip outline scraping unless syllabus is missing.
     2. If the course exists in previous years, reuse static course info, outcomes,
        and assessments without making redundant network crawls.
     3. Only new courses not in any previous year are fetched from the web.
@@ -438,12 +440,92 @@ def process_course(
             ) or existing_courses_for_year.get(norm_code)
 
         if existing_cid:
-            logger.debug(
-                f"Course {code_str} already in DB for year {year} (id: {existing_cid}). Skipping course outline fetch."
-            )
             course_cid = existing_cid
+            needs_syllabus = (
+                courses_with_syllabus is not None
+                and course_cid not in courses_with_syllabus
+            )
 
-            if scrape_classes:
+            if needs_syllabus:
+                course_details = data_parser.get_course_details(course_code, year=year)
+                if course_details:
+                    page_html = course_details.get("html")
+
+                    # 1. Harvest classes & meetings from the same page (0 extra network calls)
+                    if scrape_classes:
+                        _extract_and_queue_classes(
+                            code_str,
+                            year,
+                            course_cid,
+                            raw_html=page_html,
+                            collected_classes=collected_classes,
+                            collected_meetings=collected_meetings,
+                            lock=lock,
+                            fetched_course_ids=fetched_course_ids,
+                        )
+
+                    # 2. Backfill syllabus (learning outcomes & assessments) if missing in DB
+                    page_outcomes = course_details.get("learning_outcomes", [])
+                    page_assessments = course_details.get("assessments", [])
+                    page_textbooks = course_details.get("textbooks")
+
+                    if page_outcomes or page_assessments:
+                        logger.debug(
+                            f"Backfilling syllabus for existing course {code_str} ({year}): "
+                            f"{len(page_outcomes)} outcomes, {len(page_assessments)} assessments."
+                        )
+                        for index, lo_item in enumerate(page_outcomes, start=1):
+                            lo_text = (
+                                lo_item.get("description", "")
+                                if isinstance(lo_item, dict)
+                                else str(lo_item)
+                            )
+                            lo_id = get_short_hash(f"{course_cid}lo{lo_text}")
+                            db_lo = LearningOutcome(
+                                id=lo_id,
+                                year=year,
+                                course_id=course_cid,
+                                description=lo_text,
+                                outcome_index=index,
+                            )
+                            write_queue.put(db_lo)
+
+                        for assess in page_assessments:
+                            assess_title = (
+                                assess.get("title")
+                                if isinstance(assess, dict)
+                                else str(assess)
+                            )
+                            assess_id = get_short_hash(
+                                f"{course_cid}assess{assess_title}"
+                            )
+                            db_assess = Assessment(
+                                id=assess_id,
+                                year=year,
+                                course_id=course_cid,
+                                title=assess_title,
+                                weighting=(
+                                    assess.get("weighting")
+                                    if isinstance(assess, dict)
+                                    else None
+                                ),
+                                hurdle=(
+                                    assess.get("hurdle")
+                                    if isinstance(assess, dict)
+                                    else None
+                                ),
+                                learning_outcomes=(
+                                    assess.get("learning_outcomes")
+                                    if isinstance(assess, dict)
+                                    else None
+                                ),
+                            )
+                            write_queue.put(db_assess)
+
+                        if courses_with_syllabus is not None and lock:
+                            with lock:
+                                courses_with_syllabus.add(course_cid)
+            elif scrape_classes:
                 _extract_and_queue_classes(
                     code_str,
                     year,
@@ -790,6 +872,7 @@ def process_subject(
     course_executor: ThreadPoolExecutor | None = None,
     course_workers: int = 24,
     fetched_course_ids: set[str] | None = None,
+    courses_with_syllabus: set[str] | None = None,
 ):
     """Process a single subject and insert data into the database."""
     try:
@@ -860,6 +943,7 @@ def process_subject(
                     collected_classes,
                     collected_meetings,
                     fetched_course_ids,
+                    courses_with_syllabus,
                 )
                 futures.append(future)
 
@@ -904,8 +988,10 @@ def scrape_single_year(
             check_session, year
         )
         existing_class_count = get_existing_class_count_for_year(check_session, year)
+        courses_with_syllabus = get_courses_with_syllabus_for_year(check_session, year)
         logger.info(
-            f"Preloaded {len(existing_courses_for_year)} existing course records and "
+            f"Preloaded {len(existing_courses_for_year)} existing course records, "
+            f"{len(courses_with_syllabus)} courses with syllabus, and "
             f"{existing_class_count} class records for year {year} from DB."
         )
         previous_courses = get_previous_years_course_data(check_session, year)
@@ -998,6 +1084,7 @@ def scrape_single_year(
                             fetched_course_ids=fetched_course_ids
                             if should_scrape_classes
                             else None,
+                            courses_with_syllabus=courses_with_syllabus,
                         )
                         futures.append(future)
 
@@ -1051,9 +1138,8 @@ def ensure_proxies_ready(min_proxies: int = 20):
             except Exception:
                 pass
 
-    # On CI the runner IP is always blocked, so we need a larger proxy pool
     is_ci = bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))
-    effective_min = max(min_proxies, 100 if is_ci else min_proxies)
+    effective_min = max(min_proxies, 40 if is_ci else min_proxies)
 
     if valid_count < effective_min:
         logger.info(
@@ -1061,7 +1147,7 @@ def ensure_proxies_ready(min_proxies: int = 20):
             f"Testing and fetching fresh proxies..."
         )
         try:
-            target = 600 if is_ci else 500
+            target = 200 if is_ci else 100
             fetch_proxies.main(target_working=target)
             with data_fetcher.DataFetcher._proxy_lock:
                 data_fetcher.DataFetcher._proxies = None

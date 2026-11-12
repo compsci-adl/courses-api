@@ -11,11 +11,12 @@ contain non-digit text (e.g. "3 units"), which crashed a bare
 import os
 import sys
 import unittest
+from threading import Lock
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from scraper import parse_units  # noqa: E402
+from scraper import parse_units, process_course  # noqa: E402
 
 
 def test_parse_units_plain_digits():
@@ -328,6 +329,52 @@ class TestSelectiveClassReplace(unittest.TestCase):
         self.assertEqual(len(assessments_q), 2)
         self.assertEqual(assessments_q[0].title, "Project")
         self.assertEqual(assessments_q[0].weighting, "40%")
+
+    @patch("scraper.write_queue")
+    @patch("scraper.data_parser.get_course_details")
+    def test_process_course_backfills_syllabus_for_existing_course(
+        self, mock_details, mock_queue
+    ):
+        """When course exists in DB but is missing syllabus, process_course backfills outcomes/assessments."""
+        from models import Assessment, LearningOutcome
+
+        mock_details.return_value = {
+            "title": "Existing Course",
+            "learning_outcomes": [{"description": "Outcome 1"}],
+            "assessments": [{"title": "Exam 1", "weighting": "50%"}],
+            "classes": [],
+            "html": "<html>...</html>",
+        }
+
+        progress = MagicMock()
+        task = MagicMock()
+        lock = Lock()
+        existing_courses = {"TEST1001": "cid_test_1001"}
+        courses_with_syllabus = set()  # cid_test_1001 not in it!
+
+        process_course(
+            course={"code": "TEST1001"},
+            year=2027,
+            subject={"subject": "Testing"},
+            engine=self.engine,
+            progress=progress,
+            subject_task=task,
+            lock=lock,
+            scrape_classes=True,
+            existing_courses_for_year=existing_courses,
+            courses_with_syllabus=courses_with_syllabus,
+        )
+
+        mock_details.assert_called_once_with("TEST1001", year=2027)
+        queued = [c[0][0] for c in mock_queue.put.call_args_list]
+        outcomes = [x for x in queued if isinstance(x, LearningOutcome)]
+        assessments = [x for x in queued if isinstance(x, Assessment)]
+
+        self.assertEqual(len(outcomes), 1)
+        self.assertEqual(outcomes[0].description, "Outcome 1")
+        self.assertEqual(len(assessments), 1)
+        self.assertEqual(assessments[0].title, "Exam 1")
+        self.assertIn("cid_test_1001", courses_with_syllabus)
 
 
 if __name__ == "__main__":

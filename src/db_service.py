@@ -97,6 +97,28 @@ def get_existing_class_count_for_year(session: Session, year: int) -> int:
         return 0
 
 
+def get_courses_with_syllabus_for_year(session: Session, year: int) -> set[str]:
+    """Returns the set of course_ids that already have learning outcomes or assessments for this year."""
+    try:
+        lo_ids = {
+            r[0]
+            for r in session.query(LearningOutcome.course_id)
+            .filter(LearningOutcome.year == year)
+            .distinct()
+            .all()
+        }
+        assess_ids = {
+            r[0]
+            for r in session.query(Assessment.course_id)
+            .filter(Assessment.year == year)
+            .distinct()
+            .all()
+        }
+        return lo_ids.union(assess_ids)
+    except Exception:
+        return set()
+
+
 def get_previous_years_course_data(
     session_or_engine, target_year: int
 ) -> dict[str, dict]:

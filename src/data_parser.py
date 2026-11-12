@@ -516,10 +516,21 @@ def parse_course_text(text: str) -> dict:
     return parsed
 
 
-def is_valid_course_page(soup: BeautifulSoup, default_h1: str = "") -> bool:
+def is_valid_course_page(
+    soup: BeautifulSoup, default_h1: str = "", raw_html: str = ""
+) -> bool:
     """Check if the page successfully loaded as a valid course page (not blocked or malformed)."""
     if not soup:
         return False
+
+    if raw_html:
+        lower_html = raw_html.lower()
+        if (
+            len(raw_html) > 500
+            and "</html>" not in lower_html
+            and "</body>" not in lower_html
+        ):
+            return False
 
     h1_el = soup.find("h1")
     h1_text = (h1_el.get_text(strip=True) if h1_el else default_h1).lower()
@@ -639,7 +650,9 @@ def get_course_class_list(
             # 2. Check if the page successfully loaded as a valid course page (not blocked or malformed)
             default_h1 = data.get("h1", "") if isinstance(data, dict) else ""
             valid_page = (
-                is_valid_course_page(soup, default_h1=default_h1) if soup else False
+                is_valid_course_page(soup, default_h1=default_h1, raw_html=text)
+                if soup
+                else False
             )
             if valid_page:
                 # Valid course page, but course simply has no scheduled classes for this year.

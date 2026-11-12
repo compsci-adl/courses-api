@@ -44,20 +44,10 @@ class DataFetcher:
     _funnelback_semaphore = threading.BoundedSemaphore(12)
     _direct_blocked = False
     _direct_blocked_until = 0.0
-    # Set permanently True on CI where the runner IP is always WAF-blocked
-    _ci_permanently_blocked: bool = bool(
-        os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS")
-    )
 
     @classmethod
     def is_direct_blocked(cls) -> bool:
-        """Check if direct connection is currently paused due to rate limiting or cooldown.
-
-        On CI/GitHub Actions the runner IP is always WAF-blocked, so we short-circuit
-        to True permanently to avoid wasting time (and proxy budget) on direct attempts.
-        """
-        if cls._ci_permanently_blocked:
-            return True
+        """Check if direct connection is currently paused due to rate limiting or cooldown."""
         if cls._direct_blocked:
             if (
                 cls._direct_blocked_until > 0
@@ -156,12 +146,7 @@ class DataFetcher:
         }
 
     def report_proxy_failure(self, proxy: dict, fatal: bool = False) -> None:
-        """Record a failure for a proxy. Remove it after MAX_PROXY_FAILURES cumulative failures.
-
-        ``fatal=True`` still increments the failure counter but no longer causes instant eviction —
-        this prevents the proxy pool from draining too quickly on CI where many proxies are marginal.
-        A proxy is only evicted once it has accumulated MAX_PROXY_FAILURES failures.
-        """
+        """Record a failure for a proxy. Remove it immediately if fatal=True or after MAX_PROXY_FAILURES."""
         if not proxy:
             return
         proxy_str = proxy.get("http", "").replace("http://", "")
@@ -170,12 +155,12 @@ class DataFetcher:
         with DataFetcher._proxy_lock:
             count = DataFetcher._proxy_failures.get(proxy_str, 0) + 1
             DataFetcher._proxy_failures[proxy_str] = count
-            if count >= self.MAX_PROXY_FAILURES:
+            if fatal or count >= self.MAX_PROXY_FAILURES:
                 if DataFetcher._proxies and proxy_str in DataFetcher._proxies:
                     try:
                         DataFetcher._proxies.remove(proxy_str)
                         logger.info(
-                            f"Removed bad proxy: {proxy_str} (failures: {count}). Remaining: {len(DataFetcher._proxies)}"
+                            f"Removed bad proxy: {proxy_str} (failures: {count}, fatal: {fatal}). Remaining: {len(DataFetcher._proxies)}"
                         )
                     except ValueError:
                         pass
@@ -224,6 +209,20 @@ class DataFetcher:
                 return self.data
             return None
         else:
+            if self.use_class_url:
+                raw_html = response.text or ""
+                # Truncation check: Adelaide course pages are > 20KB and end with </html> or </body>.
+                # If proxy severed connection prematurely, reject response so it retries.
+                if (
+                    len(raw_html) > 1000
+                    and "</html>" not in raw_html.lower()
+                    and "</body>" not in raw_html.lower()
+                ):
+                    logger.debug(
+                        "Received truncated HTML from proxy/server (missing </html>). Retrying..."
+                    )
+                    return None
+
             soup = BeautifulSoup(response.content, "html.parser")
             main_tag = soup.find("main")
             text = main_tag.get_text() if main_tag else soup.get_text()
@@ -246,6 +245,8 @@ class DataFetcher:
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
                 "Accept-Language": "en-US,en;q=0.9",
                 "Referer": "https://adelaide.edu.au/study/courses/",
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache",
                 "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
                 "Sec-Ch-Ua-Mobile": "?0",
                 "Sec-Ch-Ua-Platform": '"macOS"',
@@ -262,6 +263,8 @@ class DataFetcher:
                 "Accept-Language": "en-US,en;q=0.9",
                 "Referer": "https://adelaide.edu.au/study/courses/",
                 "Origin": "https://adelaide.edu.au",
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache",
                 "X-Requested-With": "XMLHttpRequest",
                 "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
                 "Sec-Ch-Ua-Mobile": "?0",
@@ -322,7 +325,8 @@ class DataFetcher:
         is_ci = bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))
         base_timeout = max(self.timeout, 8.0) if is_ci else max(self.timeout, 5.0)
 
-        if not DataFetcher.is_direct_blocked():
+        can_try_direct = not self.use_class_url or not DataFetcher.is_direct_blocked()
+        if can_try_direct:
             sem_ctx = (
                 DataFetcher._funnelback_semaphore
                 if not self.use_class_url
@@ -347,12 +351,13 @@ class DataFetcher:
                         return {}
                     elif direct_resp.status_code in (403, 429):
                         DataFetcher._direct_blocked = True
-                        DataFetcher._direct_blocked_until = time.time() + 15.0
-                        logger.warning(
-                            "Direct connection rate-limited/blocked by WAF (HTTP %s). "
-                            "Pausing direct requests for 15s cooldown and trying proxies.",
-                            direct_resp.status_code,
-                        )
+                        DataFetcher._direct_blocked_until = time.time() + 20.0
+                        if self.use_class_url:
+                            logger.warning(
+                                "Direct connection rate-limited/blocked by WAF (HTTP %s). "
+                                "Pausing direct course requests for 20s cooldown and trying proxies.",
+                                direct_resp.status_code,
+                            )
                 except Exception as e:
                     logger.debug(
                         "Direct connection attempt failed (%s). Falling back to proxies.",
@@ -473,7 +478,8 @@ class DataFetcher:
         headers = self._get_headers()
         base_timeout = max(self.timeout, 6.0)
 
-        if not DataFetcher.is_direct_blocked():
+        can_try_direct = not self.use_class_url or not DataFetcher.is_direct_blocked()
+        if can_try_direct:
             try:
                 if session is not None:
                     resp = await session.get(
@@ -493,7 +499,7 @@ class DataFetcher:
                     return {}
                 elif resp.status_code in (403, 429):
                     DataFetcher._direct_blocked = True
-                    DataFetcher._direct_blocked_until = time.time() + 15.0
+                    DataFetcher._direct_blocked_until = time.time() + 20.0
             except Exception as e:
                 logger.debug(f"Direct async connection attempt failed: {e}")
 

@@ -26,8 +26,8 @@ def fetch_proxies(url):
 def test_proxy(
     proxy,
     test_url="https://adelaide.edu.au/study/courses/",
-    timeout=5,
-    retries=1,
+    timeout=3.5,
+    retries=0,
 ):
     """Test if the given proxy is working by making a request using Chrome TLS impersonation.
 
@@ -38,7 +38,7 @@ def test_proxy(
         "https": f"http://{proxy}",
     }
     headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
     }
@@ -96,7 +96,7 @@ def main(target_working: int = 500):
         task = progress.add_task("Testing Proxies...", total=len(proxies))
 
         # Use ThreadPoolExecutor for concurrency
-        with ThreadPoolExecutor(max_workers=100) as executor:
+        with ThreadPoolExecutor(max_workers=150) as executor:
             future_to_proxy = {
                 executor.submit(test_proxy, proxy): proxy for proxy in proxies
             }

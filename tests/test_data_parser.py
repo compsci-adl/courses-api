@@ -3,6 +3,8 @@ import sys
 import unittest
 from unittest.mock import MagicMock, patch
 
+from bs4 import BeautifulSoup
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import data_parser
@@ -277,6 +279,24 @@ Yes
         self.assertEqual(doc["assessments"][0]["weighting"], "20%")
         self.assertEqual(doc["assessments"][1]["title"], "Exam")
         self.assertEqual(doc["assessments"][1]["weighting"], "50%")
+
+    def test_is_valid_course_page_rejects_truncated_html(self):
+        """Pages where connection dropped midway through (missing </html> or </body>) must be rejected."""
+        truncated_html = (
+            "<html><head><meta property='courseCode' content='TEST 1001'></head>"
+            "<body><div class='cmp-herobanner'><h1>Test Course</h1></div>"
+            + ("A" * 600)  # over 500 chars, but cut off without </body> or </html>
+        )
+        soup = BeautifulSoup(truncated_html, "html.parser")
+        self.assertFalse(
+            data_parser.is_valid_course_page(soup, raw_html=truncated_html)
+        )
+
+        complete_html = truncated_html + "</body></html>"
+        soup_complete = BeautifulSoup(complete_html, "html.parser")
+        self.assertTrue(
+            data_parser.is_valid_course_page(soup_complete, raw_html=complete_html)
+        )
 
 
 if __name__ == "__main__":

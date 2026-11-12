@@ -40,11 +40,26 @@ class TestDataFetcher(unittest.TestCase):
     def test_fatal_proxy_failure_removes_immediately(self):
         fetcher = DataFetcher("?test=1", use_proxy=True)
         proxy = {"http": "http://3.3.3.3:80", "https": "http://3.3.3.3:80"}
+        DataFetcher._proxies = ["3.3.3.3:80"]
 
-        # Resilient retention policy avoids pool exhaustion on CI by requiring MAX_PROXY_FAILURES
-        for _ in range(DataFetcher.MAX_PROXY_FAILURES):
-            fetcher.report_proxy_failure(proxy, fatal=True)
+        fetcher.report_proxy_failure(proxy, fatal=True)
         self.assertNotIn("3.3.3.3:80", DataFetcher._proxies)
+
+    @patch("data_fetcher.requests.get")
+    def test_funnelback_allows_direct_even_when_direct_blocked(self, mock_get):
+        """Funnelback (squiz.cloud) search must attempt direct connection even if course pages are direct-blocked."""
+        DataFetcher._direct_blocked = True
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.text = '{"resultPacket": {"results": []}}'
+        mock_get.return_value = mock_resp
+
+        fetcher = DataFetcher("?query=test", use_class_url=False, use_proxy=False)
+        data = fetcher.get()
+
+        mock_get.assert_called()
+        self.assertIsInstance(data, dict)
+        DataFetcher._direct_blocked = False
 
     @patch.object(DataFetcher, "load_proxies")
     def test_get_random_proxy_reloads_when_empty(self, mock_load):
