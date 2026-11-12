@@ -1,5 +1,6 @@
 import re
 import time
+import xml.etree.ElementTree as ET
 
 from bs4 import BeautifulSoup
 
@@ -84,14 +85,84 @@ def get_subjects(year: int, timeout: float = 3.0) -> dict[str, list[dict[str, st
     return {"subjects": []}
 
 
-def get_all_courses_bulk(year: int, max_per_page: int = 1000) -> list[dict]:
-    """Enumerate all courses for a target year via bulk paginated Funnelback queries in ~9 requests."""
+def get_courses_from_sitemap(timeout: float = 10.0) -> list[dict]:
+    """Fetch all published course slugs from https://adelaide.edu.au/sitemap.xml.
+
+    Catches courses that exist in the AEM publication tree but may be missing or
+    omitted from the Funnelback search index.
+    """
+    logger.info("Fetching course list from sitemap.xml...")
+    try:
+        fetcher = data_fetcher.DataFetcher(
+            "/sitemap.xml", use_class_url=True, timeout=timeout
+        )
+        data = fetcher.get()
+        xml_text = ""
+        if isinstance(data, dict):
+            xml_text = data.get("html", "")
+        if not xml_text and fetcher.last_response is not None:
+            xml_text = getattr(fetcher.last_response, "text", "")
+        if not xml_text:
+            return []
+
+        root = ET.fromstring(xml_text)
+        sitemap_courses = []
+        for elem in root.iter():
+            if elem.tag.endswith("loc") and elem.text:
+                loc = elem.text.strip()
+                match = re.search(r"/study/courses/([^/]+)/?$", loc)
+                if not match:
+                    continue
+                slug = match.group(1).strip()
+                if slug.isdigit() or slug in ("search", "degrees"):
+                    continue
+                code = slug.replace("-", "").upper()
+                parts = slug.split("-")
+                subj = parts[0].upper() if parts else "General"
+                sitemap_courses.append(
+                    {
+                        "code": code,
+                        "slug": slug,
+                        "title": "",
+                        "subject": subj,
+                        "terms": None,
+                        "date_modified": None,
+                        "url": loc,
+                        "units": None,
+                        "campus": None,
+                        "level_of_study": None,
+                        "course_level": None,
+                        "course_availability": None,
+                    }
+                )
+
+        logger.info(f"Retrieved {len(sitemap_courses)} course slugs from sitemap.xml.")
+        return sitemap_courses
+    except Exception as e:
+        logger.debug(f"Failed to fetch or parse sitemap.xml: {e}")
+        return []
+
+
+def get_all_courses_bulk(
+    year: int | None = None,
+    max_per_page: int = 1000,
+    filter_by_year: bool = False,
+    include_sitemap: bool = True,
+) -> list[dict]:
+    """Enumerate all courses via bulk paginated Funnelback queries, optionally augmented by sitemap.xml.
+
+    By default (filter_by_year=False), queries without f.Year|year to get the master list of all
+    course slugs across all academic periods (catching courses whose search metadata still says 2026
+    or lacks year tags). Merges with sitemap.xml to achieve 100% catalog coverage.
+    """
     all_courses = []
+    seen_codes = set()
     start_rank = 1
+    year_filter = f"&f.Year%7Cyear={year}" if (filter_by_year and year) else ""
 
     while True:
         endpoint = (
-            f"?f.Tabs%7Ctype=Degrees+%26+Courses&form=json&f.Year%7Cyear={year}"
+            f"?f.Tabs%7Ctype=Degrees+%26+Courses&form=json{year_filter}"
             f"&num_ranks={max_per_page}&profile=site-search&query="
             f"&collection=uosa%7Esp-aem-prod&f.Study+type%7CstudyType=Course"
             f"&start_rank={start_rank}"
@@ -120,6 +191,9 @@ def get_all_courses_bulk(year: int, max_per_page: int = 1000) -> list[dict]:
             if not code:
                 continue
 
+            norm_code = str(code).replace(" ", "").upper()
+            seen_codes.add(norm_code)
+
             subj_list = meta.get("studyArea")
             subj = (
                 subj_list[0]
@@ -140,14 +214,21 @@ def get_all_courses_bulk(year: int, max_per_page: int = 1000) -> list[dict]:
                 unit_list[0] if isinstance(unit_list, list) and unit_list else unit_list
             )
 
+            live_url = item.get("liveUrl") or ""
+            slug = None
+            slug_match = re.search(r"/study/courses/([^/]+)/?$", live_url)
+            if slug_match and not slug_match.group(1).isdigit():
+                slug = slug_match.group(1)
+
             all_courses.append(
                 {
                     "code": code,
+                    "slug": slug,
                     "title": item.get("title", "").strip(),
                     "subject": subj,
                     "terms": term_list,
                     "date_modified": date_mod,
-                    "url": item.get("liveUrl"),
+                    "url": live_url,
                     "units": unit_val,
                     "campus": meta.get("location"),
                     "level_of_study": meta.get("studyLevel"),
@@ -164,7 +245,30 @@ def get_all_courses_bulk(year: int, max_per_page: int = 1000) -> list[dict]:
         if start_rank > total_matching or len(results) < max_per_page:
             break
 
-    logger.info(f"Retrieved {len(all_courses)} total courses in bulk for year {year}")
+    logger.info(
+        f"Retrieved {len(all_courses)} courses from Funnelback (year filter: {filter_by_year})."
+    )
+
+    if include_sitemap:
+        try:
+            sitemap_courses = get_courses_from_sitemap()
+            added_from_sitemap = 0
+            for sc in sitemap_courses:
+                sc_norm = sc["code"].replace(" ", "").upper()
+                if sc_norm not in seen_codes:
+                    seen_codes.add(sc_norm)
+                    all_courses.append(sc)
+                    added_from_sitemap += 1
+            if added_from_sitemap > 0:
+                logger.info(
+                    f"Augmented course catalog with {added_from_sitemap} courses from sitemap.xml."
+                )
+        except Exception as e:
+            logger.debug(f"Failed to merge sitemap courses: {e}")
+
+    logger.info(
+        f"Total catalog courses for processing: {len(all_courses)} (target year: {year})."
+    )
     return all_courses
 
 

@@ -218,6 +218,88 @@ Yes
         self.assertEqual(courses[0]["subject"], "Accounting")
         self.assertEqual(courses[1]["code"], "COMP2002")
 
+    @patch("data_parser.data_fetcher.DataFetcher")
+    def test_get_courses_from_sitemap(self, mock_fetcher_cls):
+        """Verify get_courses_from_sitemap parses XML loc elements and skips non-course slugs."""
+        mock_fetcher = MagicMock()
+        mock_fetcher_cls.return_value = mock_fetcher
+        sitemap_xml = """<?xml version="1.0" encoding="UTF-8"?>
+        <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+            <url><loc>https://adelaide.edu.au/study/courses/2027/</loc></url>
+            <url><loc>https://adelaide.edu.au/study/courses/search/</loc></url>
+            <url><loc>https://adelaide.edu.au/study/courses/nurs-2003/</loc></url>
+            <url><loc>https://adelaide.edu.au/study/courses/phys-1008/</loc></url>
+        </urlset>"""
+        mock_fetcher.get.return_value = {"html": sitemap_xml}
+        mock_fetcher.last_response.status_code = 200
+
+        courses = data_parser.get_courses_from_sitemap()
+
+        self.assertEqual(len(courses), 2)
+        self.assertEqual(courses[0]["code"], "NURS2003")
+        self.assertEqual(courses[0]["slug"], "nurs-2003")
+        self.assertEqual(courses[0]["subject"], "NURS")
+        self.assertEqual(courses[1]["code"], "PHYS1008")
+        self.assertEqual(courses[1]["slug"], "phys-1008")
+        self.assertEqual(courses[1]["subject"], "PHYS")
+
+    @patch("data_parser.get_courses_from_sitemap")
+    @patch("data_parser.data_fetcher.DataFetcher")
+    def test_get_all_courses_bulk_unfiltered_and_sitemap_merge(
+        self, mock_fetcher_cls, mock_sitemap
+    ):
+        """Verify get_all_courses_bulk queries without year filter and merges new sitemap slugs."""
+        mock_fetcher = MagicMock()
+        mock_fetcher_cls.return_value = mock_fetcher
+        mock_fetcher.get.return_value = {
+            "resultPacket": {
+                "resultsSummary": {"totalMatching": 1},
+                "results": [
+                    {
+                        "title": "Financial Accounting 1",
+                        "liveUrl": "https://adelaide.edu.au/study/courses/acct-1001/",
+                        "listMetadata": {
+                            "courseCode": ["ACCT1001"],
+                            "studyArea": ["Accounting"],
+                            "term": ["Semester 1"],
+                        },
+                    }
+                ],
+            }
+        }
+        mock_sitemap.return_value = [
+            {
+                "code": "ACCT1001",
+                "slug": "acct-1001",
+                "title": "",
+                "subject": "ACCT",
+                "terms": None,
+                "url": "https://adelaide.edu.au/study/courses/acct-1001/",
+            },
+            {
+                "code": "NURS2003",
+                "slug": "nurs-2003",
+                "title": "",
+                "subject": "NURS",
+                "terms": None,
+                "url": "https://adelaide.edu.au/study/courses/nurs-2003/",
+            },
+        ]
+
+        courses = data_parser.get_all_courses_bulk(
+            year=2027, filter_by_year=False, include_sitemap=True
+        )
+
+        # ACCT1001 (from Funnelback) + NURS2003 (from sitemap); ACCT1001 from sitemap deduplicated
+        self.assertEqual(len(courses), 2)
+        codes = [c["code"] for c in courses]
+        self.assertIn("ACCT1001", codes)
+        self.assertIn("NURS2003", codes)
+
+        # Check endpoint did not contain year filter
+        call_endpoint = mock_fetcher_cls.call_args[0][0]
+        self.assertNotIn("f.Year", call_endpoint)
+
     def test_parse_course_document_full_syllabus(self):
         """Verify parse_course_document extracts overview, outcomes, requisites, textbooks, assessments."""
         sample_html = """

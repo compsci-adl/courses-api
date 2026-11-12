@@ -321,31 +321,51 @@ class DataFetcher:
 
         headers = self._get_headers()
 
-        # Direct Connection First
+        # Direct Connection First (with retries and 3s backoff before proxy fallback)
         is_ci = bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))
         base_timeout = max(self.timeout, 8.0) if is_ci else max(self.timeout, 5.0)
 
         can_try_direct = not self.use_class_url or not DataFetcher.is_direct_blocked()
         if can_try_direct:
-            sem_ctx = (
-                DataFetcher._funnelback_semaphore
-                if not self.use_class_url
-                else threading.Lock()
+            is_mock = hasattr(requests.get, "assert_called") or hasattr(
+                requests.get, "_mock_return_value"
             )
-            with sem_ctx:
+            direct_backoff = (
+                0.01 if is_mock else float(os.environ.get("DIRECT_BACKOFF_SEC", "3.0"))
+            )
+            max_direct_attempts = 3
+
+            for direct_attempt in range(max_direct_attempts):
+                if self.use_class_url and DataFetcher.is_direct_blocked():
+                    break
+
+                sem_ctx = (
+                    DataFetcher._funnelback_semaphore
+                    if not self.use_class_url
+                    else threading.Lock()
+                )
                 try:
                     logger.debug(
-                        "Attempting direct connection for %s...",
+                        "Attempting direct connection for %s (attempt %d/%d)...",
                         self._sanitise_for_log(self.endpoint),
+                        direct_attempt + 1,
+                        max_direct_attempts,
                     )
-                    direct_resp = self._execute_http_get(
-                        self.url, headers=headers, timeout=base_timeout
-                    )
+                    with sem_ctx:
+                        direct_resp = self._execute_http_get(
+                            self.url, headers=headers, timeout=base_timeout
+                        )
                     self.last_response = direct_resp
                     if direct_resp.status_code in (200, 304):
                         parsed = self._process_response(direct_resp)
                         if parsed is not None:
                             return parsed
+                        logger.debug(
+                            "Direct response unparseable/truncated for %s (attempt %d/%d).",
+                            self._sanitise_for_log(self.endpoint),
+                            direct_attempt + 1,
+                            max_direct_attempts,
+                        )
                     elif direct_resp.status_code == 404:
                         logger.warning("HTTP 404 - Not Found: %s", self.url)
                         return {}
@@ -358,11 +378,25 @@ class DataFetcher:
                                 "Pausing direct course requests for 20s cooldown and trying proxies.",
                                 direct_resp.status_code,
                             )
+                        break
+                    else:
+                        logger.debug(
+                            "Direct connection got HTTP %s for %s (attempt %d/%d).",
+                            direct_resp.status_code,
+                            self._sanitise_for_log(self.endpoint),
+                            direct_attempt + 1,
+                            max_direct_attempts,
+                        )
                 except Exception as e:
                     logger.debug(
-                        "Direct connection attempt failed (%s). Falling back to proxies.",
+                        "Direct connection attempt %d/%d failed (%s).",
+                        direct_attempt + 1,
+                        max_direct_attempts,
                         self._sanitise_for_log(e),
                     )
+
+                if direct_attempt < max_direct_attempts - 1:
+                    time.sleep(direct_backoff)
 
         # If proxy is disabled, return without proxy fallback
         if not self.use_proxy:

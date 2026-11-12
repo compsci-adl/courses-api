@@ -655,9 +655,10 @@ def process_course(
 
         # Course Custom ID
         course_cid = get_short_hash(f"{name}{code_str}{title}{year}{terms}{campus}")
-        encoded_course_code = re.sub(
-            r"([a-zA-Z]+)([0-9]+)", r"\1-\2", str(code_str)
-        ).lower()
+        encoded_course_code = (
+            course.get("slug")
+            or re.sub(r"([a-zA-Z]+)([0-9]+)", r"\1-\2", str(code_str)).lower()
+        )
 
         # Compute content hash for the course outline
         outline_hash = compute_course_hash(
