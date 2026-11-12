@@ -119,6 +119,23 @@ def get_courses_with_syllabus_for_year(session: Session, year: int) -> set[str]:
         return set()
 
 
+def get_courses_with_terms_for_year(session: Session, year: int) -> set[str]:
+    """Returns the set of course_ids that already have non-empty terms populated in DB for this year."""
+    try:
+        rows = (
+            session.query(Course.id)
+            .filter(
+                Course.year == year,
+                Course.terms.isnot(None),
+                Course.terms != "",
+            )
+            .all()
+        )
+        return {r[0] for r in rows}
+    except Exception:
+        return set()
+
+
 def get_previous_years_course_data(
     session_or_engine, target_year: int
 ) -> dict[str, dict]:
@@ -390,12 +407,15 @@ def bulk_replace_classes_for_year(
     # In-memory deduplication on the unique key constraint
     deduped_classes = {}
     for item in classes_data:
+        # Normalize group to empty string if None so SQLite unique constraint matches consistently
+        if item.get("group") is None:
+            item["group"] = ""
         key = (
             item["year"],
             item["course_id"],
             str(item["class_nbr"]),
             str(item["section"]),
-            str(item.get("group", "1")),
+            str(item.get("group", "")),
         )
         deduped_classes[key] = item
 

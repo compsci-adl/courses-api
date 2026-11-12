@@ -622,6 +622,32 @@ def get_course_class_list(
                     isinstance(data, dict)
                     and data.get("h1", "").lower() == "page not found"
                 ):
+                    # If versioned course URL is 404, check canonical unversioned URL before giving up
+                    if year and attempt == 0:
+                        unversioned_endpoint = f"/study/courses/{encoded_course_code}/"
+                        try:
+                            u_fetcher = data_fetcher.DataFetcher(
+                                unversioned_endpoint, use_class_url=True
+                            )
+                            u_data = u_fetcher.get()
+                            if u_data and isinstance(u_data, dict):
+                                u_html = u_data.get("html", "") or u_data.get(
+                                    "data", ""
+                                )
+                                u_classes = parse_course_class_list(u_html)
+                                if u_classes:
+                                    return {
+                                        "code": code_str,
+                                        "title": u_data.get("h1") or "",
+                                        "course_id": None,
+                                        "classes": u_classes,
+                                        "is_valid_page": True,
+                                    }
+                        except Exception as e:
+                            logger.debug(
+                                f"Canonical unversioned fallback for {code_str} failed: {e}"
+                            )
+
                     # Course genuinely not available; no point retrying
                     return {
                         "code": code_str,

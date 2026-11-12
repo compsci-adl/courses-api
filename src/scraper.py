@@ -19,7 +19,7 @@ except ImportError:
     HAS_H2 = False
 from curl_cffi import requests
 from rich.progress import Progress
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool
@@ -35,6 +35,7 @@ from db_service import (
     ensure_schema_up_to_date,
     finalize_sqlite_for_s3,
     get_courses_with_syllabus_for_year,
+    get_courses_with_terms_for_year,
     get_existing_class_count_for_year,
     get_existing_course_hashes,
     get_existing_course_ids_for_year,
@@ -106,6 +107,7 @@ def _flush_batch(engine, items: list):
     try:
         classes = []
         courses = []
+        course_updates = []
         outcomes = []
         assessments = []
         subjects = []
@@ -115,6 +117,8 @@ def _flush_batch(engine, items: list):
         for item in items:
             if isinstance(item, tuple) and item[0] == "upsert_class":
                 classes.append(item[1])
+            elif isinstance(item, tuple) and item[0] == "update_course":
+                course_updates.append(item[1])
             elif isinstance(item, Course):
                 courses.append(_model_to_dict(item))
             elif isinstance(item, LearningOutcome):
@@ -147,6 +151,17 @@ def _flush_batch(engine, items: list):
                 set_=update_cols,
             )
             session.execute(stmt)
+
+        # Bulk update existing courses (e.g. terms and metadata backfill)
+        if course_updates:
+            for upd in course_updates:
+                cid = upd.get("id")
+                if not cid:
+                    continue
+                vals = {k: v for k, v in upd.items() if k != "id" and v is not None}
+                if vals:
+                    stmt = update(Course).where(Course.id == cid).values(**vals)
+                    session.execute(stmt)
 
         # Bulk insert learning outcomes
         if outcomes:
@@ -224,6 +239,13 @@ def _flush_batch(engine, items: list):
                         },
                     )
                     session.execute(stmt)
+                elif isinstance(item, tuple) and item[0] == "update_course":
+                    upd = item[1]
+                    cid = upd.get("id")
+                    vals = {k: v for k, v in upd.items() if k != "id" and v is not None}
+                    if cid and vals:
+                        stmt = update(Course).where(Course.id == cid).values(**vals)
+                        session.execute(stmt)
                 else:
                     session.merge(item)
             session.commit()
@@ -329,6 +351,11 @@ def _extract_and_queue_classes(
                 fetched_course_ids.add(course_cid)
         return True
 
+    total_meetings = sum(len(c.get("meetings", [])) for c in class_items)
+    logger.info(
+        f"Harvested {len(class_items)} classes ({total_meetings} meetings) for course {course_code} ({year})."
+    )
+
     for individual_class in class_items:
         class_type = individual_class.get("component")
         class_nbr = individual_class.get("class_number")
@@ -346,7 +373,7 @@ def _extract_and_queue_classes(
                 "size": int(individual_class.get("size", 0)),
                 "available": int(individual_class.get("available", 0)),
                 "component": class_type,
-                "group": group_name,
+                "group": group_name or "",
                 "course_id": course_cid,
             }
             if collected_classes is not None:
@@ -412,6 +439,7 @@ def process_course(
     collected_meetings: list[dict] | None = None,
     fetched_course_ids: set[str] | None = None,
     courses_with_syllabus: set[str] | None = None,
+    courses_with_terms: set[str] | None = None,
 ):
     """Process a single course and insert/upsert data into the database directly.
 
@@ -446,96 +474,168 @@ def process_course(
                 and course_cid not in courses_with_syllabus
             )
 
+            course_details = None
             if needs_syllabus:
                 course_details = data_parser.get_course_details(course_code, year=year)
-                if course_details:
-                    page_html = course_details.get("html")
 
-                    # 1. Harvest classes & meetings from the same page (0 extra network calls)
-                    if scrape_classes:
-                        _extract_and_queue_classes(
-                            code_str,
-                            year,
-                            course_cid,
-                            raw_html=page_html,
-                            collected_classes=collected_classes,
-                            collected_meetings=collected_meetings,
-                            lock=lock,
-                            fetched_course_ids=fetched_course_ids,
-                        )
+            # Determine effective terms from Funnelback or course page
+            effective_terms = (
+                course_details.get("terms") if course_details else None
+            ) or course.get("terms")
+            terms_str = (
+                join_str_if_iterable(effective_terms) if effective_terms else None
+            )
 
-                    # 2. Backfill syllabus (learning outcomes & assessments) if missing in DB
-                    page_outcomes = course_details.get("learning_outcomes", [])
-                    page_assessments = course_details.get("assessments", [])
-                    page_textbooks = course_details.get("textbooks")
-
-                    if page_outcomes or page_assessments:
-                        logger.debug(
-                            f"Backfilling syllabus for existing course {code_str} ({year}): "
-                            f"{len(page_outcomes)} outcomes, {len(page_assessments)} assessments."
-                        )
-                        for index, lo_item in enumerate(page_outcomes, start=1):
-                            lo_text = (
-                                lo_item.get("description", "")
-                                if isinstance(lo_item, dict)
-                                else str(lo_item)
-                            )
-                            lo_id = get_short_hash(f"{course_cid}lo{lo_text}")
-                            db_lo = LearningOutcome(
-                                id=lo_id,
-                                year=year,
-                                course_id=course_cid,
-                                description=lo_text,
-                                outcome_index=index,
-                            )
-                            write_queue.put(db_lo)
-
-                        for assess in page_assessments:
-                            assess_title = (
-                                assess.get("title")
-                                if isinstance(assess, dict)
-                                else str(assess)
-                            )
-                            assess_id = get_short_hash(
-                                f"{course_cid}assess{assess_title}"
-                            )
-                            db_assess = Assessment(
-                                id=assess_id,
-                                year=year,
-                                course_id=course_cid,
-                                title=assess_title,
-                                weighting=(
-                                    assess.get("weighting")
-                                    if isinstance(assess, dict)
-                                    else None
-                                ),
-                                hurdle=(
-                                    assess.get("hurdle")
-                                    if isinstance(assess, dict)
-                                    else None
-                                ),
-                                learning_outcomes=(
-                                    assess.get("learning_outcomes")
-                                    if isinstance(assess, dict)
-                                    else None
-                                ),
-                            )
-                            write_queue.put(db_assess)
-
-                        if courses_with_syllabus is not None and lock:
-                            with lock:
-                                courses_with_syllabus.add(course_cid)
-            elif scrape_classes:
-                _extract_and_queue_classes(
-                    code_str,
-                    year,
-                    course_cid,
-                    raw_html=None,
-                    collected_classes=collected_classes,
-                    collected_meetings=collected_meetings,
-                    lock=lock,
-                    fetched_course_ids=fetched_course_ids,
+            # Always ensure metadata (especially terms) is kept up to date in DB
+            needs_terms_update = (
+                terms_str
+                and courses_with_terms is not None
+                and course_cid not in courses_with_terms
+            )
+            course_update = {"id": course_cid}
+            if terms_str and (needs_terms_update or course.get("terms")):
+                course_update["terms"] = terms_str
+            if course.get("campus"):
+                course_update["campus"] = join_str_if_iterable(course.get("campus"))
+            if course.get("units"):
+                course_update["units"] = parse_units(course.get("units"))
+            if course.get("level_of_study"):
+                course_update["level_of_study"] = join_str_if_iterable(
+                    course.get("level_of_study")
                 )
+
+            if course_details:
+                if course_details.get("course_overview"):
+                    course_update["course_overview"] = course_details.get(
+                        "course_overview"
+                    )
+                if (
+                    course_details.get("prerequisites")
+                    and course_details.get("prerequisites") != "N/A"
+                ):
+                    course_update["prerequisites"] = course_details.get("prerequisites")
+                if (
+                    course_details.get("corequisites")
+                    and course_details.get("corequisites") != "N/A"
+                ):
+                    course_update["corequisites"] = course_details.get("corequisites")
+                if (
+                    course_details.get("antirequisites")
+                    and course_details.get("antirequisites") != "N/A"
+                ):
+                    course_update["antirequisites"] = course_details.get(
+                        "antirequisites"
+                    )
+                if course_details.get("textbooks"):
+                    course_update["textbooks"] = course_details.get("textbooks")
+
+            if len(course_update) > 1:
+                write_queue.put(("update_course", course_update))
+                if courses_with_terms is not None and lock and terms_str:
+                    with lock:
+                        courses_with_terms.add(course_cid)
+
+            # Backfill syllabus (learning outcomes & assessments) if missing in DB
+            if needs_syllabus and course_details:
+                page_outcomes = course_details.get("learning_outcomes", [])
+                page_assessments = course_details.get("assessments", [])
+                if page_outcomes or page_assessments:
+                    logger.debug(
+                        f"Backfilling syllabus for existing course {code_str} ({year}): "
+                        f"{len(page_outcomes)} outcomes, {len(page_assessments)} assessments."
+                    )
+                    for index, lo_item in enumerate(page_outcomes, start=1):
+                        lo_text = (
+                            lo_item.get("description", "")
+                            if isinstance(lo_item, dict)
+                            else str(lo_item)
+                        )
+                        lo_id = get_short_hash(f"{course_cid}lo{lo_text}")
+                        db_lo = LearningOutcome(
+                            id=lo_id,
+                            year=year,
+                            course_id=course_cid,
+                            description=lo_text,
+                            outcome_index=index,
+                        )
+                        write_queue.put(db_lo)
+
+                    for assess in page_assessments:
+                        assess_title = (
+                            assess.get("title")
+                            if isinstance(assess, dict)
+                            else str(assess)
+                        )
+                        assess_id = get_short_hash(f"{course_cid}assess{assess_title}")
+                        db_assess = Assessment(
+                            id=assess_id,
+                            year=year,
+                            course_id=course_cid,
+                            title=assess_title,
+                            weighting=(
+                                assess.get("weighting")
+                                if isinstance(assess, dict)
+                                else None
+                            ),
+                            hurdle=(
+                                assess.get("hurdle")
+                                if isinstance(assess, dict)
+                                else None
+                            ),
+                            learning_outcomes=(
+                                assess.get("learning_outcomes")
+                                if isinstance(assess, dict)
+                                else None
+                            ),
+                        )
+                        write_queue.put(db_assess)
+
+                    if courses_with_syllabus is not None and lock:
+                        with lock:
+                            courses_with_syllabus.add(course_cid)
+
+            # Harvest classes if scrape_classes is enabled
+            if scrape_classes:
+                page_html = course_details.get("html") if course_details else None
+                # If course explicitly has no terms in DB and bulk list, skip timetable fetch
+                has_no_terms = (
+                    courses_with_terms is not None
+                    and course_cid not in courses_with_terms
+                    and not effective_terms
+                )
+                if page_html:
+                    # Harvest directly from page HTML (0 extra network calls!)
+                    _extract_and_queue_classes(
+                        code_str,
+                        year,
+                        course_cid,
+                        raw_html=page_html,
+                        collected_classes=collected_classes,
+                        collected_meetings=collected_meetings,
+                        lock=lock,
+                        fetched_course_ids=fetched_course_ids,
+                    )
+                elif not has_no_terms:
+                    # Course has a term listed or terms unknown -> MUST attempt fetching classes!
+                    _extract_and_queue_classes(
+                        code_str,
+                        year,
+                        course_cid,
+                        raw_html=None,
+                        collected_classes=collected_classes,
+                        collected_meetings=collected_meetings,
+                        lock=lock,
+                        fetched_course_ids=fetched_course_ids,
+                    )
+                else:
+                    # Course has no scheduled terms anywhere -> skip network fetch and mark 0 classes
+                    logger.debug(
+                        f"Course {code_str} ({year}) has no scheduled terms; skipping class timetable fetch."
+                    )
+                    if fetched_course_ids is not None:
+                        with lock:
+                            fetched_course_ids.add(course_cid)
+
             progress.update(subject_task, advance=1)
             return
 
@@ -873,6 +973,7 @@ def process_subject(
     course_workers: int = 24,
     fetched_course_ids: set[str] | None = None,
     courses_with_syllabus: set[str] | None = None,
+    courses_with_terms: set[str] | None = None,
 ):
     """Process a single subject and insert data into the database."""
     try:
@@ -944,6 +1045,7 @@ def process_subject(
                     collected_meetings,
                     fetched_course_ids,
                     courses_with_syllabus,
+                    courses_with_terms,
                 )
                 futures.append(future)
 
@@ -989,8 +1091,10 @@ def scrape_single_year(
         )
         existing_class_count = get_existing_class_count_for_year(check_session, year)
         courses_with_syllabus = get_courses_with_syllabus_for_year(check_session, year)
+        courses_with_terms = get_courses_with_terms_for_year(check_session, year)
         logger.info(
             f"Preloaded {len(existing_courses_for_year)} existing course records, "
+            f"{len(courses_with_terms)} courses with terms, "
             f"{len(courses_with_syllabus)} courses with syllabus, and "
             f"{existing_class_count} class records for year {year} from DB."
         )
@@ -1085,6 +1189,7 @@ def scrape_single_year(
                             if should_scrape_classes
                             else None,
                             courses_with_syllabus=courses_with_syllabus,
+                            courses_with_terms=courses_with_terms,
                         )
                         futures.append(future)
 

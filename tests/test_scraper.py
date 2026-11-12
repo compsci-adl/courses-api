@@ -376,6 +376,115 @@ class TestSelectiveClassReplace(unittest.TestCase):
         self.assertEqual(assessments[0].title, "Exam 1")
         self.assertIn("cid_test_1001", courses_with_syllabus)
 
+    @patch("scraper.write_queue")
+    @patch("scraper.data_parser.get_course_details")
+    def test_process_course_updates_terms_for_existing_course(
+        self, mock_details, mock_queue
+    ):
+        """When an existing course in DB has terms discovered from bulk or details, queue update_course."""
+        mock_details.return_value = None
+
+        progress = MagicMock()
+        task = MagicMock()
+        lock = Lock()
+        existing_courses = {"ENGE5010": "cid_enge_5010"}
+        courses_with_terms = set()  # not in DB yet!
+
+        process_course(
+            course={"code": "ENGE5010", "terms": ["Semester 1"]},
+            year=2027,
+            subject={"subject": "Engineering"},
+            engine=self.engine,
+            progress=progress,
+            subject_task=task,
+            lock=lock,
+            scrape_classes=False,
+            existing_courses_for_year=existing_courses,
+            courses_with_terms=courses_with_terms,
+        )
+
+        queued = [c[0][0] for c in mock_queue.put.call_args_list]
+        updates = [
+            x for x in queued if isinstance(x, tuple) and x[0] == "update_course"
+        ]
+        self.assertTrue(len(updates) >= 1)
+        update_data = updates[0][1]
+        self.assertEqual(update_data["id"], "cid_enge_5010")
+        self.assertEqual(update_data["terms"], "Semester 1")
+        self.assertIn("cid_enge_5010", courses_with_terms)
+
+    @patch("scraper._extract_and_queue_classes")
+    @patch("scraper.write_queue")
+    @patch("scraper.data_parser.get_course_details")
+    def test_process_course_attempts_classes_for_course_with_terms_when_details_none(
+        self, mock_details, mock_queue, mock_classes
+    ):
+        """If a course has terms listed, class harvesting is attempted even if course_details returns None."""
+        mock_details.return_value = None
+
+        progress = MagicMock()
+        task = MagicMock()
+        lock = Lock()
+        existing_courses = {"ENGE5010": "cid_enge_5010"}
+        courses_with_syllabus = set()  # missing syllabus
+
+        process_course(
+            course={"code": "ENGE5010", "terms": ["Semester 1"]},
+            year=2027,
+            subject={"subject": "Engineering"},
+            engine=self.engine,
+            progress=progress,
+            subject_task=task,
+            lock=lock,
+            scrape_classes=True,
+            existing_courses_for_year=existing_courses,
+            courses_with_syllabus=courses_with_syllabus,
+        )
+
+        # Classes MUST be attempted with raw_html=None since course_details returned None!
+        mock_classes.assert_called_once()
+        call_args = mock_classes.call_args
+        self.assertEqual(call_args[0][0], "ENGE5010")
+        self.assertEqual(call_args[0][1], 2027)
+        self.assertEqual(call_args[0][2], "cid_enge_5010")
+        self.assertIsNone(call_args[1].get("raw_html"))
+
+    @patch("scraper._extract_and_queue_classes")
+    @patch("scraper.write_queue")
+    @patch("scraper.data_parser.get_course_details")
+    def test_process_course_skips_class_fetch_when_no_terms_and_no_syllabus_needed(
+        self, mock_details, mock_queue, mock_classes
+    ):
+        """If a course has no terms listed anywhere and already has syllabus, skip class network crawl."""
+        progress = MagicMock()
+        task = MagicMock()
+        lock = Lock()
+        existing_courses = {"ENGE5006": "cid_enge_5006"}
+        courses_with_syllabus = {"cid_enge_5006"}  # already has syllabus
+        courses_with_terms = set()  # no terms in DB
+        fetched_ids = set()
+
+        process_course(
+            course={"code": "ENGE5006", "terms": None},
+            year=2027,
+            subject={"subject": "Engineering"},
+            engine=self.engine,
+            progress=progress,
+            subject_task=task,
+            lock=lock,
+            scrape_classes=True,
+            existing_courses_for_year=existing_courses,
+            courses_with_syllabus=courses_with_syllabus,
+            courses_with_terms=courses_with_terms,
+            fetched_course_ids=fetched_ids,
+        )
+
+        # No network calls to details or classes
+        mock_details.assert_not_called()
+        mock_classes.assert_not_called()
+        # Successfully marked as fetched so it is retained/cleared correctly in DB
+        self.assertIn("cid_enge_5006", fetched_ids)
+
 
 if __name__ == "__main__":
     unittest.main()
