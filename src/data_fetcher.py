@@ -19,7 +19,7 @@ _tls = threading.local()
 def _get_tls_session() -> requests.Session:
     """Get or create a thread-local persistent Session for connection pooling."""
     if not hasattr(_tls, "session") or _tls.session is None:
-        _tls.session = requests.Session(impersonate="chrome146")
+        _tls.session = requests.Session(impersonate="chrome124")
     return _tls.session
 
 
@@ -88,10 +88,12 @@ class DataFetcher:
         full_url: str = None,
         use_proxy: bool = True,
         timeout: float = 3.0,
+        if_modified_since: str | None = None,
     ) -> None:
         self.endpoint = endpoint
         self.use_class_url = use_class_url
         self.timeout = timeout
+        self.if_modified_since = if_modified_since
         if full_url:
             self.url = full_url
         elif self.use_class_url:
@@ -202,6 +204,14 @@ class DataFetcher:
     def _process_response(self, response):
         """Process and store a successful response based on endpoint type."""
         self.last_response = response
+        if response.status_code == 304:
+            self.data = {
+                "status_code": 304,
+                "not_modified": True,
+                "edge_date": response.headers.get("date"),
+            }
+            return self.data
+
         if not self.use_class_url:
             resp = json_repair.loads(response.text)
             if not isinstance(resp, dict):
@@ -223,20 +233,20 @@ class DataFetcher:
                 "h1": h1_text,
                 "data": re.sub(r"\n+", "\n", text),
                 "html": response.text,
+                "edge_date": response.headers.get("date"),
             }
             return self.data
 
     def _get_headers(self) -> dict:
         """Flexible headers depending on target endpoint (html page vs json api)."""
+        headers = {}
         if self.use_class_url:
-            return {
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
                 "Accept-Language": "en-US,en;q=0.9",
-                "Referer": "https://www.adelaide.edu.au/",
-                "Cache-Control": "no-cache",
-                "Pragma": "no-cache",
-                "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="146", "Google Chrome";v="146"',
+                "Referer": "https://adelaide.edu.au/study/courses/",
+                "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
                 "Sec-Ch-Ua-Mobile": "?0",
                 "Sec-Ch-Ua-Platform": '"macOS"',
                 "Sec-Fetch-Dest": "document",
@@ -246,22 +256,25 @@ class DataFetcher:
                 "Upgrade-Insecure-Requests": "1",
             }
         else:
-            return {
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                 "Accept": "application/json, text/javascript, */*; q=0.01",
                 "Accept-Language": "en-US,en;q=0.9",
-                "Referer": "https://www.adelaide.edu.au/",
-                "Origin": "https://www.adelaide.edu.au",
-                "Cache-Control": "no-cache",
-                "Pragma": "no-cache",
+                "Referer": "https://adelaide.edu.au/study/courses/",
+                "Origin": "https://adelaide.edu.au",
                 "X-Requested-With": "XMLHttpRequest",
-                "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="146", "Google Chrome";v="146"',
+                "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
                 "Sec-Ch-Ua-Mobile": "?0",
                 "Sec-Ch-Ua-Platform": '"macOS"',
                 "Sec-Fetch-Dest": "empty",
                 "Sec-Fetch-Mode": "cors",
                 "Sec-Fetch-Site": "cross-site",
             }
+
+        if self.if_modified_since:
+            headers["If-Modified-Since"] = self.if_modified_since
+
+        return headers
 
     def _execute_http_get(
         self,
@@ -280,13 +293,13 @@ class DataFetcher:
                     proxies=proxy,
                     headers=headers,
                     timeout=timeout,
-                    impersonate="chrome146",
+                    impersonate="chrome124",
                 )
             return requests.get(
                 url,
                 headers=headers,
                 timeout=timeout,
-                impersonate="chrome146",
+                impersonate="chrome124",
             )
         sess = _get_tls_session()
         if proxy:
@@ -325,7 +338,7 @@ class DataFetcher:
                         self.url, headers=headers, timeout=base_timeout
                     )
                     self.last_response = direct_resp
-                    if direct_resp.status_code == 200:
+                    if direct_resp.status_code in (200, 304):
                         parsed = self._process_response(direct_resp)
                         if parsed is not None:
                             return parsed
@@ -368,7 +381,7 @@ class DataFetcher:
                         self.url, headers=headers, timeout=base_timeout
                     )
                     self.last_response = direct_resp
-                    if direct_resp.status_code == 200:
+                    if direct_resp.status_code in (200, 304):
                         parsed = self._process_response(direct_resp)
                         if parsed is not None:
                             return parsed
@@ -405,7 +418,7 @@ class DataFetcher:
                     retries += 1
                     continue
 
-                if response.status_code != 200:
+                if response.status_code not in (200, 304):
                     logger.error("HTTP %s via proxy", response.status_code)
                     self.report_proxy_failure(proxy, fatal=True)
                     retries += 1
@@ -467,12 +480,12 @@ class DataFetcher:
                         self.url, headers=headers, timeout=base_timeout
                     )
                 else:
-                    async with AsyncSession(impersonate="chrome146") as local_sess:
+                    async with AsyncSession(impersonate="chrome124") as local_sess:
                         resp = await local_sess.get(
                             self.url, headers=headers, timeout=base_timeout
                         )
                 self.last_response = resp
-                if resp.status_code == 200:
+                if resp.status_code in (200, 304):
                     parsed = self._process_response(resp)
                     if parsed is not None:
                         return parsed
@@ -504,7 +517,7 @@ class DataFetcher:
                         timeout=proxy_timeout,
                     )
                 else:
-                    async with AsyncSession(impersonate="chrome146") as local_sess:
+                    async with AsyncSession(impersonate="chrome124") as local_sess:
                         resp = await local_sess.get(
                             self.url,
                             proxies=proxy,
@@ -512,7 +525,7 @@ class DataFetcher:
                             timeout=proxy_timeout,
                         )
                 self.last_response = resp
-                if resp.status_code == 200:
+                if resp.status_code in (200, 304):
                     parsed = self._process_response(resp)
                     if parsed is not None:
                         self.report_proxy_success(proxy)

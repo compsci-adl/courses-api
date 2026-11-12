@@ -49,7 +49,7 @@ def test_proxy(
                 proxies=proxies,
                 headers=headers,
                 timeout=timeout,
-                impersonate="chrome146",
+                impersonate="chrome124",
             )
             if response.status_code == 200:
                 return proxy

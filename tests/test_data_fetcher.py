@@ -1,7 +1,7 @@
 import os
 import sys
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -57,6 +57,26 @@ class TestDataFetcher(unittest.TestCase):
             proxy, {"http": "http://4.4.4.4:80", "https": "http://4.4.4.4:80"}
         )
         mock_load.assert_called()
+
+    @patch("data_fetcher.requests.get")
+    def test_conditional_request_304(self, mock_get):
+        """Verify that HTTP 304 response is handled cleanly and marked not_modified."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 304
+        mock_resp.headers = {"date": "Thu, 12 Nov 2026 07:00:00 GMT"}
+        mock_get.return_value = mock_resp
+
+        fetcher = DataFetcher(
+            "/study/courses/2027/acct-1001/",
+            use_class_url=True,
+            use_proxy=False,
+            if_modified_since="Thu, 12 Nov 2026 06:00:00 GMT",
+        )
+        data = fetcher.get()
+
+        self.assertEqual(data.get("status_code"), 304)
+        self.assertTrue(data.get("not_modified"))
+        self.assertEqual(data.get("edge_date"), "Thu, 12 Nov 2026 07:00:00 GMT")
 
 
 if __name__ == "__main__":

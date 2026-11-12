@@ -11,6 +11,7 @@ contain non-digit text (e.g. "3 units"), which crashed a bare
 import os
 import sys
 import unittest
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -200,6 +201,133 @@ class TestSelectiveClassReplace(unittest.TestCase):
         self.assertTrue(res)
         self.assertIn("cid_1", fetched_ids)
         self.assertEqual(len(collected_classes), 1)
+
+    def test_extract_and_queue_classes_no_classes_valid_page_tracks_id(self):
+        """Courses confirmed to legitimately have 0 classes should be tracked and return True."""
+        from threading import Lock
+        from unittest.mock import patch
+
+        from scraper import _extract_and_queue_classes
+
+        lock = Lock()
+        fetched_ids = set()
+        collected_classes = []
+
+        mock_classes = {
+            "classes": [],
+            "is_valid_page": True,
+        }
+
+        with patch("data_parser.get_course_class_list", return_value=mock_classes):
+            res = _extract_and_queue_classes(
+                "ARCY 2004",
+                2026,
+                "cid_arcy",
+                raw_html=None,
+                collected_classes=collected_classes,
+                collected_meetings=None,
+                lock=lock,
+                fetched_course_ids=fetched_ids,
+            )
+
+        self.assertTrue(res)
+        self.assertIn("cid_arcy", fetched_ids)
+        self.assertEqual(len(collected_classes), 0)
+
+    def test_extract_and_queue_classes_blocked_page_does_not_track_id(self):
+        """Blocked or failed fetches must return False and NOT be added to fetched_ids."""
+        from threading import Lock
+        from unittest.mock import patch
+
+        from scraper import _extract_and_queue_classes
+
+        lock = Lock()
+        fetched_ids = set()
+        collected_classes = []
+
+        mock_classes = {
+            "classes": [],
+            "is_valid_page": False,
+        }
+
+        with patch("data_parser.get_course_class_list", return_value=mock_classes):
+            res = _extract_and_queue_classes(
+                "COMP 1001",
+                2026,
+                "cid_blocked",
+                raw_html=None,
+                collected_classes=collected_classes,
+                collected_meetings=None,
+                lock=lock,
+                fetched_course_ids=fetched_ids,
+            )
+
+        self.assertFalse(res)
+        self.assertNotIn("cid_blocked", fetched_ids)
+        self.assertEqual(len(collected_classes), 0)
+
+    @patch("scraper.write_queue")
+    @patch("scraper._fetch_single_outline_candidate")
+    @patch("data_parser.get_course_details")
+    def test_process_course_uses_page_syllabus_directly(
+        self, mock_details, mock_outline, mock_queue
+    ):
+        """When course page contains syllabus, use it directly without calling external outline URLs."""
+        from threading import Lock
+
+        from scraper import process_course
+
+        mock_details.return_value = {
+            "title": "Financial Accounting 1",
+            "course_id": 9999,
+            "units": 6,
+            "campus": "North Terrace",
+            "terms": ["Semester 1"],
+            "course_overview": "Introduction to accounting",
+            "learning_outcomes": ["Understand accounting", "Prepare reports"],
+            "assessments": [
+                {"title": "Project", "weighting": "40%"},
+                {"title": "Exam", "weighting": "60%"},
+            ],
+            "prerequisites": "None",
+            "corequisites": "None",
+            "antirequisites": "None",
+            "html": "<div>dummy html</div>",
+        }
+
+        progress = MagicMock()
+        task = MagicMock()
+        lock = Lock()
+
+        process_course(
+            course={"code": "ACCT 1001"},
+            year=2027,
+            subject={"subject": "Accounting"},
+            engine=self.engine,
+            progress=progress,
+            subject_task=task,
+            lock=lock,
+            scrape_classes=False,
+        )
+
+        # External outline candidate crawler should NOT have been invoked
+        mock_outline.assert_not_called()
+
+        # write_queue should have received course, 2 outcomes, and 2 assessments
+        queued_items = [call_args[0][0] for call_args in mock_queue.put.call_args_list]
+        from models import Assessment, Course, LearningOutcome
+
+        courses_q = [x for x in queued_items if isinstance(x, Course)]
+        outcomes_q = [x for x in queued_items if isinstance(x, LearningOutcome)]
+        assessments_q = [x for x in queued_items if isinstance(x, Assessment)]
+
+        self.assertEqual(len(courses_q), 1)
+        self.assertEqual(courses_q[0].title, "Financial Accounting 1")
+        self.assertEqual(len(outcomes_q), 2)
+        self.assertEqual(outcomes_q[0].description, "Understand accounting")
+        self.assertEqual(len(assessments_q), 2)
+        self.assertEqual(assessments_q[0].title, "Project")
+        self.assertEqual(assessments_q[0].weighting, "40%")
 
 
 if __name__ == "__main__":

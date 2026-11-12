@@ -274,10 +274,10 @@ def _fetch_single_outline_candidate(outline_url: str) -> tuple[str, str] | None:
             resp = requests.get(
                 outline_url,
                 headers={
-                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
                 },
                 timeout=6,
-                impersonate="chrome146",
+                impersonate="chrome124",
             )
             if resp.status_code == 200:
                 resp_html = resp.text
@@ -303,7 +303,7 @@ def _extract_and_queue_classes(
 ) -> bool:
     """Harvest classes and meetings for a course and either append to batch lists or put to write_queue.
 
-    Returns True if the class page was successfully fetched (got ≥1 class), False otherwise.
+    Returns True if the class page was successfully fetched (got ≥1 class or valid page with no classes), False otherwise.
     When fetched_course_ids is provided, the course_cid is added to it on success so the
     final atomic replace only deletes classes for courses that were actually reached this run.
     """
@@ -311,12 +311,22 @@ def _extract_and_queue_classes(
         course_code, year=year, raw_html=raw_html
     )
     class_items = class_list.get("classes", []) if isinstance(class_list, dict) else []
-    if not class_items and not raw_html:
+    is_valid_page = (
+        class_list.get("is_valid_page", True) if isinstance(class_list, dict) else False
+    )
+
+    if not is_valid_page:
         logger.debug(
-            f"No classes found for course {course_code} (year {year}) after fetch. "
-            "May be WAF-blocked or course has no scheduled classes."
+            f"Class list fetch for course {course_code} (year {year}) failed or was WAF-blocked."
         )
         return False
+
+    if not class_items:
+        logger.debug(f"Course {course_code} (year {year}) has no scheduled classes.")
+        if fetched_course_ids is not None:
+            with lock:
+                fetched_course_ids.add(course_cid)
+        return True
 
     for individual_class in class_items:
         class_type = individual_class.get("component")
@@ -379,10 +389,10 @@ def _extract_and_queue_classes(
                 )
 
     # Mark this course as successfully fetched so the final replace preserves it
-    if class_items and fetched_course_ids is not None:
+    if fetched_course_ids is not None:
         with lock:
             fetched_course_ids.add(course_cid)
-    return bool(class_items)
+    return True
 
 
 def process_course(
@@ -598,85 +608,143 @@ def process_course(
                 content_hash=outline_hash,
             )
 
-            # Generate course outline URL if term and year are valid
-            term_str = join_str_if_iterable(terms)
-            term_code = get_term_code(term_str)
+            # If syllabus (learning outcomes / assessments) is already present on main page, use directly!
+            page_outcomes = course_details.get("learning_outcomes", [])
+            page_assessments = course_details.get("assessments", [])
+            page_textbooks = course_details.get("textbooks")
 
-            if not term_code and term_str:
-                first_term = term_str.split(",")[0].strip()
-                term_code = get_term_code(first_term)
+            if page_outcomes or page_assessments:
+                logger.debug(
+                    f"Course {code_str} ({year}) has syllabus on main course page: "
+                    f"{len(page_outcomes)} outcomes, {len(page_assessments)} assessments."
+                )
+                if page_textbooks:
+                    db_course.textbooks = page_textbooks
 
-            if term_code:
-                year_short = str(year)[-2:]
-                formatted_code = re.sub(
-                    r"([a-zA-Z]+)\s*(\d+)", r"\1_\2", str(code_str)
-                ).replace(" ", "_")
-
-                candidates = [
-                    (
-                        suffix,
-                        f"https://apps.adelaide.edu.au/public/courseoutline?courseInstanceId={year_short}{term_code}_{formatted_code}_{suffix}",
+                for index, lo_item in enumerate(page_outcomes, start=1):
+                    lo_text = (
+                        lo_item.get("description", "")
+                        if isinstance(lo_item, dict)
+                        else str(lo_item)
                     )
-                    for suffix in range(1, 4)
-                ]
+                    lo_id = get_short_hash(f"{course_cid}lo{lo_text}")
+                    db_lo = LearningOutcome(
+                        id=lo_id,
+                        year=year,
+                        course_id=course_cid,
+                        description=lo_text,
+                        outcome_index=index,
+                    )
+                    write_queue.put(db_lo)
 
-                found_match = None
-                with ThreadPoolExecutor(max_workers=3) as outline_executor:
-                    future_to_suffix = {
-                        outline_executor.submit(
-                            _fetch_single_outline_candidate, url
-                        ): suffix
-                        for suffix, url in candidates
-                    }
-                    results = {}
-                    for future in as_completed(future_to_suffix):
-                        suffix = future_to_suffix[future]
-                        res = future.result()
-                        if res:
-                            results[suffix] = res
+                for assess in page_assessments:
+                    assess_title = (
+                        assess.get("title") if isinstance(assess, dict) else str(assess)
+                    )
+                    assess_id = get_short_hash(f"{course_cid}assess{assess_title}")
+                    db_assess = Assessment(
+                        id=assess_id,
+                        year=year,
+                        course_id=course_cid,
+                        title=assess_title,
+                        weighting=(
+                            assess.get("weighting")
+                            if isinstance(assess, dict)
+                            else None
+                        ),
+                        hurdle=(
+                            assess.get("hurdle") if isinstance(assess, dict) else None
+                        ),
+                        learning_outcomes=(
+                            assess.get("learning_outcomes")
+                            if isinstance(assess, dict)
+                            else None
+                        ),
+                    )
+                    write_queue.put(db_assess)
 
-                    for suffix in range(1, 4):
-                        if suffix in results:
-                            found_match = results[suffix]
-                            break
+            else:
+                # Generate course outline URL if term and year are valid (legacy archive fallback)
+                term_str = join_str_if_iterable(terms)
+                term_code = get_term_code(term_str)
 
-                if found_match:
-                    outline_url, resp_html = found_match
-                    db_course.course_outline_url = outline_url
-                    parsed_outline = data_parser.parse_course_outline(resp_html)
+                if not term_code and term_str:
+                    first_term = term_str.split(",")[0].strip()
+                    term_code = get_term_code(first_term)
 
-                    if parsed_outline.get("aim"):
-                        db_course.course_overview = parsed_outline["aim"]
+                if term_code:
+                    year_short = str(year)[-2:]
+                    formatted_code = re.sub(
+                        r"([a-zA-Z]+)\s*(\d+)", r"\1_\2", str(code_str)
+                    ).replace(" ", "_")
 
-                    for index, lo_text in enumerate(
-                        parsed_outline.get("learning_outcomes", []),
-                        start=1,
-                    ):
-                        lo_id = get_short_hash(f"{course_cid}lo{lo_text}")
-                        db_lo = LearningOutcome(
-                            id=lo_id,
-                            year=year,
-                            course_id=course_cid,
-                            description=lo_text,
-                            outcome_index=index,
+                    candidates = [
+                        (
+                            suffix,
+                            f"https://apps.adelaide.edu.au/public/courseoutline?courseInstanceId={year_short}{term_code}_{formatted_code}_{suffix}",
                         )
-                        write_queue.put(db_lo)
+                        for suffix in range(1, 4)
+                    ]
 
-                    db_course.textbooks = parsed_outline.get("textbooks")
+                    found_match = None
+                    with ThreadPoolExecutor(max_workers=3) as outline_executor:
+                        future_to_suffix = {
+                            outline_executor.submit(
+                                _fetch_single_outline_candidate, url
+                            ): suffix
+                            for suffix, url in candidates
+                        }
+                        results = {}
+                        for future in as_completed(future_to_suffix):
+                            suffix = future_to_suffix[future]
+                            res = future.result()
+                            if res:
+                                results[suffix] = res
 
-                    for assess in parsed_outline.get("assessments", []):
-                        assess_title = assess.get("title")
-                        assess_id = get_short_hash(f"{course_cid}assess{assess_title}")
-                        db_assess = Assessment(
-                            id=assess_id,
-                            year=year,
-                            course_id=course_cid,
-                            title=assess_title,
-                            weighting=assess.get("weighting"),
-                            hurdle=assess.get("hurdle"),
-                            learning_outcomes=assess.get("learning_outcomes"),
-                        )
-                        write_queue.put(db_assess)
+                        for suffix in range(1, 4):
+                            if suffix in results:
+                                found_match = results[suffix]
+                                break
+
+                    if found_match:
+                        outline_url, resp_html = found_match
+                        db_course.course_outline_url = outline_url
+                        parsed_outline = data_parser.parse_course_outline(resp_html)
+
+                        if parsed_outline.get("aim"):
+                            db_course.course_overview = parsed_outline["aim"]
+
+                        for index, lo_text in enumerate(
+                            parsed_outline.get("learning_outcomes", []),
+                            start=1,
+                        ):
+                            lo_id = get_short_hash(f"{course_cid}lo{lo_text}")
+                            db_lo = LearningOutcome(
+                                id=lo_id,
+                                year=year,
+                                course_id=course_cid,
+                                description=lo_text,
+                                outcome_index=index,
+                            )
+                            write_queue.put(db_lo)
+
+                        db_course.textbooks = parsed_outline.get("textbooks")
+
+                        for assess in parsed_outline.get("assessments", []):
+                            assess_title = assess.get("title")
+                            assess_id = get_short_hash(
+                                f"{course_cid}assess{assess_title}"
+                            )
+                            db_assess = Assessment(
+                                id=assess_id,
+                                year=year,
+                                course_id=course_cid,
+                                title=assess_title,
+                                weighting=assess.get("weighting"),
+                                hurdle=assess.get("hurdle"),
+                                learning_outcomes=assess.get("learning_outcomes"),
+                            )
+                            write_queue.put(db_assess)
 
             write_queue.put(db_course)
 
@@ -735,28 +803,32 @@ def process_subject(
         db_subject = Subject(id=subject_cid, name=name)
         write_queue.put(db_subject)
 
-        # Encode & in subject name
-        encoded_name = name.replace("&", "%26")
-        course_list = None
-        for attempt in range(5):
-            courses = data_parser.get_course_codes(encoded_name, year)
-            if (
-                courses is not None
-                and isinstance(courses, dict)
-                and "courses" in courses
-            ):
-                course_list = courses["courses"]
-                break
-            logger.warning(
-                f"Subject '{name}' ({year}) course fetch attempt {attempt + 1}/5 failed or blocked by WAF. Retrying with alternate proxy..."
-            )
-            time.sleep(0.5 + attempt * 0.3)
+        # Use preloaded course list from bulk discovery if available
+        if isinstance(subject, dict) and "courses" in subject:
+            course_list = subject["courses"]
+        else:
+            # Encode & in subject name
+            encoded_name = name.replace("&", "%26")
+            course_list = None
+            for attempt in range(5):
+                courses = data_parser.get_course_codes(encoded_name, year)
+                if (
+                    courses is not None
+                    and isinstance(courses, dict)
+                    and "courses" in courses
+                ):
+                    course_list = courses["courses"]
+                    break
+                logger.warning(
+                    f"Subject '{name}' ({year}) course fetch attempt {attempt + 1}/5 failed or blocked by WAF. Retrying with alternate proxy..."
+                )
+                time.sleep(0.5 + attempt * 0.3)
 
-        if course_list is None:
-            logger.error(
-                f"Subject '{name}' ({year}) could not be retrieved after 5 attempts. Skipping."
-            )
-            course_list = []
+            if course_list is None:
+                logger.error(
+                    f"Subject '{name}' ({year}) could not be retrieved after 5 attempts. Skipping."
+                )
+                course_list = []
 
         progress.update(subject_task, total=len(course_list))
 
@@ -856,15 +928,37 @@ def scrape_single_year(
     try:
         with Progress() as progress:
             subj_list = []
-            for attempt in range(4):
-                subjects = data_parser.get_subjects(year)
-                subj_list = subjects.get("subjects", [])
-                if subj_list:
-                    break
-                logger.warning(
-                    f"Subject discovery attempt {attempt + 1}/4 for year {year} returned 0 subjects. Retrying..."
+            # Fast path: bulk enumerate all courses for year in ~9 requests
+            try:
+                bulk_courses = data_parser.get_all_courses_bulk(year)
+            except Exception as e:
+                logger.debug(
+                    f"Bulk course discovery failed ({e}), falling back to subject discovery"
                 )
-                time.sleep(1.0 + attempt * 1.0)
+                bulk_courses = []
+
+            if bulk_courses:
+                subj_map: dict[str, list] = {}
+                for c in bulk_courses:
+                    sname = c.get("subject") or "General"
+                    subj_map.setdefault(sname, []).append(c)
+                subj_list = [
+                    {"subject": sname, "courses": clist}
+                    for sname, clist in subj_map.items()
+                ]
+                logger.info(
+                    f"Fast bulk discovery: {len(bulk_courses)} courses mapped to {len(subj_list)} subjects for year {year}."
+                )
+            else:
+                for attempt in range(4):
+                    subjects = data_parser.get_subjects(year)
+                    subj_list = subjects.get("subjects", [])
+                    if subj_list:
+                        break
+                    logger.warning(
+                        f"Subject discovery attempt {attempt + 1}/4 for year {year} returned 0 subjects. Retrying..."
+                    )
+                    time.sleep(1.0 + attempt * 1.0)
 
             if not subj_list:
                 logger.error(

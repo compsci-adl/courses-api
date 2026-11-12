@@ -84,6 +84,90 @@ def get_subjects(year: int, timeout: float = 3.0) -> dict[str, list[dict[str, st
     return {"subjects": []}
 
 
+def get_all_courses_bulk(year: int, max_per_page: int = 1000) -> list[dict]:
+    """Enumerate all courses for a target year via bulk paginated Funnelback queries in ~9 requests."""
+    all_courses = []
+    start_rank = 1
+
+    while True:
+        endpoint = (
+            f"?f.Tabs%7Ctype=Degrees+%26+Courses&form=json&f.Year%7Cyear={year}"
+            f"&num_ranks={max_per_page}&profile=site-search&query="
+            f"&collection=uosa%7Esp-aem-prod&f.Study+type%7CstudyType=Course"
+            f"&start_rank={start_rank}"
+        )
+        fetcher = data_fetcher.DataFetcher(endpoint, timeout=15.0)
+        data = fetcher.get()
+
+        if not data or not isinstance(data, dict):
+            break
+
+        results = data.get("resultPacket", {}).get("results", [])
+        if not results and "response" in data:
+            results = (
+                data.get("response", {}).get("resultPacket", {}).get("results", [])
+            )
+
+        if not results:
+            break
+
+        for item in results:
+            meta = item.get("listMetadata", {})
+            code_list = meta.get("courseCode")
+            code = (
+                code_list[0] if isinstance(code_list, list) and code_list else code_list
+            )
+            if not code:
+                continue
+
+            subj_list = meta.get("studyArea")
+            subj = (
+                subj_list[0]
+                if isinstance(subj_list, list) and subj_list
+                else (subj_list or "")
+            )
+
+            term_list = meta.get("term")
+            date_mod_list = meta.get("dateModified")
+            date_mod = (
+                date_mod_list[0]
+                if isinstance(date_mod_list, list) and date_mod_list
+                else date_mod_list
+            )
+
+            unit_list = meta.get("unitValue")
+            unit_val = (
+                unit_list[0] if isinstance(unit_list, list) and unit_list else unit_list
+            )
+
+            all_courses.append(
+                {
+                    "code": code,
+                    "title": item.get("title", "").strip(),
+                    "subject": subj,
+                    "terms": term_list,
+                    "date_modified": date_mod,
+                    "url": item.get("liveUrl"),
+                    "units": unit_val,
+                    "campus": meta.get("location"),
+                    "level_of_study": meta.get("studyLevel"),
+                    "course_level": meta.get("courseLevel"),
+                    "course_availability": meta.get("courseAvailability"),
+                }
+            )
+
+        rp = data.get("resultPacket") or data.get("response", {}).get(
+            "resultPacket", {}
+        )
+        total_matching = rp.get("resultsSummary", {}).get("totalMatching", 0)
+        start_rank += len(results)
+        if start_rank > total_matching or len(results) < max_per_page:
+            break
+
+    logger.info(f"Retrieved {len(all_courses)} total courses in bulk for year {year}")
+    return all_courses
+
+
 def get_course_codes(subject: str, year: int, timeout: float = 12.0):
     """Return a list of course codes for a given subject code and year."""
     # Ensure spaces and & are safely encoded for query string
@@ -145,6 +229,121 @@ def get_course_codes(subject: str, year: int, timeout: float = 12.0):
     return None
 
 
+def parse_course_document(html: str) -> dict:
+    """Extract complete course metadata, syllabus, and class availability from raw HTML in a single pass."""
+    if not html or not isinstance(html, str):
+        return {}
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    # 1. Title & Meta tags
+    h1 = soup.find("h1")
+    title = h1.get_text(strip=True) if h1 else ""
+    meta = {
+        m.get("property") or m.get("name"): m.get("content")
+        for m in soup.find_all("meta")
+    }
+
+    # 2. Overview
+    overview_sec = soup.find("section", id="overview")
+    overview = (
+        re.sub(r"^Course overview\s*", "", overview_sec.get_text("\n", strip=True))
+        if overview_sec
+        else ""
+    )
+
+    # 3. Learning outcomes
+    outcomes_sec = soup.find("section", id="outcomes")
+    outcomes = (
+        [
+            li.get_text(strip=True)
+            for li in outcomes_sec.find_all("li")
+            if li.get_text(strip=True)
+        ]
+        if outcomes_sec
+        else []
+    )
+
+    # 4. Requisites, Textbooks, Assessments
+    reqs_sec = soup.find("section", id="requisites")
+    prereqs, coreqs, antireqs, textbooks = "N/A", "N/A", "N/A", "N/A"
+    assessments = []
+
+    if reqs_sec:
+        for h2 in reqs_sec.find_all("h2"):
+            h_text = h2.get_text(strip=True).lower()
+            nxt = h2.find_next_sibling(["div", "p", "ul"])
+            txt = nxt.get_text(" ", strip=True) if nxt else "N/A"
+            if "prerequisite" in h_text:
+                prereqs = txt
+            elif "corequisite" in h_text:
+                coreqs = txt
+            elif "antirequisite" in h_text:
+                antireqs = txt
+
+        for h3 in reqs_sec.find_all("h3"):
+            h_text = h3.get_text(strip=True).lower()
+            nxt = h3.find_next_sibling(["div", "p", "ul"])
+            if "textbook" in h_text:
+                textbooks = nxt.get_text(" ", strip=True) if nxt else "N/A"
+            elif "assessment" in h_text and nxt:
+                raw_assessments = (
+                    [li.get_text(strip=True) for li in nxt.find_all("li")]
+                    if nxt.name == "ul"
+                    else [nxt.get_text(strip=True)]
+                )
+                for item in raw_assessments:
+                    if not item or item == "N/A":
+                        continue
+                    match = re.match(r"^(.*?)\s*[\u2013\u2014\-]\s*(\d+%\s*.*)$", item)
+                    if match:
+                        assessments.append(
+                            {
+                                "title": match.group(1).strip(),
+                                "weighting": match.group(2).strip(),
+                            }
+                        )
+                    else:
+                        assessments.append(
+                            {
+                                "title": item.strip(),
+                                "weighting": None,
+                            }
+                        )
+
+    # 5. Terms from accordion titles
+    terms = []
+    for el in soup.select(".cmp-course-accordion__title"):
+        txt = el.get_text(strip=True)
+        if re.search(
+            r"^(Semester|Trimester|Term|Summer|Winter|Spring|Autumn)\b",
+            txt,
+            re.I,
+        ):
+            if txt not in terms:
+                terms.append(txt)
+
+    # 6. Live class timetable
+    classes = parse_course_class_list(html)
+
+    return {
+        "title": title,
+        "course_code": meta.get("courseCode"),
+        "units": meta.get("unitValue"),
+        "date_modified": meta.get("dateModified"),
+        "course_overview": overview if overview else None,
+        "learning_outcomes": outcomes,
+        "prerequisites": prereqs,
+        "corequisites": coreqs,
+        "antirequisites": antireqs,
+        "textbooks": textbooks if textbooks != "N/A" else None,
+        "assessments": assessments,
+        "terms": terms if terms else None,
+        "classes": classes,
+        "has_classes": len(classes) > 0,
+    }
+
+
 def get_course_details(course_code: str, year: int | str | None = None):
     """Return the details for a given course with retries."""
     logger.debug(f"Fetching details for course {course_code}")
@@ -185,11 +384,14 @@ def get_course_details(course_code: str, year: int | str | None = None):
                 # Parse the plain-body text for label/value pairs
                 parsed = parse_course_text(body_text)
 
-                # Extract terms from raw HTML accordion titles if present
+                # Extract terms and syllabus fields from raw HTML
                 raw_html = data.get("html", "")
-                terms = []
-                if raw_html:
+                doc = parse_course_document(raw_html) if raw_html else {}
+
+                terms = doc.get("terms")
+                if not terms and raw_html:
                     html_soup = BeautifulSoup(raw_html, "html.parser")
+                    terms = []
                     for el in html_soup.select(".cmp-course-accordion__title"):
                         txt = el.get_text(strip=True)
                         if re.search(
@@ -203,17 +405,36 @@ def get_course_details(course_code: str, year: int | str | None = None):
                 # Return a dict with the parsed fields and the canonical code string
                 course_info = {
                     "code": code_str,
-                    "title": data.get("h1", ""),
+                    "title": data.get("h1") or doc.get("title", ""),
                     "course_id": parsed.get("course_id"),
                     "campus": parsed.get("campus"),
                     "level_of_study": parsed.get("level_of_study"),
-                    "units": parsed.get("units"),
+                    "units": parsed.get("units") or doc.get("units"),
                     "course_coordinator": parsed.get("course_coordinator"),
                     "course_level": parsed.get("course_level"),
-                    "course_overview": parsed.get("course_overview"),
-                    "prerequisites": parsed.get("prerequisites"),
-                    "corequisites": parsed.get("corequisites"),
-                    "antirequisites": parsed.get("antirequisites"),
+                    "course_overview": doc.get("course_overview")
+                    or parsed.get("course_overview"),
+                    "prerequisites": (
+                        doc.get("prerequisites")
+                        if doc.get("prerequisites")
+                        and doc.get("prerequisites") != "N/A"
+                        else parsed.get("prerequisites")
+                    ),
+                    "corequisites": (
+                        doc.get("corequisites")
+                        if doc.get("corequisites") and doc.get("corequisites") != "N/A"
+                        else parsed.get("corequisites")
+                    ),
+                    "antirequisites": (
+                        doc.get("antirequisites")
+                        if doc.get("antirequisites")
+                        and doc.get("antirequisites") != "N/A"
+                        else parsed.get("antirequisites")
+                    ),
+                    "textbooks": doc.get("textbooks"),
+                    "learning_outcomes": doc.get("learning_outcomes", []),
+                    "assessments": doc.get("assessments", []),
+                    "date_modified": doc.get("date_modified"),
                     "university_wide_elective": (
                         True
                         if parsed.get("university_wide_elective") == "Yes"
@@ -222,6 +443,7 @@ def get_course_details(course_code: str, year: int | str | None = None):
                         else parsed.get("university_wide_elective")
                     ),
                     "terms": terms if terms else None,
+                    "classes": doc.get("classes", []),
                     "html": raw_html,
                 }
 
@@ -294,6 +516,56 @@ def parse_course_text(text: str) -> dict:
     return parsed
 
 
+def is_valid_course_page(soup: BeautifulSoup, default_h1: str = "") -> bool:
+    """Check if the page successfully loaded as a valid course page (not blocked or malformed)."""
+    if not soup:
+        return False
+
+    h1_el = soup.find("h1")
+    h1_text = (h1_el.get_text(strip=True) if h1_el else default_h1).lower()
+
+    # Block pages / WAF / Cloudflare interstitials
+    if any(
+        blocked in h1_text
+        for blocked in [
+            "forbidden",
+            "attention required",
+            "access denied",
+            "just a moment",
+            "cloudflare",
+        ]
+    ):
+        return False
+
+    title_el = soup.find("title")
+    title_text = title_el.get_text(strip=True).lower() if title_el else ""
+    if any(
+        blocked in title_text
+        for blocked in [
+            "attention required",
+            "cloudflare",
+            "access denied",
+            "403 forbidden",
+        ]
+    ):
+        return False
+
+    has_course_meta = any(
+        meta.get("property") in ("courseCode", "areaCatalogue", "og:title")
+        or meta.get("name") in ("courseCode", "areaCatalogue")
+        for meta in soup.find_all("meta")
+    )
+    has_course_structure = bool(
+        soup.select_one(".cmp-herobanner")
+        or soup.select_one(".courseavailability")
+        or soup.select_one(".cmp-course-accordion")
+        or soup.select_one(".coursedetail")
+        or soup.select_one(".cmp-course-page")
+    )
+
+    return bool(h1_text and (has_course_meta or has_course_structure))
+
+
 def get_course_class_list(
     course_code: int | str,
     year: int | str | None = None,
@@ -302,7 +574,7 @@ def get_course_class_list(
     """Return the class list of a course for a given course code."""
     if raw_html:
         parsed_classes = parse_course_class_list(raw_html)
-        return {"classes": parsed_classes}
+        return {"classes": parsed_classes, "is_valid_page": True}
 
     # Encode course code to match URL format
     code_str = course_code[0] if isinstance(course_code, (list, tuple)) else course_code
@@ -345,6 +617,7 @@ def get_course_class_list(
                         "title": data.get("h1", "") if isinstance(data, dict) else "",
                         "course_id": None,
                         "classes": [],
+                        "is_valid_page": True,
                     }
                 # Transient failure — retry
                 logger.debug(
@@ -356,22 +629,48 @@ def get_course_class_list(
 
             # Use raw HTML for BeautifulSoup parsing
             text = data.get("html", "") or data.get("data", "")
+            soup = BeautifulSoup(text, "html.parser") if text else None
 
-            # Parse the plain-body text for class list details
+            # 1. Parse the plain-body text for class list details
             parsed_classes = parse_course_class_list(text)
             if parsed_classes:
-                return {"classes": parsed_classes}
+                return {"classes": parsed_classes, "is_valid_page": True}
 
-            # Got a 200 but no classes parsed — could be a redirect/empty page; retry once
+            # 2. Check if the page successfully loaded as a valid course page (not blocked or malformed)
+            default_h1 = data.get("h1", "") if isinstance(data, dict) else ""
+            valid_page = (
+                is_valid_course_page(soup, default_h1=default_h1) if soup else False
+            )
+            if valid_page:
+                # Valid course page, but course simply has no scheduled classes for this year.
+                # Accept immediately and do NOT retry across proxies!
+                logger.debug(
+                    f"Course {course_code} (year {year}) has no scheduled classes. Proceeding without retry."
+                )
+                return {
+                    "code": code_str,
+                    "title": default_h1,
+                    "course_id": None,
+                    "classes": [],
+                    "is_valid_page": True,
+                }
+
+            # 3. Got a 200 but page is broken, malformed, or WAF-blocked — retry with alternate proxy
             if attempt < 3:
                 logger.debug(
-                    f"Class list for {course_code} returned 200 but parsed 0 classes "
-                    f"(attempt {attempt + 1}/4). Retrying..."
+                    f"Class list page for {course_code} was malformed or blocked "
+                    f"(attempt {attempt + 1}/4). Retrying with alternate proxy..."
                 )
                 time.sleep(0.5 + attempt * 0.5)
                 continue
 
-            return {"classes": parsed_classes}
+            return {
+                "code": code_str,
+                "title": "",
+                "course_id": None,
+                "classes": [],
+                "is_valid_page": False,
+            }
 
         except Exception as e:
             logger.debug(
@@ -387,6 +686,7 @@ def get_course_class_list(
         "title": "",
         "course_id": None,
         "classes": [],
+        "is_valid_page": False,
     }
 
 
