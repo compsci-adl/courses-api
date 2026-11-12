@@ -175,6 +175,32 @@ Yes
         self.assertEqual(res["classes"], [])
         self.assertFalse(res.get("is_valid_page"))
 
+    @patch("data_parser.parse_course_class_list", return_value=[])
+    @patch("data_parser.data_fetcher.DataFetcher")
+    def test_get_course_class_list_timetable_marker_zero_classes_retries(
+        self, mock_fetcher_cls, mock_parse_classes
+    ):
+        """When timetable/term markers exist on page but 0 classes parse, must retry across proxies."""
+        mock_fetcher = MagicMock()
+        mock_fetcher_cls.return_value = mock_fetcher
+        mock_fetcher.get.return_value = {
+            "h1": "Clinical Practice",
+            "data": "",
+            "html": (
+                "<html><head><meta property='courseCode' content='DENT 1005'></head><body>"
+                "<div class='cmp-herobanner'><h1>Clinical Practice</h1></div>"
+                "<div class='courseavailability'>Availability Semester 1 Enrol by date</div>"
+                "</body></html>"
+            ),
+        }
+        mock_fetcher.last_response.status_code = 200
+
+        res = data_parser.get_course_class_list("DENT1005", year=2027)
+
+        # Must retry across 4 attempts because availability marker exists
+        self.assertEqual(mock_fetcher_cls.call_count, 4)
+        self.assertEqual(res["classes"], [])
+
     @patch("data_parser.data_fetcher.DataFetcher")
     def test_get_all_courses_bulk(self, mock_fetcher_cls):
         """Verify get_all_courses_bulk parses paginated Funnelback JSON into course records."""

@@ -165,6 +165,30 @@ class TestSelectiveClassReplace(unittest.TestCase):
         self.assertEqual(len(cid_2_classes), 1)
         self.assertEqual(cid_2_classes[0].class_nbr, 2222)
 
+    def test_selective_replace_preserves_classes_for_course_with_terms_when_zero_new_classes(
+        self,
+    ):
+        """When a course has scheduled terms in DB, a scrape that yields 0 classes must NOT wipe out existing classes."""
+        from db_service import bulk_replace_classes_for_year
+        from models import CourseClass
+
+        # cid_1 has terms="Semester 1" and initially 1 class (class_nbr=1111).
+        # A scrape runs and returns 0 classes for cid_1 (e.g. transient WAF/network glitch).
+        bulk_replace_classes_for_year(
+            self.session,
+            year=2026,
+            classes_data=[],
+            meetings_data=[],
+            fetched_course_ids={"cid_1"},
+        )
+
+        # cid_1's existing class must be preserved, not wiped to 0!
+        cid_1_classes = (
+            self.session.query(CourseClass).filter_by(course_id="cid_1").all()
+        )
+        self.assertEqual(len(cid_1_classes), 1)
+        self.assertEqual(cid_1_classes[0].class_nbr, 1111)
+
     def test_extract_and_queue_classes_tracks_fetched_ids(self):
         from threading import Lock
         from unittest.mock import patch

@@ -777,6 +777,44 @@ def get_course_class_list(
             if parsed_classes:
                 return {"classes": parsed_classes, "is_valid_page": True}
 
+            # Check if page has indicators of timetable availability
+            has_timetable_marker = False
+            has_term_meta = False
+            if soup:
+                has_timetable_marker = bool(
+                    soup.select_one(".cmp-course-accordion__class-details")
+                    or soup.select_one(".cmp-course-accordion--container-session")
+                    or (
+                        soup.select_one(".courseavailability")
+                        and any(
+                            kw
+                            in soup.select_one(".courseavailability").get_text().lower()
+                            for kw in [
+                                "availability",
+                                "semester",
+                                "trimester",
+                                "term",
+                                "enrol by",
+                            ]
+                        )
+                    )
+                )
+                has_term_meta = any(
+                    (meta.get("property") == "term" or meta.get("name") == "term")
+                    and bool(meta.get("content"))
+                    for meta in soup.find_all("meta")
+                )
+
+            # If timetable or term markers exist on the page but parsed_classes is empty,
+            # this indicates a corrupted/partial render or edge glitch -> retry!
+            if (has_timetable_marker or has_term_meta) and attempt < 3:
+                logger.debug(
+                    f"Class list page for {course_code} had timetable/term markers but parsed 0 classes "
+                    f"(attempt {attempt + 1}/4). Retrying with alternate connection..."
+                )
+                time.sleep(0.5 + attempt * 0.5)
+                continue
+
             # 2. Check if the page successfully loaded as a valid course page (not blocked or malformed)
             default_h1 = data.get("h1", "") if isinstance(data, dict) else ""
             valid_page = (
@@ -784,8 +822,8 @@ def get_course_class_list(
                 if soup
                 else False
             )
-            if valid_page:
-                # Valid course page, but course simply has no scheduled classes for this year.
+            if valid_page and not has_timetable_marker:
+                # Valid course page, and course genuinely has no scheduled classes for this year.
                 # Accept immediately and do NOT retry across proxies!
                 logger.debug(
                     f"Course {course_code} (year {year}) has no scheduled classes. Proceeding without retry."

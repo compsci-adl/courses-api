@@ -374,10 +374,33 @@ def bulk_replace_classes_for_year(
         # --- Selective per-course replace ---
         # Only wipe classes for courses we successfully fetched this run.
         # Courses that errored / timed out keep their existing DB rows.
-        fetched_list = list(fetched_course_ids)
+        # Safeguard: if a course previously had classes in the DB and this run fetched 0 classes,
+        # do not wipe its existing classes if the course has scheduled terms in the DB.
+        # This prevents transient network/WAF/parser glitches from deleting valid timetable data.
+        courses_with_new_classes = {c["course_id"] for c in (classes_data or [])}
+        fetched_list_all = list(fetched_course_ids)
+
+        courses_with_terms = set(
+            r[0]
+            for r in session.query(Course.id)
+            .filter(
+                Course.year == year,
+                Course.id.in_(fetched_list_all),
+                Course.terms.isnot(None),
+                Course.terms != "",
+            )
+            .all()
+        )
+
+        chunk_ids_to_wipe = [
+            cid
+            for cid in fetched_list_all
+            if cid in courses_with_new_classes or cid not in courses_with_terms
+        ]
+
         # Delete in chunks to avoid SQLite's variable limit
-        for i in range(0, len(fetched_list), chunk_size):
-            chunk_ids = fetched_list[i : i + chunk_size]
+        for i in range(0, len(chunk_ids_to_wipe), chunk_size):
+            chunk_ids = chunk_ids_to_wipe[i : i + chunk_size]
             session.query(Meetings).filter(
                 Meetings.year == year,
                 Meetings.course_class_id.in_(
