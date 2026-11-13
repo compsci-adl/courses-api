@@ -19,7 +19,7 @@ _tls = threading.local()
 def _get_tls_session() -> requests.Session:
     """Get or create a thread-local persistent Session for connection pooling."""
     if not hasattr(_tls, "session") or _tls.session is None:
-        _tls.session = requests.Session(impersonate="chrome146")
+        _tls.session = requests.Session(impersonate="chrome124")
     return _tls.session
 
 
@@ -78,10 +78,12 @@ class DataFetcher:
         full_url: str = None,
         use_proxy: bool = True,
         timeout: float = 3.0,
+        if_modified_since: str | None = None,
     ) -> None:
         self.endpoint = endpoint
         self.use_class_url = use_class_url
         self.timeout = timeout
+        self.if_modified_since = if_modified_since
         if full_url:
             self.url = full_url
         elif self.use_class_url:
@@ -144,7 +146,7 @@ class DataFetcher:
         }
 
     def report_proxy_failure(self, proxy: dict, fatal: bool = False) -> None:
-        """Record a failure for a proxy. Remove it only if it exceeds MAX_PROXY_FAILURES or fatal is True."""
+        """Record a failure for a proxy. Remove it immediately if fatal=True or after MAX_PROXY_FAILURES."""
         if not proxy:
             return
         proxy_str = proxy.get("http", "").replace("http://", "")
@@ -158,7 +160,7 @@ class DataFetcher:
                     try:
                         DataFetcher._proxies.remove(proxy_str)
                         logger.info(
-                            f"Removed bad proxy: {proxy_str} (failures: {count}). Remaining: {len(DataFetcher._proxies)}"
+                            f"Removed bad proxy: {proxy_str} (failures: {count}, fatal: {fatal}). Remaining: {len(DataFetcher._proxies)}"
                         )
                     except ValueError:
                         pass
@@ -184,9 +186,55 @@ class DataFetcher:
         """Explicitly remove a proxy (fatal failure)."""
         self.report_proxy_failure(proxy, fatal=True)
 
+    def _is_xml_request(self) -> bool:
+        """Check if target endpoint or URL is an XML resource."""
+        url_part = (self.url or "").lower().split("?")[0]
+        endpoint_part = (self.endpoint or "").lower().split("?")[0]
+        return url_part.endswith(".xml") or endpoint_part.endswith(".xml")
+
+    @staticmethod
+    def _parse_bytes_received(error: Any) -> int:
+        """Extract bytes received from curl error message if present (e.g. curl: (28))."""
+        msg = str(error)
+        match = re.search(r"with\s+(\d+)\s+bytes\s+received", msg, re.IGNORECASE)
+        if match:
+            try:
+                return int(match.group(1))
+            except (ValueError, TypeError):
+                pass
+        return 0
+
     def _process_response(self, response):
         """Process and store a successful response based on endpoint type."""
         self.last_response = response
+        if response.status_code == 304:
+            self.data = {
+                "status_code": 304,
+                "not_modified": True,
+                "edge_date": response.headers.get("date"),
+            }
+            return self.data
+
+        if self._is_xml_request():
+            raw_xml = response.text or ""
+            # Validate completeness: must contain closing tag </urlset> or </sitemapindex>
+            if (
+                len(raw_xml) > 200
+                and "</urlset>" not in raw_xml.lower()
+                and "</sitemapindex>" not in raw_xml.lower()
+            ):
+                logger.debug(
+                    "Received truncated XML from proxy/server (missing </urlset> or </sitemapindex>). Retrying..."
+                )
+                return None
+            self.data = {
+                "h1": "",
+                "data": raw_xml,
+                "html": raw_xml,
+                "edge_date": response.headers.get("date"),
+            }
+            return self.data
+
         if not self.use_class_url:
             resp = json_repair.loads(response.text)
             if not isinstance(resp, dict):
@@ -199,6 +247,20 @@ class DataFetcher:
                 return self.data
             return None
         else:
+            if self.use_class_url:
+                raw_html = response.text or ""
+                # Truncation check: Adelaide course pages are > 20KB and end with </html> or </body>.
+                # If proxy severed connection prematurely, reject response so it retries.
+                if (
+                    len(raw_html) > 1000
+                    and "</html>" not in raw_html.lower()
+                    and "</body>" not in raw_html.lower()
+                ):
+                    logger.debug(
+                        "Received truncated HTML from proxy/server (missing </html>). Retrying..."
+                    )
+                    return None
+
             soup = BeautifulSoup(response.content, "html.parser")
             main_tag = soup.find("main")
             text = main_tag.get_text() if main_tag else soup.get_text()
@@ -208,20 +270,39 @@ class DataFetcher:
                 "h1": h1_text,
                 "data": re.sub(r"\n+", "\n", text),
                 "html": response.text,
+                "edge_date": response.headers.get("date"),
             }
             return self.data
 
     def _get_headers(self) -> dict:
-        """Flexible headers depending on target endpoint (html page vs json api)."""
-        if self.use_class_url:
-            return {
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+        """Flexible headers depending on target endpoint (xml vs html page vs json api)."""
+        headers = {}
+        if self._is_xml_request():
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                "Accept": "application/xml, text/xml, */*;q=0.8",
                 "Accept-Language": "en-US,en;q=0.9",
-                "Referer": "https://www.adelaide.edu.au/",
+                "Referer": "https://adelaide.edu.au/",
                 "Cache-Control": "no-cache",
                 "Pragma": "no-cache",
-                "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="146", "Google Chrome";v="146"',
+                "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+                "Sec-Ch-Ua-Mobile": "?0",
+                "Sec-Ch-Ua-Platform": '"macOS"',
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "same-origin",
+                "Sec-Fetch-User": "?1",
+                "Upgrade-Insecure-Requests": "1",
+            }
+        elif self.use_class_url:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Referer": "https://adelaide.edu.au/study/courses/",
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache",
+                "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
                 "Sec-Ch-Ua-Mobile": "?0",
                 "Sec-Ch-Ua-Platform": '"macOS"',
                 "Sec-Fetch-Dest": "document",
@@ -231,16 +312,16 @@ class DataFetcher:
                 "Upgrade-Insecure-Requests": "1",
             }
         else:
-            return {
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                 "Accept": "application/json, text/javascript, */*; q=0.01",
                 "Accept-Language": "en-US,en;q=0.9",
-                "Referer": "https://www.adelaide.edu.au/",
-                "Origin": "https://www.adelaide.edu.au",
+                "Referer": "https://adelaide.edu.au/study/courses/",
+                "Origin": "https://adelaide.edu.au",
                 "Cache-Control": "no-cache",
                 "Pragma": "no-cache",
                 "X-Requested-With": "XMLHttpRequest",
-                "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="146", "Google Chrome";v="146"',
+                "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
                 "Sec-Ch-Ua-Mobile": "?0",
                 "Sec-Ch-Ua-Platform": '"macOS"',
                 "Sec-Fetch-Dest": "empty",
@@ -248,11 +329,16 @@ class DataFetcher:
                 "Sec-Fetch-Site": "cross-site",
             }
 
+        if self.if_modified_since:
+            headers["If-Modified-Since"] = self.if_modified_since
+
+        return headers
+
     def _execute_http_get(
         self,
         url: str,
         headers: dict,
-        timeout: float,
+        timeout: float | tuple[float, float],
         proxy: dict | None = None,
     ):
         """Execute HTTP GET using persistent Session pooling, falling back to requests.get if mocked."""
@@ -265,13 +351,13 @@ class DataFetcher:
                     proxies=proxy,
                     headers=headers,
                     timeout=timeout,
-                    impersonate="chrome146",
+                    impersonate="chrome124",
                 )
             return requests.get(
                 url,
                 headers=headers,
                 timeout=timeout,
-                impersonate="chrome146",
+                impersonate="chrome124",
             )
         sess = _get_tls_session()
         if proxy:
@@ -290,46 +376,114 @@ class DataFetcher:
 
         headers = self._get_headers()
 
-        # Direct Connection First
+        # Direct Connection First (with retries and 3s backoff before proxy fallback)
         is_ci = bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))
-        base_timeout = max(self.timeout, 8.0) if is_ci else max(self.timeout, 5.0)
+        direct_connect = float(
+            os.environ.get("DIRECT_CONNECT_TIMEOUT", "8.0" if is_ci else "5.0")
+        )
+        direct_read_base = float(
+            os.environ.get("DIRECT_READ_TIMEOUT", str(max(self.timeout, 20.0)))
+        )
+        direct_read = direct_read_base
 
-        if not DataFetcher.is_direct_blocked():
-            sem_ctx = (
-                DataFetcher._funnelback_semaphore
-                if not self.use_class_url
-                else threading.Lock()
+        can_try_direct = (
+            self._is_xml_request()
+            or not self.use_class_url
+            or not DataFetcher.is_direct_blocked()
+        )
+        if can_try_direct:
+            is_mock = hasattr(requests.get, "assert_called") or hasattr(
+                requests.get, "_mock_return_value"
             )
-            with sem_ctx:
+            direct_backoff = (
+                0.01 if is_mock else float(os.environ.get("DIRECT_BACKOFF_SEC", "3.0"))
+            )
+            max_direct_attempts = 3
+
+            for direct_attempt in range(max_direct_attempts):
+                if (
+                    not self._is_xml_request()
+                    and self.use_class_url
+                    and DataFetcher.is_direct_blocked()
+                ):
+                    break
+
+                sem_ctx = (
+                    DataFetcher._funnelback_semaphore
+                    if not self.use_class_url
+                    else threading.Lock()
+                )
                 try:
                     logger.debug(
-                        "Attempting direct connection for %s...",
+                        "Attempting direct connection for %s (attempt %d/%d, timeout=(%.1f, %.1f))...",
                         self._sanitise_for_log(self.endpoint),
+                        direct_attempt + 1,
+                        max_direct_attempts,
+                        direct_connect,
+                        direct_read,
                     )
-                    direct_resp = self._execute_http_get(
-                        self.url, headers=headers, timeout=base_timeout
-                    )
+                    with sem_ctx:
+                        direct_resp = self._execute_http_get(
+                            self.url,
+                            headers=headers,
+                            timeout=(direct_connect, direct_read),
+                        )
                     self.last_response = direct_resp
-                    if direct_resp.status_code == 200:
+                    if direct_resp.status_code in (200, 304):
                         parsed = self._process_response(direct_resp)
                         if parsed is not None:
                             return parsed
+                        logger.debug(
+                            "Direct response unparseable/truncated for %s (attempt %d/%d).",
+                            self._sanitise_for_log(self.endpoint),
+                            direct_attempt + 1,
+                            max_direct_attempts,
+                        )
                     elif direct_resp.status_code == 404:
                         logger.warning("HTTP 404 - Not Found: %s", self.url)
                         return {}
                     elif direct_resp.status_code in (403, 429):
                         DataFetcher._direct_blocked = True
-                        DataFetcher._direct_blocked_until = time.time() + 15.0
-                        logger.warning(
-                            "Direct connection rate-limited/blocked by WAF (HTTP %s). "
-                            "Pausing direct requests for 15s cooldown and trying proxies.",
+                        DataFetcher._direct_blocked_until = time.time() + 20.0
+                        if self.use_class_url:
+                            logger.warning(
+                                "Direct connection rate-limited/blocked by WAF (HTTP %s). "
+                                "Pausing direct course requests for 20s cooldown and trying proxies.",
+                                direct_resp.status_code,
+                            )
+                        break
+                    else:
+                        logger.debug(
+                            "Direct connection got HTTP %s for %s (attempt %d/%d).",
                             direct_resp.status_code,
+                            self._sanitise_for_log(self.endpoint),
+                            direct_attempt + 1,
+                            max_direct_attempts,
                         )
                 except Exception as e:
+                    err_msg = str(e)
+                    bytes_rcvd = self._parse_bytes_received(err_msg)
+                    is_timeout = (
+                        isinstance(e, requests.exceptions.Timeout)
+                        or "curl: (28)" in err_msg
+                        or "timed out" in err_msg.lower()
+                    )
+                    if is_timeout and bytes_rcvd > 0:
+                        direct_read = direct_read_base * 1.5
+                        logger.debug(
+                            "Direct connection timed out mid-transfer (%d bytes received). Escalating direct read timeout to %.1fs.",
+                            bytes_rcvd,
+                            direct_read,
+                        )
                     logger.debug(
-                        "Direct connection attempt failed (%s). Falling back to proxies.",
+                        "Direct connection attempt %d/%d failed (%s).",
+                        direct_attempt + 1,
+                        max_direct_attempts,
                         self._sanitise_for_log(e),
                     )
+
+                if direct_attempt < max_direct_attempts - 1:
+                    time.sleep(direct_backoff)
 
         # If proxy is disabled, return without proxy fallback
         if not self.use_proxy:
@@ -337,20 +491,37 @@ class DataFetcher:
 
         # Smart Proxy Fallback with generous timeout and priority queue of working proxies
         retries = 0
-        proxy_timeout = min(max(self.timeout, 6.0), 12.0)
+        proxy_connect = float(os.environ.get("PROXY_CONNECT_TIMEOUT", "6.0"))
+        proxy_read_base = float(
+            os.environ.get("PROXY_READ_TIMEOUT", str(max(self.timeout, 18.0)))
+        )
+        had_partial_timeout = False
+
         with DataFetcher._proxy_lock:
             pool_size = len(DataFetcher._proxies or [])
-        max_retries = max(min(max_retries, pool_size), 15)
+        # On CI use more retries since direct connection is always blocked
+        if max_retries > 1:
+            ci_min = 25 if is_ci else 15
+            effective_max_retries = max(min(max_retries, pool_size), ci_min)
+        else:
+            effective_max_retries = max_retries
 
-        while retries < max_retries:
+        while retries < effective_max_retries:
+            current_proxy_read = (
+                proxy_read_base * 1.5 if had_partial_timeout else proxy_read_base
+            )
+            proxy_timeout = (proxy_connect, current_proxy_read)
+
             # Re-attempt direct connection after 2 proxy failures only if not blocked by WAF
             if retries == 2 and not DataFetcher.is_direct_blocked():
                 try:
                     direct_resp = self._execute_http_get(
-                        self.url, headers=headers, timeout=base_timeout
+                        self.url,
+                        headers=headers,
+                        timeout=(direct_connect, direct_read),
                     )
                     self.last_response = direct_resp
-                    if direct_resp.status_code == 200:
+                    if direct_resp.status_code in (200, 304):
                         parsed = self._process_response(direct_resp)
                         if parsed is not None:
                             return parsed
@@ -364,7 +535,12 @@ class DataFetcher:
                 continue
 
             try:
-                logger.debug("Using proxy: %s", self._sanitise_for_log(proxy))
+                logger.debug(
+                    "Using proxy: %s (timeout=(%.1f, %.1f))",
+                    self._sanitise_for_log(proxy),
+                    proxy_connect,
+                    current_proxy_read,
+                )
                 response = self._execute_http_get(
                     self.url, headers=headers, timeout=proxy_timeout, proxy=proxy
                 )
@@ -381,13 +557,23 @@ class DataFetcher:
                     logger.warning("HTTP 404 - Not Found: %s", self.url)
                     return {}
 
-                if response.status_code == 403:
-                    logger.warning("HTTP 403 - Forbidden for proxy: %s", proxy)
+                if response.status_code in (403, 407):
+                    logger.warning(
+                        "HTTP %s - Forbidden/Auth Required for proxy: %s",
+                        response.status_code,
+                        proxy,
+                    )
                     self.report_proxy_failure(proxy, fatal=True)
                     retries += 1
                     continue
 
-                if response.status_code != 200:
+                if response.status_code == 406:
+                    logger.warning("HTTP 406 - Not Acceptable via proxy: %s", proxy)
+                    self.report_proxy_failure(proxy, fatal=False)
+                    retries += 1
+                    continue
+
+                if response.status_code not in (200, 304):
                     logger.error("HTTP %s via proxy", response.status_code)
                     self.report_proxy_failure(proxy, fatal=True)
                     retries += 1
@@ -399,7 +585,7 @@ class DataFetcher:
                     self.report_proxy_success(proxy)
                     return parsed
                 else:
-                    self.report_proxy_failure(proxy, fatal=True)
+                    self.report_proxy_failure(proxy, fatal=False)
                 retries += 1
 
             except (
@@ -407,26 +593,56 @@ class DataFetcher:
                 requests.exceptions.ProxyError,
                 requests.exceptions.RequestException,
             ) as e:
-                logger.debug(
-                    "Proxy error/timeout (%s): %s",
-                    self._sanitise_for_log(e),
-                    self._sanitise_for_log(proxy),
+                err_msg = str(e)
+                bytes_rcvd = self._parse_bytes_received(err_msg)
+                is_timeout = (
+                    isinstance(e, requests.exceptions.Timeout)
+                    or "curl: (28)" in err_msg
+                    or "timed out" in err_msg.lower()
                 )
-                self.report_proxy_failure(proxy, fatal=True)
+                if is_timeout and bytes_rcvd > 0:
+                    had_partial_timeout = True
+                    logger.debug(
+                        "Proxy %s timed out mid-transfer (%d bytes received). Retrying with fatal=False (timeout escalation to %.1fs).",
+                        self._sanitise_for_log(proxy),
+                        bytes_rcvd,
+                        proxy_read_base * 1.5,
+                    )
+                    self.report_proxy_failure(proxy, fatal=False)
+                else:
+                    logger.debug(
+                        "Proxy error/timeout (%s): %s",
+                        self._sanitise_for_log(e),
+                        self._sanitise_for_log(proxy),
+                    )
+                    self.report_proxy_failure(proxy, fatal=True)
                 retries += 1
             except Exception as e:
-                logger.debug(
-                    "Unexpected error on proxy (%s): %s",
-                    self._sanitise_for_log(e),
-                    self._sanitise_for_log(proxy),
-                )
-                self.report_proxy_failure(proxy, fatal=True)
+                err_msg = str(e)
+                bytes_rcvd = self._parse_bytes_received(err_msg)
+                is_timeout = "curl: (28)" in err_msg or "timed out" in err_msg.lower()
+                if is_timeout and bytes_rcvd > 0:
+                    had_partial_timeout = True
+                    logger.debug(
+                        "Proxy %s timed out mid-transfer (%d bytes received). Retrying with fatal=False (timeout escalation to %.1fs).",
+                        self._sanitise_for_log(proxy),
+                        bytes_rcvd,
+                        proxy_read_base * 1.5,
+                    )
+                    self.report_proxy_failure(proxy, fatal=False)
+                else:
+                    logger.debug(
+                        "Unexpected error on proxy (%s): %s",
+                        self._sanitise_for_log(e),
+                        self._sanitise_for_log(proxy),
+                    )
+                    self.report_proxy_failure(proxy, fatal=True)
                 retries += 1
 
         logger.error(
             "Failed to fetch data from %s after %s attempts.",
             self.url,
-            max_retries,
+            effective_max_retries,
         )
         return {}
 
@@ -442,19 +658,20 @@ class DataFetcher:
         headers = self._get_headers()
         base_timeout = max(self.timeout, 6.0)
 
-        if not DataFetcher.is_direct_blocked():
+        can_try_direct = not self.use_class_url or not DataFetcher.is_direct_blocked()
+        if can_try_direct:
             try:
                 if session is not None:
                     resp = await session.get(
                         self.url, headers=headers, timeout=base_timeout
                     )
                 else:
-                    async with AsyncSession(impersonate="chrome146") as local_sess:
+                    async with AsyncSession(impersonate="chrome124") as local_sess:
                         resp = await local_sess.get(
                             self.url, headers=headers, timeout=base_timeout
                         )
                 self.last_response = resp
-                if resp.status_code == 200:
+                if resp.status_code in (200, 304):
                     parsed = self._process_response(resp)
                     if parsed is not None:
                         return parsed
@@ -462,7 +679,7 @@ class DataFetcher:
                     return {}
                 elif resp.status_code in (403, 429):
                     DataFetcher._direct_blocked = True
-                    DataFetcher._direct_blocked_until = time.time() + 15.0
+                    DataFetcher._direct_blocked_until = time.time() + 20.0
             except Exception as e:
                 logger.debug(f"Direct async connection attempt failed: {e}")
 
@@ -486,7 +703,7 @@ class DataFetcher:
                         timeout=proxy_timeout,
                     )
                 else:
-                    async with AsyncSession(impersonate="chrome146") as local_sess:
+                    async with AsyncSession(impersonate="chrome124") as local_sess:
                         resp = await local_sess.get(
                             self.url,
                             proxies=proxy,
@@ -494,7 +711,7 @@ class DataFetcher:
                             timeout=proxy_timeout,
                         )
                 self.last_response = resp
-                if resp.status_code == 200:
+                if resp.status_code in (200, 304):
                     parsed = self._process_response(resp)
                     if parsed is not None:
                         self.report_proxy_success(proxy)

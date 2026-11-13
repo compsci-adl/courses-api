@@ -97,6 +97,45 @@ def get_existing_class_count_for_year(session: Session, year: int) -> int:
         return 0
 
 
+def get_courses_with_syllabus_for_year(session: Session, year: int) -> set[str]:
+    """Returns the set of course_ids that already have learning outcomes or assessments for this year."""
+    try:
+        lo_ids = {
+            r[0]
+            for r in session.query(LearningOutcome.course_id)
+            .filter(LearningOutcome.year == year)
+            .distinct()
+            .all()
+        }
+        assess_ids = {
+            r[0]
+            for r in session.query(Assessment.course_id)
+            .filter(Assessment.year == year)
+            .distinct()
+            .all()
+        }
+        return lo_ids.union(assess_ids)
+    except Exception:
+        return set()
+
+
+def get_courses_with_terms_for_year(session: Session, year: int) -> set[str]:
+    """Returns the set of course_ids that already have non-empty terms populated in DB for this year."""
+    try:
+        rows = (
+            session.query(Course.id)
+            .filter(
+                Course.year == year,
+                Course.terms.isnot(None),
+                Course.terms != "",
+            )
+            .all()
+        )
+        return {r[0] for r in rows}
+    except Exception:
+        return set()
+
+
 def get_previous_years_course_data(
     session_or_engine, target_year: int
 ) -> dict[str, dict]:
@@ -302,38 +341,23 @@ def bulk_replace_classes_for_year(
     year: int,
     classes_data: list[dict],
     meetings_data: list[dict] | None = None,
+    fetched_course_ids: set[str] | None = None,
 ):
-    """Since class availability is dynamic and ephemeral, replace the entire year's
+    """Update class availability for a year using per-course selective replacement.
 
-    classes and meetings in atomic operations rather than checking row by row.
+    Only courses that were *successfully* fetched (present in ``fetched_course_ids``)
+    have their old classes deleted and replaced with the new data.  Courses that could
+    not be reached this run (proxy timeout / WAF block) are left untouched in the DB so
+    their previous class data is preserved.
+
+    If ``fetched_course_ids`` is None (legacy call) the old year-wide delete+replace
+    behaviour is preserved.
+
     Deduplicates in memory on the unique constraint and chunks inserts using
     SQLite ON CONFLICT DO UPDATE.
     """
-    if not classes_data:
+    if not classes_data and not fetched_course_ids:
         return
-
-    # In-memory deduplication on the unique key constraint
-    # Prevents collisions when the scraper extracts the same class/section/group twice
-    deduped_classes = {}
-    for item in classes_data:
-        key = (
-            item["year"],
-            item["course_id"],
-            str(item["class_nbr"]),
-            str(item["section"]),
-            str(item.get("group", "1")),
-        )
-        deduped_classes[key] = item
-
-    clean_classes = list(deduped_classes.values())
-
-    # Delete existing meetings and classes for this year
-    session.query(Meetings).filter(Meetings.year == year).delete(
-        synchronize_session=False
-    )
-    session.query(CourseClass).filter(CourseClass.year == year).delete(
-        synchronize_session=False
-    )
 
     # Ensure unique index exists on SQLite for ON CONFLICT target
     try:
@@ -344,9 +368,83 @@ def bulk_replace_classes_for_year(
     except Exception:
         pass
 
-    # Batch insert using SQLite ON CONFLICT
-    # Chunking by 2,000 prevents exceeding SQLite's bound parameter limits
     chunk_size = 2000
+
+    if fetched_course_ids is not None:
+        # --- Selective per-course replace ---
+        # Only wipe classes for courses we successfully fetched this run.
+        # Courses that errored / timed out keep their existing DB rows.
+        # Safeguard: if a course previously had classes in the DB and this run fetched 0 classes,
+        # do not wipe its existing classes if the course has scheduled terms in the DB.
+        # This prevents transient network/WAF/parser glitches from deleting valid timetable data.
+        courses_with_new_classes = {c["course_id"] for c in (classes_data or [])}
+        fetched_list_all = list(fetched_course_ids)
+
+        courses_with_terms = set(
+            r[0]
+            for r in session.query(Course.id)
+            .filter(
+                Course.year == year,
+                Course.id.in_(fetched_list_all),
+                Course.terms.isnot(None),
+                Course.terms != "",
+            )
+            .all()
+        )
+
+        chunk_ids_to_wipe = [
+            cid
+            for cid in fetched_list_all
+            if cid in courses_with_new_classes or cid not in courses_with_terms
+        ]
+
+        # Delete in chunks to avoid SQLite's variable limit
+        for i in range(0, len(chunk_ids_to_wipe), chunk_size):
+            chunk_ids = chunk_ids_to_wipe[i : i + chunk_size]
+            session.query(Meetings).filter(
+                Meetings.year == year,
+                Meetings.course_class_id.in_(
+                    session.query(CourseClass.id).filter(
+                        CourseClass.year == year,
+                        CourseClass.course_id.in_(chunk_ids),
+                    )
+                ),
+            ).delete(synchronize_session=False)
+            session.query(CourseClass).filter(
+                CourseClass.year == year,
+                CourseClass.course_id.in_(chunk_ids),
+            ).delete(synchronize_session=False)
+    else:
+        # Legacy year-wide replace (only used when fetched_course_ids is not provided)
+        session.query(Meetings).filter(Meetings.year == year).delete(
+            synchronize_session=False
+        )
+        session.query(CourseClass).filter(CourseClass.year == year).delete(
+            synchronize_session=False
+        )
+
+    if not classes_data:
+        session.commit()
+        return
+
+    # In-memory deduplication on the unique key constraint
+    deduped_classes = {}
+    for item in classes_data:
+        # Normalize group to empty string if None so SQLite unique constraint matches consistently
+        if item.get("group") is None:
+            item["group"] = ""
+        key = (
+            item["year"],
+            item["course_id"],
+            str(item["class_nbr"]),
+            str(item["section"]),
+            str(item.get("group", "")),
+        )
+        deduped_classes[key] = item
+
+    clean_classes = list(deduped_classes.values())
+
+    # Batch insert using SQLite ON CONFLICT DO UPDATE
     for i in range(0, len(clean_classes), chunk_size):
         chunk = clean_classes[i : i + chunk_size]
         stmt = sqlite_insert(CourseClass).values(chunk)

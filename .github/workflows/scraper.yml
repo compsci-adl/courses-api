@@ -27,13 +27,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-          role-session-name: ${{ secrets.AWS_ROLE_SESSION_NAME }}
-          aws-region: ${{ env.AWS_REGION }}
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
 
@@ -52,6 +45,8 @@ jobs:
             -v ${{ github.workspace }}/src:/app/src \
             -v ${{ github.workspace }}/logs:/app/logs \
             -e PYTHONUNBUFFERED=1 \
+            -e CI=true \
+            -e GITHUB_ACTIONS=true \
             -e DEFAULT_LOGGING_LEVEL=${{ env.DEFAULT_LOGGING_LEVEL }} \
             -e COURSE_WORKERS=24 \
             -e SUBJECT_WORKERS=8 \
@@ -67,7 +62,21 @@ jobs:
           if-no-files-found: warn
 
       - name: Rename SQLite DB to local.sqlite3
-        run: mv src/dev.sqlite3 src/local.sqlite3
+        run: |
+          if [ -f "src/dev.sqlite3" ]; then
+            mv src/dev.sqlite3 src/local.sqlite3
+          fi
+
+      - name: Upload SQLite database artifact
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: local-sqlite
+          path: |
+            src/local.sqlite3
+            src/dev.sqlite3
+          if-no-files-found: warn
 
       - name: Validate Database Size and Integrity
         run: |
@@ -84,6 +93,19 @@ jobs:
             echo "Error: Course count ($COURSE_COUNT) is below expected 10,000 threshold."
             exit 1
           fi
+          CLASS_COUNT=$(python3 -c "import sqlite3; conn = sqlite3.connect('src/local.sqlite3'); print(conn.execute('SELECT count(*) FROM course_classes').fetchone()[0])" 2>/dev/null || echo "0")
+          echo "Total classes in DB: $CLASS_COUNT"
+          if [ "$CLASS_COUNT" -lt 30000 ]; then
+            echo "Error: Class count ($CLASS_COUNT) is below expected 30,000 threshold. WAF may have blocked class page fetches."
+            exit 1
+          fi
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          role-session-name: ${{ secrets.AWS_ROLE_SESSION_NAME }}
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Upload DB to S3
         run: |

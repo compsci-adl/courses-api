@@ -4,7 +4,9 @@ import atexit
 import os
 import re
 import time
+import zlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from hashlib import shake_256
 from queue import Queue
 from threading import Lock, Thread
@@ -19,7 +21,7 @@ except ImportError:
     HAS_H2 = False
 from curl_cffi import requests
 from rich.progress import Progress
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool
@@ -34,6 +36,8 @@ from db_service import (
     ensure_healthy_database,
     ensure_schema_up_to_date,
     finalize_sqlite_for_s3,
+    get_courses_with_syllabus_for_year,
+    get_courses_with_terms_for_year,
     get_existing_class_count_for_year,
     get_existing_course_hashes,
     get_existing_course_ids_for_year,
@@ -105,6 +109,7 @@ def _flush_batch(engine, items: list):
     try:
         classes = []
         courses = []
+        course_updates = []
         outcomes = []
         assessments = []
         subjects = []
@@ -114,6 +119,8 @@ def _flush_batch(engine, items: list):
         for item in items:
             if isinstance(item, tuple) and item[0] == "upsert_class":
                 classes.append(item[1])
+            elif isinstance(item, tuple) and item[0] == "update_course":
+                course_updates.append(item[1])
             elif isinstance(item, Course):
                 courses.append(_model_to_dict(item))
             elif isinstance(item, LearningOutcome):
@@ -146,6 +153,17 @@ def _flush_batch(engine, items: list):
                 set_=update_cols,
             )
             session.execute(stmt)
+
+        # Bulk update existing courses (e.g. terms and metadata backfill)
+        if course_updates:
+            for upd in course_updates:
+                cid = upd.get("id")
+                if not cid:
+                    continue
+                vals = {k: v for k, v in upd.items() if k != "id" and v is not None}
+                if vals:
+                    stmt = update(Course).where(Course.id == cid).values(**vals)
+                    session.execute(stmt)
 
         # Bulk insert learning outcomes
         if outcomes:
@@ -223,6 +241,13 @@ def _flush_batch(engine, items: list):
                         },
                     )
                     session.execute(stmt)
+                elif isinstance(item, tuple) and item[0] == "update_course":
+                    upd = item[1]
+                    cid = upd.get("id")
+                    vals = {k: v for k, v in upd.items() if k != "id" and v is not None}
+                    if cid and vals:
+                        stmt = update(Course).where(Course.id == cid).values(**vals)
+                        session.execute(stmt)
                 else:
                     session.merge(item)
             session.commit()
@@ -274,10 +299,10 @@ def _fetch_single_outline_candidate(outline_url: str) -> tuple[str, str] | None:
             resp = requests.get(
                 outline_url,
                 headers={
-                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
                 },
                 timeout=6,
-                impersonate="chrome146",
+                impersonate="chrome124",
             )
             if resp.status_code == 200:
                 resp_html = resp.text
@@ -291,6 +316,16 @@ def _fetch_single_outline_candidate(outline_url: str) -> tuple[str, str] | None:
     return None
 
 
+def should_probe_empty_terms_course(
+    course_code: str, refresh_all: bool = False
+) -> bool:
+    """Determine whether to re-probe a course with empty terms for new timetable/term data."""
+    if refresh_all or os.environ.get("REFRESH_EMPTY_TERMS") in ("1", "true", "True"):
+        return True
+    yday = datetime.now(timezone.utc).timetuple().tm_yday
+    return (zlib.crc32(str(course_code).encode("utf-8")) % 5) == (yday % 5)
+
+
 def _extract_and_queue_classes(
     course_code,
     year: int,
@@ -299,12 +334,137 @@ def _extract_and_queue_classes(
     collected_classes: list[dict] | None,
     collected_meetings: list[dict] | None,
     lock: Lock,
-):
-    """Harvest classes and meetings for a course and either append to batch lists or put to write_queue."""
+    fetched_course_ids: set[str] | None = None,
+    courses_with_terms: set[str] | None = None,
+    courses_with_syllabus: set[str] | None = None,
+) -> bool:
+    """Harvest classes and meetings for a course and either append to batch lists or put to write_queue.
+
+    Returns True if the class page was successfully fetched (got ≥1 class or valid page with no classes), False otherwise.
+    When fetched_course_ids is provided, the course_cid is added to it on success so the
+    final atomic replace only deletes classes for courses that were actually reached this run.
+    """
     class_list = data_parser.get_course_class_list(
         course_code, year=year, raw_html=raw_html
     )
     class_items = class_list.get("classes", []) if isinstance(class_list, dict) else []
+    is_valid_page = (
+        class_list.get("is_valid_page", True) if isinstance(class_list, dict) else False
+    )
+
+    if not is_valid_page:
+        logger.debug(
+            f"Class list fetch for course {course_code} (year {year}) failed or was WAF-blocked."
+        )
+        return False
+
+    fetched_html = class_list.get("html") if isinstance(class_list, dict) else None
+    fetched_terms = class_list.get("terms") if isinstance(class_list, dict) else None
+
+    # Sync terms to DB if present on page
+    if fetched_terms:
+        terms_str = join_str_if_iterable(fetched_terms)
+        if terms_str:
+            write_queue.put(("update_course", {"id": course_cid, "terms": terms_str}))
+            if courses_with_terms is not None and lock:
+                with lock:
+                    courses_with_terms.add(course_cid)
+
+    # Sync missing syllabus/outlines/assessments if missing from DB and page HTML is available
+    if (
+        courses_with_syllabus is not None
+        and course_cid not in courses_with_syllabus
+        and fetched_html
+    ):
+        try:
+            doc_details = data_parser.parse_course_document(fetched_html)
+            if doc_details:
+                course_update = {"id": course_cid}
+                if doc_details.get("course_overview"):
+                    course_update["course_overview"] = doc_details.get(
+                        "course_overview"
+                    )
+                if (
+                    doc_details.get("prerequisites")
+                    and doc_details.get("prerequisites") != "N/A"
+                ):
+                    course_update["prerequisites"] = doc_details.get("prerequisites")
+                if (
+                    doc_details.get("corequisites")
+                    and doc_details.get("corequisites") != "N/A"
+                ):
+                    course_update["corequisites"] = doc_details.get("corequisites")
+                if (
+                    doc_details.get("antirequisites")
+                    and doc_details.get("antirequisites") != "N/A"
+                ):
+                    course_update["antirequisites"] = doc_details.get("antirequisites")
+                if doc_details.get("textbooks"):
+                    course_update["textbooks"] = doc_details.get("textbooks")
+                if len(course_update) > 1:
+                    write_queue.put(("update_course", course_update))
+
+                page_outcomes = doc_details.get("learning_outcomes", [])
+                page_assessments = doc_details.get("assessments", [])
+                for index, lo_item in enumerate(page_outcomes, start=1):
+                    lo_text = (
+                        lo_item.get("description", "")
+                        if isinstance(lo_item, dict)
+                        else str(lo_item)
+                    )
+                    lo_id = get_short_hash(f"{course_cid}lo{lo_text}")
+                    db_lo = LearningOutcome(
+                        id=lo_id,
+                        year=year,
+                        course_id=course_cid,
+                        description=lo_text,
+                        outcome_index=index,
+                    )
+                    write_queue.put(db_lo)
+
+                for assess in page_assessments:
+                    assess_title = (
+                        assess.get("title") if isinstance(assess, dict) else str(assess)
+                    )
+                    assess_id = get_short_hash(f"{course_cid}assess{assess_title}")
+                    db_assess = Assessment(
+                        id=assess_id,
+                        year=year,
+                        course_id=course_cid,
+                        title=assess_title,
+                        weighting=(
+                            assess.get("weighting")
+                            if isinstance(assess, dict)
+                            else None
+                        ),
+                        hurdle=(
+                            assess.get("hurdle") if isinstance(assess, dict) else None
+                        ),
+                        learning_outcomes=(
+                            assess.get("learning_outcomes")
+                            if isinstance(assess, dict)
+                            else None
+                        ),
+                    )
+                    write_queue.put(db_assess)
+
+                if lock:
+                    with lock:
+                        courses_with_syllabus.add(course_cid)
+        except Exception as e:
+            logger.debug(f"Error parsing syllabus for course {course_code}: {e}")
+
+    if not class_items:
+        logger.debug(f"Course {course_code} (year {year}) has no scheduled classes.")
+        if fetched_course_ids is not None:
+            with lock:
+                fetched_course_ids.add(course_cid)
+        return True
+
+    total_meetings = sum(len(c.get("meetings", [])) for c in class_items)
+    logger.info(
+        f"Harvested {len(class_items)} classes ({total_meetings} meetings) for course {course_code} ({year})."
+    )
 
     for individual_class in class_items:
         class_type = individual_class.get("component")
@@ -323,7 +483,7 @@ def _extract_and_queue_classes(
                 "size": int(individual_class.get("size", 0)),
                 "available": int(individual_class.get("available", 0)),
                 "component": class_type,
-                "group": group_name,
+                "group": group_name or "",
                 "course_id": course_cid,
             }
             if collected_classes is not None:
@@ -366,6 +526,12 @@ def _extract_and_queue_classes(
                     f"Error inserting meeting for class {class_nbr} of course {course_code}: {e}"
                 )
 
+    # Mark this course as successfully fetched so the final replace preserves it
+    if fetched_course_ids is not None:
+        with lock:
+            fetched_course_ids.add(course_cid)
+    return True
+
 
 def process_course(
     course,
@@ -381,10 +547,14 @@ def process_course(
     previous_courses: dict[str, dict] | None = None,
     collected_classes: list[dict] | None = None,
     collected_meetings: list[dict] | None = None,
+    fetched_course_ids: set[str] | None = None,
+    courses_with_syllabus: set[str] | None = None,
+    courses_with_terms: set[str] | None = None,
+    refresh_empty_terms: bool = False,
 ):
     """Process a single course and insert/upsert data into the database directly.
 
-    1. If the course already exists in DB for this year, skip outline scraping.
+    1. If the course already exists in DB for this year, skip outline scraping unless syllabus is missing.
     2. If the course exists in previous years, reuse static course info, outcomes,
        and assessments without making redundant network crawls.
     3. Only new courses not in any previous year are fetched from the web.
@@ -409,21 +579,182 @@ def process_course(
             ) or existing_courses_for_year.get(norm_code)
 
         if existing_cid:
-            logger.debug(
-                f"Course {code_str} already in DB for year {year} (id: {existing_cid}). Skipping course outline fetch."
-            )
             course_cid = existing_cid
+            needs_syllabus = (
+                courses_with_syllabus is not None
+                and course_cid not in courses_with_syllabus
+            )
 
-            if scrape_classes:
-                _extract_and_queue_classes(
-                    code_str,
-                    year,
-                    course_cid,
-                    raw_html=None,
-                    collected_classes=collected_classes,
-                    collected_meetings=collected_meetings,
-                    lock=lock,
+            course_details = None
+            if needs_syllabus:
+                course_details = data_parser.get_course_details(course_code, year=year)
+
+            # Determine effective terms from Funnelback or course page
+            effective_terms = (
+                course_details.get("terms") if course_details else None
+            ) or course.get("terms")
+            terms_str = (
+                join_str_if_iterable(effective_terms) if effective_terms else None
+            )
+
+            # Always ensure metadata (especially terms) is kept up to date in DB
+            needs_terms_update = (
+                terms_str
+                and courses_with_terms is not None
+                and course_cid not in courses_with_terms
+            )
+            course_update = {"id": course_cid}
+            if terms_str and (needs_terms_update or course.get("terms")):
+                course_update["terms"] = terms_str
+            if course.get("campus"):
+                course_update["campus"] = join_str_if_iterable(course.get("campus"))
+            if course.get("units"):
+                course_update["units"] = parse_units(course.get("units"))
+            if course.get("level_of_study"):
+                course_update["level_of_study"] = join_str_if_iterable(
+                    course.get("level_of_study")
                 )
+
+            if course_details:
+                if course_details.get("course_overview"):
+                    course_update["course_overview"] = course_details.get(
+                        "course_overview"
+                    )
+                if (
+                    course_details.get("prerequisites")
+                    and course_details.get("prerequisites") != "N/A"
+                ):
+                    course_update["prerequisites"] = course_details.get("prerequisites")
+                if (
+                    course_details.get("corequisites")
+                    and course_details.get("corequisites") != "N/A"
+                ):
+                    course_update["corequisites"] = course_details.get("corequisites")
+                if (
+                    course_details.get("antirequisites")
+                    and course_details.get("antirequisites") != "N/A"
+                ):
+                    course_update["antirequisites"] = course_details.get(
+                        "antirequisites"
+                    )
+                if course_details.get("textbooks"):
+                    course_update["textbooks"] = course_details.get("textbooks")
+
+            if len(course_update) > 1:
+                write_queue.put(("update_course", course_update))
+                if courses_with_terms is not None and lock and terms_str:
+                    with lock:
+                        courses_with_terms.add(course_cid)
+
+            # Backfill syllabus (learning outcomes & assessments) if missing in DB
+            if needs_syllabus and course_details:
+                page_outcomes = course_details.get("learning_outcomes", [])
+                page_assessments = course_details.get("assessments", [])
+                if page_outcomes or page_assessments:
+                    logger.debug(
+                        f"Backfilling syllabus for existing course {code_str} ({year}): "
+                        f"{len(page_outcomes)} outcomes, {len(page_assessments)} assessments."
+                    )
+                    for index, lo_item in enumerate(page_outcomes, start=1):
+                        lo_text = (
+                            lo_item.get("description", "")
+                            if isinstance(lo_item, dict)
+                            else str(lo_item)
+                        )
+                        lo_id = get_short_hash(f"{course_cid}lo{lo_text}")
+                        db_lo = LearningOutcome(
+                            id=lo_id,
+                            year=year,
+                            course_id=course_cid,
+                            description=lo_text,
+                            outcome_index=index,
+                        )
+                        write_queue.put(db_lo)
+
+                    for assess in page_assessments:
+                        assess_title = (
+                            assess.get("title")
+                            if isinstance(assess, dict)
+                            else str(assess)
+                        )
+                        assess_id = get_short_hash(f"{course_cid}assess{assess_title}")
+                        db_assess = Assessment(
+                            id=assess_id,
+                            year=year,
+                            course_id=course_cid,
+                            title=assess_title,
+                            weighting=(
+                                assess.get("weighting")
+                                if isinstance(assess, dict)
+                                else None
+                            ),
+                            hurdle=(
+                                assess.get("hurdle")
+                                if isinstance(assess, dict)
+                                else None
+                            ),
+                            learning_outcomes=(
+                                assess.get("learning_outcomes")
+                                if isinstance(assess, dict)
+                                else None
+                            ),
+                        )
+                        write_queue.put(db_assess)
+
+                    if courses_with_syllabus is not None and lock:
+                        with lock:
+                            courses_with_syllabus.add(course_cid)
+
+            # Harvest classes if scrape_classes is enabled
+            if scrape_classes:
+                page_html = course_details.get("html") if course_details else None
+                # If course explicitly has no terms in DB and bulk list, check whether to probe it
+                has_no_terms = (
+                    courses_with_terms is not None
+                    and course_cid not in courses_with_terms
+                    and not effective_terms
+                )
+                should_probe = should_probe_empty_terms_course(
+                    code_str, refresh_empty_terms
+                )
+
+                if page_html:
+                    # Harvest directly from page HTML (0 extra network calls!)
+                    _extract_and_queue_classes(
+                        code_str,
+                        year,
+                        course_cid,
+                        raw_html=page_html,
+                        collected_classes=collected_classes,
+                        collected_meetings=collected_meetings,
+                        lock=lock,
+                        fetched_course_ids=fetched_course_ids,
+                        courses_with_terms=courses_with_terms,
+                        courses_with_syllabus=courses_with_syllabus,
+                    )
+                elif not has_no_terms or should_probe:
+                    # Course has a term listed, or terms unknown, or selected by rolling 20%/refresh probe -> MUST attempt fetching classes!
+                    _extract_and_queue_classes(
+                        code_str,
+                        year,
+                        course_cid,
+                        raw_html=None,
+                        collected_classes=collected_classes,
+                        collected_meetings=collected_meetings,
+                        lock=lock,
+                        fetched_course_ids=fetched_course_ids,
+                        courses_with_terms=courses_with_terms,
+                        courses_with_syllabus=courses_with_syllabus,
+                    )
+                else:
+                    # Course has no scheduled terms anywhere and not in today's probe slice -> skip network fetch and mark 0 classes
+                    logger.debug(
+                        f"Course {code_str} ({year}) has no scheduled terms and not in today's probe slice; skipping class timetable fetch."
+                    )
+                    if fetched_course_ids is not None:
+                        with lock:
+                            fetched_course_ids.add(course_cid)
+
             progress.update(subject_task, advance=1)
             return
 
@@ -443,9 +774,10 @@ def process_course(
 
         # Course Custom ID
         course_cid = get_short_hash(f"{name}{code_str}{title}{year}{terms}{campus}")
-        encoded_course_code = re.sub(
-            r"([a-zA-Z]+)([0-9]+)", r"\1-\2", str(code_str)
-        ).lower()
+        encoded_course_code = (
+            course.get("slug")
+            or re.sub(r"([a-zA-Z]+)([0-9]+)", r"\1-\2", str(code_str)).lower()
+        )
 
         # Compute content hash for the course outline
         outline_hash = compute_course_hash(
@@ -578,85 +910,143 @@ def process_course(
                 content_hash=outline_hash,
             )
 
-            # Generate course outline URL if term and year are valid
-            term_str = join_str_if_iterable(terms)
-            term_code = get_term_code(term_str)
+            # If syllabus (learning outcomes / assessments) is already present on main page, use directly!
+            page_outcomes = course_details.get("learning_outcomes", [])
+            page_assessments = course_details.get("assessments", [])
+            page_textbooks = course_details.get("textbooks")
 
-            if not term_code and term_str:
-                first_term = term_str.split(",")[0].strip()
-                term_code = get_term_code(first_term)
+            if page_outcomes or page_assessments:
+                logger.debug(
+                    f"Course {code_str} ({year}) has syllabus on main course page: "
+                    f"{len(page_outcomes)} outcomes, {len(page_assessments)} assessments."
+                )
+                if page_textbooks:
+                    db_course.textbooks = page_textbooks
 
-            if term_code:
-                year_short = str(year)[-2:]
-                formatted_code = re.sub(
-                    r"([a-zA-Z]+)\s*(\d+)", r"\1_\2", str(code_str)
-                ).replace(" ", "_")
-
-                candidates = [
-                    (
-                        suffix,
-                        f"https://apps.adelaide.edu.au/public/courseoutline?courseInstanceId={year_short}{term_code}_{formatted_code}_{suffix}",
+                for index, lo_item in enumerate(page_outcomes, start=1):
+                    lo_text = (
+                        lo_item.get("description", "")
+                        if isinstance(lo_item, dict)
+                        else str(lo_item)
                     )
-                    for suffix in range(1, 4)
-                ]
+                    lo_id = get_short_hash(f"{course_cid}lo{lo_text}")
+                    db_lo = LearningOutcome(
+                        id=lo_id,
+                        year=year,
+                        course_id=course_cid,
+                        description=lo_text,
+                        outcome_index=index,
+                    )
+                    write_queue.put(db_lo)
 
-                found_match = None
-                with ThreadPoolExecutor(max_workers=3) as outline_executor:
-                    future_to_suffix = {
-                        outline_executor.submit(
-                            _fetch_single_outline_candidate, url
-                        ): suffix
-                        for suffix, url in candidates
-                    }
-                    results = {}
-                    for future in as_completed(future_to_suffix):
-                        suffix = future_to_suffix[future]
-                        res = future.result()
-                        if res:
-                            results[suffix] = res
+                for assess in page_assessments:
+                    assess_title = (
+                        assess.get("title") if isinstance(assess, dict) else str(assess)
+                    )
+                    assess_id = get_short_hash(f"{course_cid}assess{assess_title}")
+                    db_assess = Assessment(
+                        id=assess_id,
+                        year=year,
+                        course_id=course_cid,
+                        title=assess_title,
+                        weighting=(
+                            assess.get("weighting")
+                            if isinstance(assess, dict)
+                            else None
+                        ),
+                        hurdle=(
+                            assess.get("hurdle") if isinstance(assess, dict) else None
+                        ),
+                        learning_outcomes=(
+                            assess.get("learning_outcomes")
+                            if isinstance(assess, dict)
+                            else None
+                        ),
+                    )
+                    write_queue.put(db_assess)
 
-                    for suffix in range(1, 4):
-                        if suffix in results:
-                            found_match = results[suffix]
-                            break
+            else:
+                # Generate course outline URL if term and year are valid (legacy archive fallback)
+                term_str = join_str_if_iterable(terms)
+                term_code = get_term_code(term_str)
 
-                if found_match:
-                    outline_url, resp_html = found_match
-                    db_course.course_outline_url = outline_url
-                    parsed_outline = data_parser.parse_course_outline(resp_html)
+                if not term_code and term_str:
+                    first_term = term_str.split(",")[0].strip()
+                    term_code = get_term_code(first_term)
 
-                    if parsed_outline.get("aim"):
-                        db_course.course_overview = parsed_outline["aim"]
+                if term_code:
+                    year_short = str(year)[-2:]
+                    formatted_code = re.sub(
+                        r"([a-zA-Z]+)\s*(\d+)", r"\1_\2", str(code_str)
+                    ).replace(" ", "_")
 
-                    for index, lo_text in enumerate(
-                        parsed_outline.get("learning_outcomes", []),
-                        start=1,
-                    ):
-                        lo_id = get_short_hash(f"{course_cid}lo{lo_text}")
-                        db_lo = LearningOutcome(
-                            id=lo_id,
-                            year=year,
-                            course_id=course_cid,
-                            description=lo_text,
-                            outcome_index=index,
+                    candidates = [
+                        (
+                            suffix,
+                            f"https://apps.adelaide.edu.au/public/courseoutline?courseInstanceId={year_short}{term_code}_{formatted_code}_{suffix}",
                         )
-                        write_queue.put(db_lo)
+                        for suffix in range(1, 4)
+                    ]
 
-                    db_course.textbooks = parsed_outline.get("textbooks")
+                    found_match = None
+                    with ThreadPoolExecutor(max_workers=3) as outline_executor:
+                        future_to_suffix = {
+                            outline_executor.submit(
+                                _fetch_single_outline_candidate, url
+                            ): suffix
+                            for suffix, url in candidates
+                        }
+                        results = {}
+                        for future in as_completed(future_to_suffix):
+                            suffix = future_to_suffix[future]
+                            res = future.result()
+                            if res:
+                                results[suffix] = res
 
-                    for assess in parsed_outline.get("assessments", []):
-                        assess_title = assess.get("title")
-                        assess_id = get_short_hash(f"{course_cid}assess{assess_title}")
-                        db_assess = Assessment(
-                            id=assess_id,
-                            year=year,
-                            course_id=course_cid,
-                            title=assess_title,
-                            weighting=assess.get("weighting"),
-                            hurdle=assess.get("hurdle"),
-                            learning_outcomes=assess.get("learning_outcomes"),
-                        )
-                        write_queue.put(db_assess)
+                        for suffix in range(1, 4):
+                            if suffix in results:
+                                found_match = results[suffix]
+                                break
+
+                    if found_match:
+                        outline_url, resp_html = found_match
+                        db_course.course_outline_url = outline_url
+                        parsed_outline = data_parser.parse_course_outline(resp_html)
+
+                        if parsed_outline.get("aim"):
+                            db_course.course_overview = parsed_outline["aim"]
+
+                        for index, lo_text in enumerate(
+                            parsed_outline.get("learning_outcomes", []),
+                            start=1,
+                        ):
+                            lo_id = get_short_hash(f"{course_cid}lo{lo_text}")
+                            db_lo = LearningOutcome(
+                                id=lo_id,
+                                year=year,
+                                course_id=course_cid,
+                                description=lo_text,
+                                outcome_index=index,
+                            )
+                            write_queue.put(db_lo)
+
+                        db_course.textbooks = parsed_outline.get("textbooks")
+
+                        for assess in parsed_outline.get("assessments", []):
+                            assess_title = assess.get("title")
+                            assess_id = get_short_hash(
+                                f"{course_cid}assess{assess_title}"
+                            )
+                            db_assess = Assessment(
+                                id=assess_id,
+                                year=year,
+                                course_id=course_cid,
+                                title=assess_title,
+                                weighting=assess.get("weighting"),
+                                hurdle=assess.get("hurdle"),
+                                learning_outcomes=assess.get("learning_outcomes"),
+                            )
+                            write_queue.put(db_assess)
 
             write_queue.put(db_course)
 
@@ -677,6 +1067,9 @@ def process_course(
                 collected_classes=collected_classes,
                 collected_meetings=collected_meetings,
                 lock=lock,
+                fetched_course_ids=fetched_course_ids,
+                courses_with_terms=courses_with_terms,
+                courses_with_syllabus=courses_with_syllabus,
             )
 
         progress.update(subject_task, advance=1)
@@ -700,6 +1093,10 @@ def process_subject(
     collected_meetings: list[dict] | None = None,
     course_executor: ThreadPoolExecutor | None = None,
     course_workers: int = 24,
+    fetched_course_ids: set[str] | None = None,
+    courses_with_syllabus: set[str] | None = None,
+    courses_with_terms: set[str] | None = None,
+    refresh_empty_terms: bool = False,
 ):
     """Process a single subject and insert data into the database."""
     try:
@@ -713,28 +1110,32 @@ def process_subject(
         db_subject = Subject(id=subject_cid, name=name)
         write_queue.put(db_subject)
 
-        # Encode & in subject name
-        encoded_name = name.replace("&", "%26")
-        course_list = None
-        for attempt in range(5):
-            courses = data_parser.get_course_codes(encoded_name, year)
-            if (
-                courses is not None
-                and isinstance(courses, dict)
-                and "courses" in courses
-            ):
-                course_list = courses["courses"]
-                break
-            logger.warning(
-                f"Subject '{name}' ({year}) course fetch attempt {attempt + 1}/5 failed or blocked by WAF. Retrying with alternate proxy..."
-            )
-            time.sleep(0.5 + attempt * 0.3)
+        # Use preloaded course list from bulk discovery if available
+        if isinstance(subject, dict) and "courses" in subject:
+            course_list = subject["courses"]
+        else:
+            # Encode & in subject name
+            encoded_name = name.replace("&", "%26")
+            course_list = None
+            for attempt in range(5):
+                courses = data_parser.get_course_codes(encoded_name, year)
+                if (
+                    courses is not None
+                    and isinstance(courses, dict)
+                    and "courses" in courses
+                ):
+                    course_list = courses["courses"]
+                    break
+                logger.warning(
+                    f"Subject '{name}' ({year}) course fetch attempt {attempt + 1}/5 failed or blocked by WAF. Retrying with alternate proxy..."
+                )
+                time.sleep(0.5 + attempt * 0.3)
 
-        if course_list is None:
-            logger.error(
-                f"Subject '{name}' ({year}) could not be retrieved after 5 attempts. Skipping."
-            )
-            course_list = []
+            if course_list is None:
+                logger.error(
+                    f"Subject '{name}' ({year}) could not be retrieved after 5 attempts. Skipping."
+                )
+                course_list = []
 
         progress.update(subject_task, total=len(course_list))
 
@@ -765,6 +1166,10 @@ def process_subject(
                     previous_courses,
                     collected_classes,
                     collected_meetings,
+                    fetched_course_ids,
+                    courses_with_syllabus,
+                    courses_with_terms,
+                    refresh_empty_terms,
                 )
                 futures.append(future)
 
@@ -788,6 +1193,7 @@ def scrape_single_year(
     is_active: bool,
     existing_hashes: dict[tuple[str, int], str] | None = None,
     scrape_classes_override: bool | None = None,
+    refresh_empty_terms: bool = False,
 ):
     """Scrape data directly into SQLite for a given academic year.
 
@@ -800,6 +1206,7 @@ def scrape_single_year(
     lock = Lock()
     collected_classes: list[dict] = []
     collected_meetings: list[dict] = []
+    fetched_course_ids: set[str] = set()
 
     # Preload existing course identifiers for this year and reusable previous years
     check_session = Session(bind=engine)
@@ -808,8 +1215,12 @@ def scrape_single_year(
             check_session, year
         )
         existing_class_count = get_existing_class_count_for_year(check_session, year)
+        courses_with_syllabus = get_courses_with_syllabus_for_year(check_session, year)
+        courses_with_terms = get_courses_with_terms_for_year(check_session, year)
         logger.info(
-            f"Preloaded {len(existing_courses_for_year)} existing course records and "
+            f"Preloaded {len(existing_courses_for_year)} existing course records, "
+            f"{len(courses_with_terms)} courses with terms, "
+            f"{len(courses_with_syllabus)} courses with syllabus, and "
             f"{existing_class_count} class records for year {year} from DB."
         )
         previous_courses = get_previous_years_course_data(check_session, year)
@@ -832,15 +1243,37 @@ def scrape_single_year(
     try:
         with Progress() as progress:
             subj_list = []
-            for attempt in range(4):
-                subjects = data_parser.get_subjects(year)
-                subj_list = subjects.get("subjects", [])
-                if subj_list:
-                    break
-                logger.warning(
-                    f"Subject discovery attempt {attempt + 1}/4 for year {year} returned 0 subjects. Retrying..."
+            # Fast path: bulk enumerate all courses for year in ~9 requests
+            try:
+                bulk_courses = data_parser.get_all_courses_bulk(year)
+            except Exception as e:
+                logger.debug(
+                    f"Bulk course discovery failed ({e}), falling back to subject discovery"
                 )
-                time.sleep(1.0 + attempt * 1.0)
+                bulk_courses = []
+
+            if bulk_courses:
+                subj_map: dict[str, list] = {}
+                for c in bulk_courses:
+                    sname = c.get("subject") or "General"
+                    subj_map.setdefault(sname, []).append(c)
+                subj_list = [
+                    {"subject": sname, "courses": clist}
+                    for sname, clist in subj_map.items()
+                ]
+                logger.info(
+                    f"Fast bulk discovery: {len(bulk_courses)} courses mapped to {len(subj_list)} subjects for year {year}."
+                )
+            else:
+                for attempt in range(4):
+                    subjects = data_parser.get_subjects(year)
+                    subj_list = subjects.get("subjects", [])
+                    if subj_list:
+                        break
+                    logger.warning(
+                        f"Subject discovery attempt {attempt + 1}/4 for year {year} returned 0 subjects. Retrying..."
+                    )
+                    time.sleep(1.0 + attempt * 1.0)
 
             if not subj_list:
                 logger.error(
@@ -877,6 +1310,12 @@ def scrape_single_year(
                             collected_meetings if should_scrape_classes else None,
                             course_executor=course_executor,
                             course_workers=course_workers,
+                            fetched_course_ids=fetched_course_ids
+                            if should_scrape_classes
+                            else None,
+                            courses_with_syllabus=courses_with_syllabus,
+                            courses_with_terms=courses_with_terms,
+                            refresh_empty_terms=refresh_empty_terms,
                         )
                         futures.append(future)
 
@@ -885,11 +1324,11 @@ def scrape_single_year(
                         future.result()
 
     finally:
-        # Bulk atomic replace for active/harvested classes and meetings (persists even if interrupted)
-        if should_scrape_classes and collected_classes:
+        # Selective atomic replace for active/harvested classes and meetings (persists even if interrupted)
+        if should_scrape_classes and (collected_classes or fetched_course_ids):
             logger.info(
-                f"Atomic bulk replacing {len(collected_classes)} classes and "
-                f"{len(collected_meetings)} meetings for year {year}..."
+                f"Selective class replace: {len(collected_classes)} classes and "
+                f"{len(collected_meetings)} meetings for {len(fetched_course_ids)} courses in year {year}..."
             )
             db_session = Session(bind=engine)
             try:
@@ -898,6 +1337,7 @@ def scrape_single_year(
                     year,
                     collected_classes,
                     collected_meetings,
+                    fetched_course_ids=fetched_course_ids,
                 )
             finally:
                 db_session.close()
@@ -928,13 +1368,18 @@ def ensure_proxies_ready(min_proxies: int = 20):
                     valid_count = max(valid_count, len(lines))
             except Exception:
                 pass
-    if valid_count < min_proxies:
+
+    is_ci = bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))
+    effective_min = max(min_proxies, 40 if is_ci else min_proxies)
+
+    if valid_count < effective_min:
         logger.info(
-            f"Found {valid_count} working proxies (< {min_proxies} required). "
+            f"Found {valid_count} working proxies (< {effective_min} required). "
             f"Testing and fetching fresh proxies..."
         )
         try:
-            fetch_proxies.main()
+            target = 200 if is_ci else 100
+            fetch_proxies.main(target_working=target)
             with data_fetcher.DataFetcher._proxy_lock:
                 data_fetcher.DataFetcher._proxies = None
                 data_fetcher.DataFetcher._proxy_failures.clear()
@@ -953,6 +1398,7 @@ async def run_pipeline(
     force_all_years: bool = False,
     db_path: str = "src/dev.sqlite3",
     active_year: int | None = None,
+    refresh_empty_terms: bool = False,
 ):
     """Orchestrates dynamic discovery, probe, selective direct-to-DB scraping, and direct S3 sync."""
     # Register an atexit hook to ensure SQLite WAL is cleanly flushed even on abrupt process exits
@@ -1058,6 +1504,7 @@ async def run_pipeline(
                     engine,
                     is_active=True,
                     existing_hashes=existing_hashes,
+                    refresh_empty_terms=refresh_empty_terms,
                 )
             else:
                 tag = "historical" if yr < active_year else "future"
@@ -1069,6 +1516,7 @@ async def run_pipeline(
                     engine,
                     is_active=False,
                     existing_hashes=existing_hashes,
+                    refresh_empty_terms=refresh_empty_terms,
                 )
 
     except (KeyboardInterrupt, asyncio.CancelledError):
@@ -1113,6 +1561,11 @@ def main():
         help="Path to SQLite database file",
     )
     parser.add_argument(
+        "--refresh-empty-terms",
+        action="store_true",
+        help="Force probe all active-year courses with empty terms in DB",
+    )
+    parser.add_argument(
         "--course-workers",
         type=int,
         default=None,
@@ -1136,6 +1589,7 @@ def main():
             force_all_years=args.force_all_years,
             db_path=args.db_path,
             active_year=args.active_year,
+            refresh_empty_terms=args.refresh_empty_terms,
         )
     )
 
