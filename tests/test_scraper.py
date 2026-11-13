@@ -16,7 +16,24 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from scraper import parse_units, process_course  # noqa: E402
+from sqlalchemy import create_engine  # noqa: E402
+from sqlalchemy.orm import Session  # noqa: E402
+
+from db_service import bulk_replace_classes_for_year  # noqa: E402
+from models import (  # noqa: E402
+    Assessment,
+    Base,
+    Course,
+    CourseClass,
+    LearningOutcome,
+    Subject,
+)
+from scraper import (  # noqa: E402
+    _extract_and_queue_classes,
+    parse_units,
+    process_course,
+    should_probe_empty_terms_course,
+)
 
 
 def test_parse_units_plain_digits():
@@ -61,11 +78,6 @@ class TestSelectiveClassReplace(unittest.TestCase):
     """Verify that bulk_replace_classes_for_year preserves classes for unreached courses."""
 
     def setUp(self):
-        from sqlalchemy import create_engine
-        from sqlalchemy.orm import Session
-
-        from models import Base, Course, CourseClass, Subject
-
         self.engine = create_engine("sqlite:///:memory:")
         Base.metadata.create_all(self.engine)
         self.session = Session(bind=self.engine)
@@ -125,9 +137,6 @@ class TestSelectiveClassReplace(unittest.TestCase):
         self.session.close()
 
     def test_selective_replace_preserves_unfetched_course_classes(self):
-        from db_service import bulk_replace_classes_for_year
-        from models import CourseClass
-
         # Only cid_1 was fetched this run, with an updated class number
         new_classes_data = [
             {
@@ -169,9 +178,6 @@ class TestSelectiveClassReplace(unittest.TestCase):
         self,
     ):
         """When a course has scheduled terms in DB, a scrape that yields 0 classes must NOT wipe out existing classes."""
-        from db_service import bulk_replace_classes_for_year
-        from models import CourseClass
-
         # cid_1 has terms="Semester 1" and initially 1 class (class_nbr=1111).
         # A scrape runs and returns 0 classes for cid_1 (e.g. transient WAF/network glitch).
         bulk_replace_classes_for_year(
@@ -190,11 +196,6 @@ class TestSelectiveClassReplace(unittest.TestCase):
         self.assertEqual(cid_1_classes[0].class_nbr, 1111)
 
     def test_extract_and_queue_classes_tracks_fetched_ids(self):
-        from threading import Lock
-        from unittest.mock import patch
-
-        from scraper import _extract_and_queue_classes
-
         lock = Lock()
         fetched_ids = set()
         collected_classes = []
@@ -229,11 +230,6 @@ class TestSelectiveClassReplace(unittest.TestCase):
 
     def test_extract_and_queue_classes_no_classes_valid_page_tracks_id(self):
         """Courses confirmed to legitimately have 0 classes should be tracked and return True."""
-        from threading import Lock
-        from unittest.mock import patch
-
-        from scraper import _extract_and_queue_classes
-
         lock = Lock()
         fetched_ids = set()
         collected_classes = []
@@ -261,11 +257,6 @@ class TestSelectiveClassReplace(unittest.TestCase):
 
     def test_extract_and_queue_classes_blocked_page_does_not_track_id(self):
         """Blocked or failed fetches must return False and NOT be added to fetched_ids."""
-        from threading import Lock
-        from unittest.mock import patch
-
-        from scraper import _extract_and_queue_classes
-
         lock = Lock()
         fetched_ids = set()
         collected_classes = []
@@ -298,10 +289,6 @@ class TestSelectiveClassReplace(unittest.TestCase):
         self, mock_details, mock_outline, mock_queue
     ):
         """When course page contains syllabus, use it directly without calling external outline URLs."""
-        from threading import Lock
-
-        from scraper import process_course
-
         mock_details.return_value = {
             "title": "Financial Accounting 1",
             "course_id": 9999,
@@ -340,7 +327,6 @@ class TestSelectiveClassReplace(unittest.TestCase):
 
         # write_queue should have received course, 2 outcomes, and 2 assessments
         queued_items = [call_args[0][0] for call_args in mock_queue.put.call_args_list]
-        from models import Assessment, Course, LearningOutcome
 
         courses_q = [x for x in queued_items if isinstance(x, Course)]
         outcomes_q = [x for x in queued_items if isinstance(x, LearningOutcome)]
@@ -360,8 +346,6 @@ class TestSelectiveClassReplace(unittest.TestCase):
         self, mock_details, mock_queue
     ):
         """When course exists in DB but is missing syllabus, process_course backfills outcomes/assessments."""
-        from models import Assessment, LearningOutcome
-
         mock_details.return_value = {
             "title": "Existing Course",
             "learning_outcomes": [{"description": "Outcome 1"}],
@@ -473,13 +457,14 @@ class TestSelectiveClassReplace(unittest.TestCase):
         self.assertEqual(call_args[0][2], "cid_enge_5010")
         self.assertIsNone(call_args[1].get("raw_html"))
 
+    @patch("scraper.should_probe_empty_terms_course", return_value=False)
     @patch("scraper._extract_and_queue_classes")
     @patch("scraper.write_queue")
     @patch("scraper.data_parser.get_course_details")
     def test_process_course_skips_class_fetch_when_no_terms_and_no_syllabus_needed(
-        self, mock_details, mock_queue, mock_classes
+        self, mock_details, mock_queue, mock_classes, mock_should_probe
     ):
-        """If a course has no terms listed anywhere and already has syllabus, skip class network crawl."""
+        """If a course has no terms listed anywhere and already has syllabus and not in today's probe slice, skip class network crawl."""
         progress = MagicMock()
         task = MagicMock()
         lock = Lock()
@@ -508,6 +493,47 @@ class TestSelectiveClassReplace(unittest.TestCase):
         mock_classes.assert_not_called()
         # Successfully marked as fetched so it is retained/cleared correctly in DB
         self.assertIn("cid_enge_5006", fetched_ids)
+
+    @patch("scraper.should_probe_empty_terms_course", return_value=True)
+    @patch("scraper._extract_and_queue_classes")
+    @patch("scraper.write_queue")
+    @patch("scraper.data_parser.get_course_details")
+    def test_process_course_probes_empty_terms_when_probe_is_true(
+        self, mock_details, mock_queue, mock_classes, mock_should_probe
+    ):
+        """If a course has no terms in DB but is selected by probe slice, class crawl must be attempted."""
+        progress = MagicMock()
+        task = MagicMock()
+        lock = Lock()
+        existing_courses = {"ENGE5010": "cid_enge_5010"}
+        courses_with_syllabus = {"cid_enge_5010"}
+        courses_with_terms = set()  # empty in DB
+        fetched_ids = set()
+
+        process_course(
+            course={"code": "ENGE5010", "terms": None},
+            year=2027,
+            subject={"subject": "Engineering"},
+            engine=self.engine,
+            progress=progress,
+            subject_task=task,
+            lock=lock,
+            scrape_classes=True,
+            existing_courses_for_year=existing_courses,
+            courses_with_syllabus=courses_with_syllabus,
+            courses_with_terms=courses_with_terms,
+            fetched_course_ids=fetched_ids,
+            refresh_empty_terms=True,
+        )
+
+        mock_classes.assert_called_once()
+        self.assertEqual(mock_classes.call_args[0][0], "ENGE5010")
+
+    def test_should_probe_empty_terms_course_flag_and_rolling_slice(self):
+        """should_probe_empty_terms_course returns True when refresh_all is True or env var is set."""
+        self.assertTrue(should_probe_empty_terms_course("RANDOM1001", refresh_all=True))
+        with patch.dict(os.environ, {"REFRESH_EMPTY_TERMS": "1"}):
+            self.assertTrue(should_probe_empty_terms_course("RANDOM1001"))
 
 
 if __name__ == "__main__":

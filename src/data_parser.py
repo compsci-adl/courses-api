@@ -99,10 +99,15 @@ def get_courses_from_sitemap(timeout: float = 10.0) -> list[dict]:
         data = fetcher.get()
         xml_text = ""
         if isinstance(data, dict):
-            xml_text = data.get("html", "")
+            xml_text = data.get("html", "") or data.get("data", "")
         if not xml_text and fetcher.last_response is not None:
             xml_text = getattr(fetcher.last_response, "text", "")
         if not xml_text:
+            return []
+
+        xml_lower = xml_text.lower()
+        if "<urlset" not in xml_lower and "<sitemapindex" not in xml_lower:
+            logger.debug("Sitemap XML does not contain <urlset> or <sitemapindex>.")
             return []
 
         root = ET.fromstring(xml_text)
@@ -333,6 +338,30 @@ def get_course_codes(subject: str, year: int, timeout: float = 12.0):
     return None
 
 
+def _extract_terms_from_soup(soup: BeautifulSoup | None) -> list[str]:
+    """Extract academic terms from course accordion titles and HTML meta tags."""
+    terms = []
+    if not soup:
+        return terms
+    for el in soup.select(".cmp-course-accordion__title"):
+        txt = el.get_text(strip=True)
+        if re.search(
+            r"^(Semester|Trimester|Term|Summer|Winter|Spring|Autumn)\b",
+            txt,
+            re.I,
+        ):
+            if txt not in terms:
+                terms.append(txt)
+    for meta_tag in soup.find_all("meta"):
+        if (
+            meta_tag.get("property") == "term" or meta_tag.get("name") == "term"
+        ) and meta_tag.get("content"):
+            term_val = meta_tag.get("content").strip()
+            if term_val and term_val not in terms:
+                terms.append(term_val)
+    return terms
+
+
 def parse_course_document(html: str) -> dict:
     """Extract complete course metadata, syllabus, and class availability from raw HTML in a single pass."""
     if not html or not isinstance(html, str):
@@ -415,17 +444,8 @@ def parse_course_document(html: str) -> dict:
                             }
                         )
 
-    # 5. Terms from accordion titles
-    terms = []
-    for el in soup.select(".cmp-course-accordion__title"):
-        txt = el.get_text(strip=True)
-        if re.search(
-            r"^(Semester|Trimester|Term|Summer|Winter|Spring|Autumn)\b",
-            txt,
-            re.I,
-        ):
-            if txt not in terms:
-                terms.append(txt)
+    # 5. Terms from accordion titles and meta tags
+    terms = _extract_terms_from_soup(soup)
 
     # 6. Live class timetable
     classes = parse_course_class_list(html)
@@ -689,7 +709,13 @@ def get_course_class_list(
     """Return the class list of a course for a given course code."""
     if raw_html:
         parsed_classes = parse_course_class_list(raw_html)
-        return {"classes": parsed_classes, "is_valid_page": True}
+        soup = BeautifulSoup(raw_html, "html.parser") if raw_html else None
+        return {
+            "classes": parsed_classes,
+            "is_valid_page": True,
+            "html": raw_html,
+            "terms": _extract_terms_from_soup(soup),
+        }
 
     # Encode course code to match URL format
     code_str = course_code[0] if isinstance(course_code, (list, tuple)) else course_code
@@ -740,12 +766,15 @@ def get_course_class_list(
                                 )
                                 u_classes = parse_course_class_list(u_html)
                                 if u_classes:
+                                    u_soup = BeautifulSoup(u_html, "html.parser")
                                     return {
                                         "code": code_str,
                                         "title": u_data.get("h1") or "",
                                         "course_id": None,
                                         "classes": u_classes,
                                         "is_valid_page": True,
+                                        "html": u_html,
+                                        "terms": _extract_terms_from_soup(u_soup),
                                     }
                         except Exception as e:
                             logger.debug(
@@ -759,6 +788,8 @@ def get_course_class_list(
                         "course_id": None,
                         "classes": [],
                         "is_valid_page": True,
+                        "html": "",
+                        "terms": [],
                     }
                 # Transient failure — retry
                 logger.debug(
@@ -771,11 +802,17 @@ def get_course_class_list(
             # Use raw HTML for BeautifulSoup parsing
             text = data.get("html", "") or data.get("data", "")
             soup = BeautifulSoup(text, "html.parser") if text else None
+            page_terms = _extract_terms_from_soup(soup)
 
             # 1. Parse the plain-body text for class list details
             parsed_classes = parse_course_class_list(text)
             if parsed_classes:
-                return {"classes": parsed_classes, "is_valid_page": True}
+                return {
+                    "classes": parsed_classes,
+                    "is_valid_page": True,
+                    "html": text,
+                    "terms": page_terms,
+                }
 
             # Check if page has indicators of timetable availability
             has_timetable_marker = False
@@ -834,6 +871,8 @@ def get_course_class_list(
                     "course_id": None,
                     "classes": [],
                     "is_valid_page": True,
+                    "html": text,
+                    "terms": page_terms,
                 }
 
             # 3. Got a 200 but page is broken, malformed, or WAF-blocked — retry with alternate proxy
@@ -851,6 +890,8 @@ def get_course_class_list(
                 "course_id": None,
                 "classes": [],
                 "is_valid_page": False,
+                "html": "",
+                "terms": [],
             }
 
         except Exception as e:
@@ -868,6 +909,8 @@ def get_course_class_list(
         "course_id": None,
         "classes": [],
         "is_valid_page": False,
+        "html": "",
+        "terms": [],
     }
 
 

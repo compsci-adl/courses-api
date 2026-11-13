@@ -161,6 +161,54 @@ class TestDataFetcher(unittest.TestCase):
         self.assertEqual(data.get("h1"), "Proxy Content")
         DataFetcher._direct_blocked = False
 
+    def test_xml_endpoint_headers_and_validation(self):
+        """XML endpoints should use XML accept headers and validate closing XML tags."""
+        fetcher = DataFetcher("/sitemap.xml", use_class_url=True, use_proxy=False)
+        headers = fetcher._get_headers()
+        self.assertIn("application/xml", headers.get("Accept", ""))
+
+        # Truncated XML should be rejected
+        truncated_resp = MagicMock()
+        truncated_resp.status_code = 200
+        truncated_resp.text = "<urlset>" + (
+            "<url><loc>https://adelaide.edu.au</loc></url>" * 10
+        )
+        truncated_resp.headers = {"date": "Fri, 13 Nov 2026 00:00:00 GMT"}
+        self.assertIsNone(fetcher._process_response(truncated_resp))
+
+        # Complete XML should be accepted
+        valid_resp = MagicMock()
+        valid_resp.status_code = 200
+        valid_resp.text = (
+            "<urlset><url><loc>https://adelaide.edu.au</loc></url></urlset>"
+        )
+        valid_resp.headers = {"date": "Fri, 13 Nov 2026 00:00:00 GMT"}
+        processed = fetcher._process_response(valid_resp)
+        self.assertIsNotNone(processed)
+        self.assertIn("</urlset>", processed.get("html", ""))
+
+    @patch("data_fetcher.requests.get")
+    def test_proxy_406_not_marked_fatal(self, mock_get):
+        """HTTP 406 returned by proxy should not fatally remove the proxy from the pool."""
+        DataFetcher._proxies = ["9.9.9.9:80"]
+        DataFetcher._direct_blocked = True
+
+        not_acceptable_resp = MagicMock()
+        not_acceptable_resp.status_code = 406
+
+        success_resp = MagicMock()
+        success_resp.status_code = 200
+        success_resp.text = "<urlset><url><loc>test</loc></url></urlset>"
+        success_resp.headers = {"date": "Fri, 13 Nov 2026 00:00:00 GMT"}
+
+        mock_get.side_effect = [not_acceptable_resp, success_resp]
+
+        fetcher = DataFetcher("/sitemap.xml", use_class_url=True, use_proxy=True)
+        fetcher.get(max_retries=2)
+
+        self.assertIn("9.9.9.9:80", DataFetcher._proxies)
+        DataFetcher._direct_blocked = False
+
 
 if __name__ == "__main__":
     unittest.main()

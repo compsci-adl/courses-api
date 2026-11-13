@@ -4,7 +4,9 @@ import atexit
 import os
 import re
 import time
+import zlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from hashlib import shake_256
 from queue import Queue
 from threading import Lock, Thread
@@ -314,6 +316,16 @@ def _fetch_single_outline_candidate(outline_url: str) -> tuple[str, str] | None:
     return None
 
 
+def should_probe_empty_terms_course(
+    course_code: str, refresh_all: bool = False
+) -> bool:
+    """Determine whether to re-probe a course with empty terms for new timetable/term data."""
+    if refresh_all or os.environ.get("REFRESH_EMPTY_TERMS") in ("1", "true", "True"):
+        return True
+    yday = datetime.now(timezone.utc).timetuple().tm_yday
+    return (zlib.crc32(str(course_code).encode("utf-8")) % 5) == (yday % 5)
+
+
 def _extract_and_queue_classes(
     course_code,
     year: int,
@@ -323,6 +335,8 @@ def _extract_and_queue_classes(
     collected_meetings: list[dict] | None,
     lock: Lock,
     fetched_course_ids: set[str] | None = None,
+    courses_with_terms: set[str] | None = None,
+    courses_with_syllabus: set[str] | None = None,
 ) -> bool:
     """Harvest classes and meetings for a course and either append to batch lists or put to write_queue.
 
@@ -343,6 +357,102 @@ def _extract_and_queue_classes(
             f"Class list fetch for course {course_code} (year {year}) failed or was WAF-blocked."
         )
         return False
+
+    fetched_html = class_list.get("html") if isinstance(class_list, dict) else None
+    fetched_terms = class_list.get("terms") if isinstance(class_list, dict) else None
+
+    # Sync terms to DB if present on page
+    if fetched_terms:
+        terms_str = join_str_if_iterable(fetched_terms)
+        if terms_str:
+            write_queue.put(("update_course", {"id": course_cid, "terms": terms_str}))
+            if courses_with_terms is not None and lock:
+                with lock:
+                    courses_with_terms.add(course_cid)
+
+    # Sync missing syllabus/outlines/assessments if missing from DB and page HTML is available
+    if (
+        courses_with_syllabus is not None
+        and course_cid not in courses_with_syllabus
+        and fetched_html
+    ):
+        try:
+            doc_details = data_parser.parse_course_document(fetched_html)
+            if doc_details:
+                course_update = {"id": course_cid}
+                if doc_details.get("course_overview"):
+                    course_update["course_overview"] = doc_details.get(
+                        "course_overview"
+                    )
+                if (
+                    doc_details.get("prerequisites")
+                    and doc_details.get("prerequisites") != "N/A"
+                ):
+                    course_update["prerequisites"] = doc_details.get("prerequisites")
+                if (
+                    doc_details.get("corequisites")
+                    and doc_details.get("corequisites") != "N/A"
+                ):
+                    course_update["corequisites"] = doc_details.get("corequisites")
+                if (
+                    doc_details.get("antirequisites")
+                    and doc_details.get("antirequisites") != "N/A"
+                ):
+                    course_update["antirequisites"] = doc_details.get("antirequisites")
+                if doc_details.get("textbooks"):
+                    course_update["textbooks"] = doc_details.get("textbooks")
+                if len(course_update) > 1:
+                    write_queue.put(("update_course", course_update))
+
+                page_outcomes = doc_details.get("learning_outcomes", [])
+                page_assessments = doc_details.get("assessments", [])
+                for index, lo_item in enumerate(page_outcomes, start=1):
+                    lo_text = (
+                        lo_item.get("description", "")
+                        if isinstance(lo_item, dict)
+                        else str(lo_item)
+                    )
+                    lo_id = get_short_hash(f"{course_cid}lo{lo_text}")
+                    db_lo = LearningOutcome(
+                        id=lo_id,
+                        year=year,
+                        course_id=course_cid,
+                        description=lo_text,
+                        outcome_index=index,
+                    )
+                    write_queue.put(db_lo)
+
+                for assess in page_assessments:
+                    assess_title = (
+                        assess.get("title") if isinstance(assess, dict) else str(assess)
+                    )
+                    assess_id = get_short_hash(f"{course_cid}assess{assess_title}")
+                    db_assess = Assessment(
+                        id=assess_id,
+                        year=year,
+                        course_id=course_cid,
+                        title=assess_title,
+                        weighting=(
+                            assess.get("weighting")
+                            if isinstance(assess, dict)
+                            else None
+                        ),
+                        hurdle=(
+                            assess.get("hurdle") if isinstance(assess, dict) else None
+                        ),
+                        learning_outcomes=(
+                            assess.get("learning_outcomes")
+                            if isinstance(assess, dict)
+                            else None
+                        ),
+                    )
+                    write_queue.put(db_assess)
+
+                if lock:
+                    with lock:
+                        courses_with_syllabus.add(course_cid)
+        except Exception as e:
+            logger.debug(f"Error parsing syllabus for course {course_code}: {e}")
 
     if not class_items:
         logger.debug(f"Course {course_code} (year {year}) has no scheduled classes.")
@@ -440,6 +550,7 @@ def process_course(
     fetched_course_ids: set[str] | None = None,
     courses_with_syllabus: set[str] | None = None,
     courses_with_terms: set[str] | None = None,
+    refresh_empty_terms: bool = False,
 ):
     """Process a single course and insert/upsert data into the database directly.
 
@@ -597,12 +708,16 @@ def process_course(
             # Harvest classes if scrape_classes is enabled
             if scrape_classes:
                 page_html = course_details.get("html") if course_details else None
-                # If course explicitly has no terms in DB and bulk list, skip timetable fetch
+                # If course explicitly has no terms in DB and bulk list, check whether to probe it
                 has_no_terms = (
                     courses_with_terms is not None
                     and course_cid not in courses_with_terms
                     and not effective_terms
                 )
+                should_probe = should_probe_empty_terms_course(
+                    code_str, refresh_empty_terms
+                )
+
                 if page_html:
                     # Harvest directly from page HTML (0 extra network calls!)
                     _extract_and_queue_classes(
@@ -614,9 +729,11 @@ def process_course(
                         collected_meetings=collected_meetings,
                         lock=lock,
                         fetched_course_ids=fetched_course_ids,
+                        courses_with_terms=courses_with_terms,
+                        courses_with_syllabus=courses_with_syllabus,
                     )
-                elif not has_no_terms:
-                    # Course has a term listed or terms unknown -> MUST attempt fetching classes!
+                elif not has_no_terms or should_probe:
+                    # Course has a term listed, or terms unknown, or selected by rolling 20%/refresh probe -> MUST attempt fetching classes!
                     _extract_and_queue_classes(
                         code_str,
                         year,
@@ -626,11 +743,13 @@ def process_course(
                         collected_meetings=collected_meetings,
                         lock=lock,
                         fetched_course_ids=fetched_course_ids,
+                        courses_with_terms=courses_with_terms,
+                        courses_with_syllabus=courses_with_syllabus,
                     )
                 else:
-                    # Course has no scheduled terms anywhere -> skip network fetch and mark 0 classes
+                    # Course has no scheduled terms anywhere and not in today's probe slice -> skip network fetch and mark 0 classes
                     logger.debug(
-                        f"Course {code_str} ({year}) has no scheduled terms; skipping class timetable fetch."
+                        f"Course {code_str} ({year}) has no scheduled terms and not in today's probe slice; skipping class timetable fetch."
                     )
                     if fetched_course_ids is not None:
                         with lock:
@@ -949,6 +1068,8 @@ def process_course(
                 collected_meetings=collected_meetings,
                 lock=lock,
                 fetched_course_ids=fetched_course_ids,
+                courses_with_terms=courses_with_terms,
+                courses_with_syllabus=courses_with_syllabus,
             )
 
         progress.update(subject_task, advance=1)
@@ -975,6 +1096,7 @@ def process_subject(
     fetched_course_ids: set[str] | None = None,
     courses_with_syllabus: set[str] | None = None,
     courses_with_terms: set[str] | None = None,
+    refresh_empty_terms: bool = False,
 ):
     """Process a single subject and insert data into the database."""
     try:
@@ -1047,6 +1169,7 @@ def process_subject(
                     fetched_course_ids,
                     courses_with_syllabus,
                     courses_with_terms,
+                    refresh_empty_terms,
                 )
                 futures.append(future)
 
@@ -1070,6 +1193,7 @@ def scrape_single_year(
     is_active: bool,
     existing_hashes: dict[tuple[str, int], str] | None = None,
     scrape_classes_override: bool | None = None,
+    refresh_empty_terms: bool = False,
 ):
     """Scrape data directly into SQLite for a given academic year.
 
@@ -1191,6 +1315,7 @@ def scrape_single_year(
                             else None,
                             courses_with_syllabus=courses_with_syllabus,
                             courses_with_terms=courses_with_terms,
+                            refresh_empty_terms=refresh_empty_terms,
                         )
                         futures.append(future)
 
@@ -1273,6 +1398,7 @@ async def run_pipeline(
     force_all_years: bool = False,
     db_path: str = "src/dev.sqlite3",
     active_year: int | None = None,
+    refresh_empty_terms: bool = False,
 ):
     """Orchestrates dynamic discovery, probe, selective direct-to-DB scraping, and direct S3 sync."""
     # Register an atexit hook to ensure SQLite WAL is cleanly flushed even on abrupt process exits
@@ -1378,6 +1504,7 @@ async def run_pipeline(
                     engine,
                     is_active=True,
                     existing_hashes=existing_hashes,
+                    refresh_empty_terms=refresh_empty_terms,
                 )
             else:
                 tag = "historical" if yr < active_year else "future"
@@ -1389,6 +1516,7 @@ async def run_pipeline(
                     engine,
                     is_active=False,
                     existing_hashes=existing_hashes,
+                    refresh_empty_terms=refresh_empty_terms,
                 )
 
     except (KeyboardInterrupt, asyncio.CancelledError):
@@ -1433,6 +1561,11 @@ def main():
         help="Path to SQLite database file",
     )
     parser.add_argument(
+        "--refresh-empty-terms",
+        action="store_true",
+        help="Force probe all active-year courses with empty terms in DB",
+    )
+    parser.add_argument(
         "--course-workers",
         type=int,
         default=None,
@@ -1456,6 +1589,7 @@ def main():
             force_all_years=args.force_all_years,
             db_path=args.db_path,
             active_year=args.active_year,
+            refresh_empty_terms=args.refresh_empty_terms,
         )
     )
 
