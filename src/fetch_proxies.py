@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import requests as std_requests
 from curl_cffi import requests as cffi_requests
 from curl_cffi.requests.exceptions import RequestException
 from rich.progress import (
@@ -12,7 +13,6 @@ from rich.progress import (
 
 def fetch_proxies(url):
     """Fetch the list of proxies from the URL."""
-    import requests as std_requests
 
     response = std_requests.get(url, timeout=15)
     if response.status_code == 200:
