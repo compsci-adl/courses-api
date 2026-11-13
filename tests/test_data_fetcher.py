@@ -3,6 +3,8 @@ import sys
 import unittest
 from unittest.mock import MagicMock, patch
 
+from curl_cffi import requests
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from data_fetcher import DataFetcher
@@ -207,6 +209,167 @@ class TestDataFetcher(unittest.TestCase):
         fetcher.get(max_retries=2)
 
         self.assertIn("9.9.9.9:80", DataFetcher._proxies)
+        DataFetcher._direct_blocked = False
+
+    @patch("data_fetcher.requests.get")
+    def test_timeout_tuples_and_escalation_on_partial_download(self, mock_get):
+        """DataFetcher passes (connect, read) timeouts and escalates read timeout on partial download."""
+        DataFetcher._direct_blocked = False
+
+        # Attempt 1 direct: partial timeout with 5000 bytes
+        partial_err = requests.exceptions.Timeout(
+            "curl: (28) Operation timed out after 8000 milliseconds with 5000 bytes received"
+        )
+        # Attempt 2 direct: succeeds
+        success_resp = MagicMock()
+        success_resp.status_code = 200
+        success_resp.text = "<html><body><h1>Direct Recovered</h1></html>"
+        success_resp.content = success_resp.text.encode("utf-8")
+        success_resp.headers = {"date": "Fri, 13 Nov 2026 00:00:00 GMT"}
+
+        mock_get.side_effect = [partial_err, success_resp]
+
+        fetcher = DataFetcher(
+            "/study/courses/2027/test-1001/", use_class_url=True, use_proxy=False
+        )
+        data = fetcher.get()
+
+        self.assertEqual(data.get("h1"), "Direct Recovered")
+        self.assertEqual(mock_get.call_count, 2)
+        # Attempt 1 timeout: default (5.0, 20.0)
+        first_call_timeout = mock_get.call_args_list[0][1]["timeout"]
+        self.assertEqual(first_call_timeout, (5.0, 20.0))
+        # Attempt 2 timeout: escalated (5.0, 30.0)
+        second_call_timeout = mock_get.call_args_list[1][1]["timeout"]
+        self.assertEqual(second_call_timeout, (5.0, 30.0))
+
+        # Test proxy timeout escalation: (6.0, 18.0) -> (6.0, 27.0)
+        DataFetcher._direct_blocked = True
+        DataFetcher._proxies = ["8.8.8.8:80", "8.8.8.9:80"]
+        mock_get.reset_mock()
+        mock_get.side_effect = [
+            requests.exceptions.Timeout(
+                "curl: (28) Operation timed out after 6000 ms with 1234 bytes received"
+            ),
+            success_resp,
+        ]
+        fetcher_proxy = DataFetcher(
+            "/study/courses/2027/test-proxy/", use_class_url=True, use_proxy=True
+        )
+        fetcher_proxy.get(max_retries=2)
+
+        self.assertEqual(mock_get.call_count, 2)
+        proxy_first_timeout = mock_get.call_args_list[0][1]["timeout"]
+        proxy_second_timeout = mock_get.call_args_list[1][1]["timeout"]
+        self.assertEqual(proxy_first_timeout, (6.0, 18.0))
+        self.assertEqual(proxy_second_timeout, (6.0, 27.0))
+        DataFetcher._direct_blocked = False
+
+    @patch("data_fetcher.requests.get")
+    def test_midstream_timeout_fatal_false_and_resets_and_evicts_after_3(
+        self, mock_get
+    ):
+        """curl: (28) with >0 bytes received increments failure without removing proxy, resets on 200, evicts at 3."""
+        DataFetcher._proxies = ["5.5.5.5:80"]
+        DataFetcher._proxy_failures = {}
+        DataFetcher._direct_blocked = True
+
+        partial_err = requests.exceptions.Timeout(
+            "curl: (28) Operation timed out after 6094 milliseconds with 115368 bytes received"
+        )
+
+        # 1st failure: proxy must NOT be evicted
+        mock_get.side_effect = [partial_err]
+        fetcher = DataFetcher(
+            "/study/courses/2027/test-1001/", use_class_url=True, use_proxy=True
+        )
+        fetcher.get(max_retries=1)
+
+        self.assertIn("5.5.5.5:80", DataFetcher._proxies)
+        self.assertEqual(DataFetcher._proxy_failures.get("5.5.5.5:80"), 1)
+
+        # Success on 200: failures must reset
+        success_resp = MagicMock()
+        success_resp.status_code = 200
+        success_resp.text = "<html><body><h1>Proxy 200</h1></html>"
+        success_resp.content = success_resp.text.encode("utf-8")
+        success_resp.headers = {"date": "Fri, 13 Nov 2026 00:00:00 GMT"}
+        mock_get.side_effect = [success_resp]
+
+        fetcher2 = DataFetcher(
+            "/study/courses/2027/test-1002/", use_class_url=True, use_proxy=True
+        )
+        data = fetcher2.get(max_retries=1)
+        self.assertEqual(data.get("h1"), "Proxy 200")
+        self.assertNotIn("5.5.5.5:80", DataFetcher._proxy_failures)
+
+        # 3 consecutive partial failures: must only evict after 3 failures
+        fetcher3 = DataFetcher(
+            "/study/courses/2027/test-1003/", use_class_url=True, use_proxy=True
+        )
+        proxy_dict = {"http": "http://5.5.5.5:80", "https": "http://5.5.5.5:80"}
+
+        # Attempt 1
+        fetcher3.report_proxy_failure(proxy_dict, fatal=False)
+        self.assertIn("5.5.5.5:80", DataFetcher._proxies)
+        self.assertEqual(DataFetcher._proxy_failures.get("5.5.5.5:80"), 1)
+
+        # Attempt 2
+        fetcher3.report_proxy_failure(proxy_dict, fatal=False)
+        self.assertIn("5.5.5.5:80", DataFetcher._proxies)
+        self.assertEqual(DataFetcher._proxy_failures.get("5.5.5.5:80"), 2)
+
+        # Attempt 3: threshold reached -> eviction
+        fetcher3.report_proxy_failure(proxy_dict, fatal=False)
+        self.assertNotIn("5.5.5.5:80", DataFetcher._proxies)
+        DataFetcher._direct_blocked = False
+
+    @patch("data_fetcher.requests.get")
+    def test_connection_errors_and_zero_bytes_fatal_true(self, mock_get):
+        """curl: (7), curl: (56), 0 bytes timeout, and 403 immediately remove proxy with fatal=True."""
+        DataFetcher._direct_blocked = True
+
+        test_cases = [
+            requests.exceptions.RequestException(
+                "curl: (7) Failed to connect to proxy"
+            ),
+            requests.exceptions.RequestException(
+                "curl: (56) Recv failure: Connection reset by peer"
+            ),
+            requests.exceptions.Timeout(
+                "curl: (28) Operation timed out with 0 bytes received"
+            ),
+        ]
+
+        for err in test_cases:
+            proxy_str = "6.6.6.6:80"
+            DataFetcher._proxies = [proxy_str]
+            DataFetcher._proxy_failures = {}
+
+            mock_get.side_effect = [err]
+            fetcher = DataFetcher(
+                "/study/courses/2027/test-err/", use_class_url=True, use_proxy=True
+            )
+            fetcher.get(max_retries=1)
+
+            self.assertNotIn(proxy_str, DataFetcher._proxies)
+
+        # Test HTTP 403 and 407 status codes
+        for status in (403, 407):
+            proxy_str = "7.7.7.7:80"
+            DataFetcher._proxies = [proxy_str]
+            DataFetcher._proxy_failures = {}
+
+            resp = MagicMock()
+            resp.status_code = status
+            mock_get.side_effect = [resp]
+            fetcher = DataFetcher(
+                "/study/courses/2027/test-status/", use_class_url=True, use_proxy=True
+            )
+            fetcher.get(max_retries=1)
+
+            self.assertNotIn(proxy_str, DataFetcher._proxies)
+
         DataFetcher._direct_blocked = False
 
 

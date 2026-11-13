@@ -37,7 +37,7 @@ class DataFetcher:
     BASE_INFO_URL = "https://adelaide.edu.au"
     PROXY_FILE = "src/working_proxies.txt"
 
-    MAX_PROXY_FAILURES = 5
+    MAX_PROXY_FAILURES = 3
     _proxies = None
     _proxy_failures = {}
     _proxy_lock = threading.Lock()
@@ -192,6 +192,18 @@ class DataFetcher:
         endpoint_part = (self.endpoint or "").lower().split("?")[0]
         return url_part.endswith(".xml") or endpoint_part.endswith(".xml")
 
+    @staticmethod
+    def _parse_bytes_received(error: Any) -> int:
+        """Extract bytes received from curl error message if present (e.g. curl: (28))."""
+        msg = str(error)
+        match = re.search(r"with\s+(\d+)\s+bytes\s+received", msg, re.IGNORECASE)
+        if match:
+            try:
+                return int(match.group(1))
+            except (ValueError, TypeError):
+                pass
+        return 0
+
     def _process_response(self, response):
         """Process and store a successful response based on endpoint type."""
         self.last_response = response
@@ -326,7 +338,7 @@ class DataFetcher:
         self,
         url: str,
         headers: dict,
-        timeout: float,
+        timeout: float | tuple[float, float],
         proxy: dict | None = None,
     ):
         """Execute HTTP GET using persistent Session pooling, falling back to requests.get if mocked."""
@@ -366,7 +378,13 @@ class DataFetcher:
 
         # Direct Connection First (with retries and 3s backoff before proxy fallback)
         is_ci = bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))
-        base_timeout = max(self.timeout, 8.0) if is_ci else max(self.timeout, 5.0)
+        direct_connect = float(
+            os.environ.get("DIRECT_CONNECT_TIMEOUT", "8.0" if is_ci else "5.0")
+        )
+        direct_read_base = float(
+            os.environ.get("DIRECT_READ_TIMEOUT", str(max(self.timeout, 20.0)))
+        )
+        direct_read = direct_read_base
 
         can_try_direct = (
             self._is_xml_request()
@@ -397,14 +415,18 @@ class DataFetcher:
                 )
                 try:
                     logger.debug(
-                        "Attempting direct connection for %s (attempt %d/%d)...",
+                        "Attempting direct connection for %s (attempt %d/%d, timeout=(%.1f, %.1f))...",
                         self._sanitise_for_log(self.endpoint),
                         direct_attempt + 1,
                         max_direct_attempts,
+                        direct_connect,
+                        direct_read,
                     )
                     with sem_ctx:
                         direct_resp = self._execute_http_get(
-                            self.url, headers=headers, timeout=base_timeout
+                            self.url,
+                            headers=headers,
+                            timeout=(direct_connect, direct_read),
                         )
                     self.last_response = direct_resp
                     if direct_resp.status_code in (200, 304):
@@ -439,6 +461,20 @@ class DataFetcher:
                             max_direct_attempts,
                         )
                 except Exception as e:
+                    err_msg = str(e)
+                    bytes_rcvd = self._parse_bytes_received(err_msg)
+                    is_timeout = (
+                        isinstance(e, requests.exceptions.Timeout)
+                        or "curl: (28)" in err_msg
+                        or "timed out" in err_msg.lower()
+                    )
+                    if is_timeout and bytes_rcvd > 0:
+                        direct_read = direct_read_base * 1.5
+                        logger.debug(
+                            "Direct connection timed out mid-transfer (%d bytes received). Escalating direct read timeout to %.1fs.",
+                            bytes_rcvd,
+                            direct_read,
+                        )
                     logger.debug(
                         "Direct connection attempt %d/%d failed (%s).",
                         direct_attempt + 1,
@@ -455,20 +491,34 @@ class DataFetcher:
 
         # Smart Proxy Fallback with generous timeout and priority queue of working proxies
         retries = 0
-        is_ci = bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))
-        proxy_timeout = min(max(self.timeout, 6.0), 12.0)
+        proxy_connect = float(os.environ.get("PROXY_CONNECT_TIMEOUT", "6.0"))
+        proxy_read_base = float(
+            os.environ.get("PROXY_READ_TIMEOUT", str(max(self.timeout, 18.0)))
+        )
+        had_partial_timeout = False
+
         with DataFetcher._proxy_lock:
             pool_size = len(DataFetcher._proxies or [])
         # On CI use more retries since direct connection is always blocked
-        ci_min = 25 if is_ci else 15
-        max_retries = max(min(max_retries, pool_size), ci_min)
+        if max_retries > 1:
+            ci_min = 25 if is_ci else 15
+            effective_max_retries = max(min(max_retries, pool_size), ci_min)
+        else:
+            effective_max_retries = max_retries
 
-        while retries < max_retries:
+        while retries < effective_max_retries:
+            current_proxy_read = (
+                proxy_read_base * 1.5 if had_partial_timeout else proxy_read_base
+            )
+            proxy_timeout = (proxy_connect, current_proxy_read)
+
             # Re-attempt direct connection after 2 proxy failures only if not blocked by WAF
             if retries == 2 and not DataFetcher.is_direct_blocked():
                 try:
                     direct_resp = self._execute_http_get(
-                        self.url, headers=headers, timeout=base_timeout
+                        self.url,
+                        headers=headers,
+                        timeout=(direct_connect, direct_read),
                     )
                     self.last_response = direct_resp
                     if direct_resp.status_code in (200, 304):
@@ -485,7 +535,12 @@ class DataFetcher:
                 continue
 
             try:
-                logger.debug("Using proxy: %s", self._sanitise_for_log(proxy))
+                logger.debug(
+                    "Using proxy: %s (timeout=(%.1f, %.1f))",
+                    self._sanitise_for_log(proxy),
+                    proxy_connect,
+                    current_proxy_read,
+                )
                 response = self._execute_http_get(
                     self.url, headers=headers, timeout=proxy_timeout, proxy=proxy
                 )
@@ -502,8 +557,12 @@ class DataFetcher:
                     logger.warning("HTTP 404 - Not Found: %s", self.url)
                     return {}
 
-                if response.status_code == 403:
-                    logger.warning("HTTP 403 - Forbidden for proxy: %s", proxy)
+                if response.status_code in (403, 407):
+                    logger.warning(
+                        "HTTP %s - Forbidden/Auth Required for proxy: %s",
+                        response.status_code,
+                        proxy,
+                    )
                     self.report_proxy_failure(proxy, fatal=True)
                     retries += 1
                     continue
@@ -534,26 +593,56 @@ class DataFetcher:
                 requests.exceptions.ProxyError,
                 requests.exceptions.RequestException,
             ) as e:
-                logger.debug(
-                    "Proxy error/timeout (%s): %s",
-                    self._sanitise_for_log(e),
-                    self._sanitise_for_log(proxy),
+                err_msg = str(e)
+                bytes_rcvd = self._parse_bytes_received(err_msg)
+                is_timeout = (
+                    isinstance(e, requests.exceptions.Timeout)
+                    or "curl: (28)" in err_msg
+                    or "timed out" in err_msg.lower()
                 )
-                self.report_proxy_failure(proxy, fatal=True)
+                if is_timeout and bytes_rcvd > 0:
+                    had_partial_timeout = True
+                    logger.debug(
+                        "Proxy %s timed out mid-transfer (%d bytes received). Retrying with fatal=False (timeout escalation to %.1fs).",
+                        self._sanitise_for_log(proxy),
+                        bytes_rcvd,
+                        proxy_read_base * 1.5,
+                    )
+                    self.report_proxy_failure(proxy, fatal=False)
+                else:
+                    logger.debug(
+                        "Proxy error/timeout (%s): %s",
+                        self._sanitise_for_log(e),
+                        self._sanitise_for_log(proxy),
+                    )
+                    self.report_proxy_failure(proxy, fatal=True)
                 retries += 1
             except Exception as e:
-                logger.debug(
-                    "Unexpected error on proxy (%s): %s",
-                    self._sanitise_for_log(e),
-                    self._sanitise_for_log(proxy),
-                )
-                self.report_proxy_failure(proxy, fatal=True)
+                err_msg = str(e)
+                bytes_rcvd = self._parse_bytes_received(err_msg)
+                is_timeout = "curl: (28)" in err_msg or "timed out" in err_msg.lower()
+                if is_timeout and bytes_rcvd > 0:
+                    had_partial_timeout = True
+                    logger.debug(
+                        "Proxy %s timed out mid-transfer (%d bytes received). Retrying with fatal=False (timeout escalation to %.1fs).",
+                        self._sanitise_for_log(proxy),
+                        bytes_rcvd,
+                        proxy_read_base * 1.5,
+                    )
+                    self.report_proxy_failure(proxy, fatal=False)
+                else:
+                    logger.debug(
+                        "Unexpected error on proxy (%s): %s",
+                        self._sanitise_for_log(e),
+                        self._sanitise_for_log(proxy),
+                    )
+                    self.report_proxy_failure(proxy, fatal=True)
                 retries += 1
 
         logger.error(
             "Failed to fetch data from %s after %s attempts.",
             self.url,
-            max_retries,
+            effective_max_retries,
         )
         return {}
 
